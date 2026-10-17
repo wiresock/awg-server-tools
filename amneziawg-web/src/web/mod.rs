@@ -1431,6 +1431,7 @@ fn build_router(
     let inner = Router::new()
         // Public routes (no auth required)
         .route("/api/health", get(health))
+        .route("/static/panel.css", get(panel_css))
         .route("/login", get(page_login).post(post_login))
         .route("/logout", post(post_logout))
         // Protected routes
@@ -4345,18 +4346,17 @@ fn fmt_last_handshake(ts: DateTime<Utc>, now: DateTime<Utc>) -> String {
     format!("{} - {}", fmt_time_ago(ts, now), fmt_local_timestamp(ts))
 }
 
-fn render_system_status(status: &SystemStatusDto, peers: usize, online: usize) -> String {
+fn render_system_status(status: &SystemStatusDto, online: usize) -> String {
     let uptime = status
         .system_uptime_seconds
         .map(fmt_duration_hms)
         .unwrap_or_else(|| "unknown".to_string());
     let booted_at = fmt_optional_local_timestamp(status.system_booted_at, "unknown");
     format!(
-        r#"<section class="spec-strip system-status" aria-label="System status">
+        r#"<section class="spec-strip" aria-label="System status">
   <div class="spec"><span class="spec-label">System uptime:</span> <span class="spec-value">{uptime}</span></div>
   <div class="spec"><span class="spec-label">System boot time:</span> <span class="spec-value">{booted_at}</span></div>
-  <div class="spec"><span class="spec-label">Online</span> <span class="spec-value">{online}</span></div>
-  <div class="spec"><span class="spec-label">Peers</span> <span class="spec-value">{peers}</span></div>
+  <div class="spec"><span class="spec-label">Online:</span> <span class="spec-value">{online}</span></div>
   <p class="meta">{note}</p>
 </section>
 "#,
@@ -4472,11 +4472,28 @@ fn render_proxy_sessions(base: &str, status: &ProxySessionsDto) -> String {
     buf
 }
 
-fn html_head(title: &str) -> String {
+const PANEL_CSS: &str = include_str!("panel.css");
+
+/// `GET /static/panel.css` – the shared stylesheet. Page links carry the panel
+/// version, so a release invalidates the long-lived cache entry.
+async fn panel_css() -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable",
+            ),
+        ],
+        PANEL_CSS,
+    )
+}
+
+fn html_head(title: &str, base: &str) -> String {
     format!(
-        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n<style>\n{css}\n</style>\n</head>\n<body>\n",
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n<link rel=\"stylesheet\" href=\"{base}/static/panel.css?v={version}\">\n</head>\n<body>\n",
         title = esc(title),
-        css = include_str!("panel.css"),
+        version = env!("CARGO_PKG_VERSION"),
     )
 }
 
@@ -4541,7 +4558,7 @@ fn render_login_page_with_msg(base: &str, msg: &str, csrf_token: &str) -> String
 }
 
 fn render_login_page_inner(base: &str, error_html: &str, csrf_token: &str) -> String {
-    let mut buf = html_head("AmneziaWG – Login");
+    let mut buf = html_head("AmneziaWG – Login", base);
     buf.push_str(&format!(
         r#"<main class="login-screen">
 <div class="login-card edit-form">
@@ -4762,7 +4779,7 @@ fn render_peer_list_inner(
     monitoring_only: Option<&str>,
     base: &str,
 ) -> String {
-    let mut buf = html_head("AmneziaWG – Peers");
+    let mut buf = html_head("AmneziaWG – Peers", base);
     let now = Utc::now();
     let online = peers
         .iter()
@@ -4796,7 +4813,7 @@ fn render_peer_list_inner(
 "#,
         count = peers.len(),
     ));
-    buf.push_str(&render_system_status(system_status, peers.len(), online));
+    buf.push_str(&render_system_status(system_status, online));
     if let Some(message) = notice.message {
         buf.push_str(&format!(
             "<p class=\"creation-warning\" role=\"status\">{}</p>\n",
@@ -4867,14 +4884,13 @@ fn render_peer_list_inner(
                 .map(esc)
                 .unwrap_or_else(|| "–".to_string());
             let expiration = render_expiration_cell(&p.expiration_status, p.expires_at, p.expired);
-            let row_class = match p.connection_status {
-                ConnectionStatus::Online => "is-online",
-                ConnectionStatus::Disabled => "is-disabled",
-                ConnectionStatus::Inactive => "is-inactive",
-                ConnectionStatus::Never => "is-never",
+            let row_class = if p.connection_status == ConnectionStatus::Online {
+                " class=\"is-online\""
+            } else {
+                ""
             };
             buf.push_str(&format!(
-                "<tr class=\"{row_class}\"><td data-label=\"Name\">{name_link}</td>\
+                "<tr{row_class}><td data-label=\"Name\">{name_link}</td>\
                  <td data-label=\"Connection\">{conn}</td><td data-label=\"Identity\">{ident}</td>\
                  <td data-label=\"Endpoint\">{endpoint}</td>\
                  <td class=\"comment-cell\" data-label=\"Comment\">{comment}</td>\
@@ -4993,7 +5009,7 @@ fn render_archived_peer_detail(
     events: &[crate::db::events::EventRow],
     base: &str,
 ) -> String {
-    let mut buf = html_head("Archived disabled key");
+    let mut buf = html_head("Archived disabled key", base);
     buf.push_str(&nav_bar(base, csrf_token));
     buf.push_str(&format!(
         "<a class=\"back\" href=\"{base}/?show_archived=true\">&larr; All peers</a>\n\
@@ -5035,7 +5051,7 @@ fn render_archived_peer_detail(
         buf.push_str("<p>No recorded activity.</p>\n");
     } else {
         buf.push_str(
-            "<table>\n\
+            "<div class=\"table-scroll\"><table>\n\
              <tr><th>When</th><th>Event</th><th>Actor</th></tr>\n",
         );
         for event in events {
@@ -5046,7 +5062,7 @@ fn render_archived_peer_detail(
                 esc(&event.actor),
             ));
         }
-        buf.push_str("</table>\n");
+        buf.push_str("</table></div>\n");
     }
     buf.push_str("</body></html>");
     buf
@@ -5081,7 +5097,7 @@ fn render_peer_detail_inner(
     monitoring_only: Option<&str>,
     base: &str,
 ) -> String {
-    let mut buf = html_head(&format!("Peer – {}", dto.name));
+    let mut buf = html_head(&format!("Peer – {}", dto.name), base);
     let now = Utc::now();
     buf.push_str(&nav_bar(base, csrf_token));
     if let Some(err) = error {
@@ -5115,14 +5131,6 @@ fn render_peer_detail_inner(
     buf.push_str(&format!(
         "<tr><th>Public key</th><td><code>{}</code></td></tr>\n",
         esc(&dto.public_key)
-    ));
-    buf.push_str(&format!(
-        "<tr><th>Connection</th><td>{}</td></tr>\n",
-        connection_badge(&dto.connection_status)
-    ));
-    buf.push_str(&format!(
-        "<tr><th>Identity</th><td>{}</td></tr>\n",
-        identity_badge(&dto.identity_status)
     ));
     if dto.endpoint.is_some() {
         buf.push_str(&format!(
@@ -5294,7 +5302,7 @@ Historical data (snapshots, events) will be preserved.</p>
         "<p class=\"meta\">Aggregated bandwidth consumed per period (counter-reset safe).</p>\n",
     );
     buf.push_str(
-        "<table>\n\
+        "<div class=\"table-scroll\"><table>\n\
          <tr><th>Period</th><th class=\"num\">RX</th><th class=\"num\">TX</th><th>JSON</th></tr>\n",
     );
     for (label, param) in &[("Day", "day"), ("Week", "week"), ("Month", "month")] {
@@ -5306,7 +5314,7 @@ Historical data (snapshots, events) will be preserved.</p>
             id = dto.id,
         ));
     }
-    buf.push_str("</table>\n");
+    buf.push_str("</table></div>\n");
     // Inline script to load usage data asynchronously (single fetch).
     buf.push_str(&format!(
         r#"<script>
@@ -5353,7 +5361,7 @@ Historical data (snapshots, events) will be preserved.</p>
         buf.push_str("<p>No snapshots recorded yet.</p>\n");
     } else {
         buf.push_str(
-            "<table>\n\
+            "<div class=\"table-scroll\"><table>\n\
              <tr><th>Captured at</th><th class=\"num\">RX</th><th class=\"num\">TX</th><th>Endpoint</th></tr>\n",
         );
         for s in &dto.recent_snapshots {
@@ -5370,7 +5378,7 @@ Historical data (snapshots, events) will be preserved.</p>
                 ep,
             ));
         }
-        buf.push_str("</table>\n");
+        buf.push_str("</table></div>\n");
     }
 
     buf.push_str(&format!(
@@ -5384,7 +5392,7 @@ Historical data (snapshots, events) will be preserved.</p>
         buf.push_str("<p>No recorded activity yet.</p>\n");
     } else {
         buf.push_str(
-            "<table>\n\
+            "<div class=\"table-scroll\"><table>\n\
              <tr><th>When</th><th>Event</th><th>Actor</th><th>Detail</th></tr>\n",
         );
         for ev in events {
@@ -5401,7 +5409,7 @@ Historical data (snapshots, events) will be preserved.</p>
                 detail_cell,
             ));
         }
-        buf.push_str("</table>\n");
+        buf.push_str("</table></div>\n");
     }
 
     // QR code modal overlay (only when config exists)
@@ -9541,10 +9549,46 @@ mod tests {
 
     #[test]
     fn protocol_panel_styling_separates_adjacent_visible_sections() {
-        let head = html_head("AmneziaWG – Peers");
-        assert!(head.contains(
+        assert!(PANEL_CSS.contains(
             ".protocol-panel section:not([hidden]) ~ section:not([hidden]) { margin-top: 1.5rem; }"
         ));
+    }
+
+    #[test]
+    fn html_head_links_versioned_stylesheet_under_base() {
+        let head = html_head("AmneziaWG – Peers", "/vpn");
+        assert!(head.contains(&format!(
+            "<link rel=\"stylesheet\" href=\"/vpn/static/panel.css?v={}\">",
+            env!("CARGO_PKG_VERSION")
+        )));
+        assert!(!head.contains("<style>"));
+    }
+
+    #[tokio::test]
+    async fn panel_css_is_public_and_cacheable() {
+        let app = test_router(test_db().await);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/static/panel.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/css; charset=utf-8"
+        );
+        assert!(response.headers()["cache-control"]
+            .to_str()
+            .unwrap()
+            .contains("max-age=31536000"));
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(std::str::from_utf8(&body).unwrap(), PANEL_CSS);
     }
 
     #[tokio::test]
