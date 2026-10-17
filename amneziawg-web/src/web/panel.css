@@ -184,23 +184,22 @@ button.btn-danger:hover { background: rgba(248, 113, 113, .1); }
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1.25rem;
   align-items: start;
 }
-.workspace-solo { grid-template-columns: minmax(0, 1fr); }
 .workspace-main,
 .table-scroll,
 .server-tools,
 .detail-layout > * { min-width: 0; }
 .server-tools {
-  position: sticky;
-  top: 7.5rem;
-  max-height: calc(100vh - 8.5rem);
-  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .75rem;
 }
 .server-tools h2 {
-  margin: 0 0 .75rem;
+  grid-column: 1 / -1;
+  margin: 0;
   color: var(--text-dim);
   font-size: 11px;
   font-weight: 650;
@@ -208,12 +207,12 @@ button.btn-danger:hover { background: rgba(248, 113, 113, .1); }
   text-transform: uppercase;
 }
 .server-tools .edit-form { max-width: none; margin-top: 0; }
-.server-tools .edit-form ~ .edit-form { margin-top: .75rem; }
 
 .table-scroll { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; }
-.peer-table,
-.proxy-session-table { width: max-content; min-width: 100%; }
+.peer-table td,
+.proxy-session-table td { overflow-wrap: anywhere; }
+.peer-table .status { max-width: 100%; white-space: normal; overflow-wrap: normal; }
 th, td {
   padding: .55rem .7rem;
   border-bottom: 1px solid var(--border);
@@ -444,19 +443,14 @@ fieldset { margin: 0; padding: 0; border: 0; }
 .proxy-session-table { margin-bottom: 1rem; }
 
 @media (max-width: 960px) {
-  .workspace, .detail-layout { grid-template-columns: minmax(0, 1fr); }
-  .server-tools { position: static; max-height: none; overflow: visible; }
+  .detail-layout { grid-template-columns: minmax(0, 1fr); }
   .page-head { flex-direction: column; }
-}
-
-@media (max-width: 720px) {
-  body { padding: 1rem .85rem 2.5rem; }
-  .login-screen { margin: -1rem -.85rem -2.5rem; }
-  .nav { position: static; margin: -1rem -.85rem 1rem; padding: .8rem .85rem .7rem; }
-  .peer-table { width: 100%; min-width: 0; }
-  .peer-table tr:first-child { display: none; }
-  .peer-table, .peer-table tbody, .peer-table tr { display: block; width: auto; }
-  .peer-table tr {
+  .server-tools { grid-template-columns: minmax(0, 1fr); }
+  :is(.peer-table, .proxy-session-table) tr:first-child { display: none; }
+  :is(.peer-table, .proxy-session-table),
+  :is(.peer-table, .proxy-session-table) tbody,
+  :is(.peer-table, .proxy-session-table) tr { display: block; width: auto; }
+  :is(.peer-table, .proxy-session-table) tr {
     margin: 0 0 .75rem;
     padding: .3rem 0;
     border: 1px solid var(--border);
@@ -464,7 +458,7 @@ fieldset { margin: 0; padding: 0; border: 0; }
     background: var(--surface);
   }
   .peer-table tr:not(:first-child):hover { background: var(--surface); }
-  .peer-table td {
+  :is(.peer-table, .proxy-session-table) td {
     display: grid;
     grid-template-columns: 7.2rem minmax(0, 1fr);
     align-items: start;
@@ -474,20 +468,26 @@ fieldset { margin: 0; padding: 0; border: 0; }
     min-width: 0;
     overflow-wrap: anywhere;
   }
-  .peer-table td::before {
+  :is(.peer-table, .proxy-session-table) td::before {
     content: attr(data-label);
     color: var(--text-dim);
   }
   /* Keep every child of a cell (hints, badges) in the value column. */
-  .peer-table td > * { grid-column: 2; }
+  :is(.peer-table, .proxy-session-table) td > * { grid-column: 2; }
   .peer-table td .status {
     max-width: 100%;
     white-space: normal;
     flex-wrap: wrap;
   }
-  .peer-table td.num { text-align: left; white-space: normal; }
+  :is(.peer-table, .proxy-session-table) td.num { text-align: left; white-space: normal; }
   .peer-table tr.is-online { box-shadow: inset 2px 0 0 var(--ok); }
   .peer-table tr.is-online td:first-child { box-shadow: none; }
+}
+
+@media (max-width: 720px) {
+  body { padding: 1rem .85rem 2.5rem; }
+  .login-screen { margin: -1rem -.85rem -2.5rem; }
+  .nav { position: static; margin: -1rem -.85rem 1rem; padding: .8rem .85rem .7rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

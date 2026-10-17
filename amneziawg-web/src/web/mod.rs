@@ -4452,9 +4452,14 @@ fn render_proxy_sessions(base: &str, status: &ProxySessionsDto) -> String {
                 session.rx_packets, session.tx_packets, session.probe_packets
             );
             buf.push_str(&format!(
-                "<tr><td>{user}</td><td><code>{remote}</code></td><td>{proxy_port}</td>\
-                 <td>{target_port}</td><td>{protocol}</td><td>{last_activity}</td>\
-                 <td class=\"num\" title=\"{title}\">{rx}</td><td class=\"num\" title=\"{title}\">{tx}</td></tr>\n",
+                "<tr><td data-label=\"User\">{user}</td>\
+                 <td data-label=\"Remote client\"><code>{remote}</code></td>\
+                 <td data-label=\"Proxy port\">{proxy_port}</td>\
+                 <td data-label=\"Target port\">{target_port}</td>\
+                 <td data-label=\"Protocol\">{protocol}</td>\
+                 <td data-label=\"Last activity\">{last_activity}</td>\
+                 <td class=\"num\" data-label=\"RX\" title=\"{title}\">{rx}</td>\
+                 <td class=\"num\" data-label=\"TX\" title=\"{title}\">{tx}</td></tr>\n",
                 remote = esc(&session.remote_addr),
                 proxy_port = session.local_proxy_port,
                 target_port = session.target_port,
@@ -4558,11 +4563,11 @@ fn render_login_page_with_msg(base: &str, msg: &str, csrf_token: &str) -> String
 }
 
 fn render_login_page_inner(base: &str, error_html: &str, csrf_token: &str) -> String {
-    let mut buf = html_head("AmneziaWG – Login", base);
+    let mut buf = html_head("AWG Server Web Panel Login", base);
     buf.push_str(&format!(
         r#"<main class="login-screen">
 <div class="login-card edit-form">
-<h2>AmneziaWG Login</h2>
+<h2>AWG Server Web Panel Login</h2>
 <form method="POST" action="{base}/login">
   <input type="hidden" name="csrf_token" value="{csrf}">
   <label for="username">Username</label>
@@ -4839,14 +4844,7 @@ fn render_peer_list_inner(
         )
     };
 
-    let workspace_class = if server_tools.is_empty() {
-        "workspace workspace-solo"
-    } else {
-        "workspace"
-    };
-    buf.push_str(&format!(
-        "<div class=\"{workspace_class}\">\n<div class=\"workspace-main\">\n"
-    ));
+    buf.push_str("<div class=\"workspace\">\n<div class=\"workspace-main\">\n");
     if peers.is_empty() {
         buf.push_str("<p class=\"empty\">No peers found. The poller may not have run yet.</p>\n");
     } else {
