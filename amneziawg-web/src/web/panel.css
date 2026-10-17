@@ -233,6 +233,8 @@ th {
 .comment-cell { max-width: 24rem; overflow-wrap: anywhere; }
 .th-hint { display: block; margin-top: .1rem; color: var(--text-dim); font-size: 11px; font-weight: 400; letter-spacing: 0; }
 
+/* Long metadata must not widen the table into the adjacent edit form. */
+table.facts { overflow-wrap: anywhere; }
 table.facts th {
   width: 12rem;
   background: transparent;
