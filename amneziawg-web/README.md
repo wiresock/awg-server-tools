@@ -35,11 +35,18 @@ A shell script like `awg show` gives you a live snapshot of the tunnel.
 
 ## Screenshots
 
-> *Screenshots for the v0.1.0 release will appear here.*
+Captured from v0.1.37 with demonstration data. Client names, addresses, and
+traffic are fictional.
 
-| Peer list | Peer detail |
-|---|---|
-| *(peer list screenshot)* | *(peer detail + edit form screenshot)* |
+**Peer overview** — connection status, traffic counters, expiration dates, and
+active standalone proxy sessions.
+
+![Peer overview with client status and active proxy sessions](docs/screenshots/peer-overview.png)
+
+**Peer details** — configuration download and QR actions, editable client
+settings, traffic summaries, and recent snapshots.
+
+![Peer details with configuration exports, the edit form, and traffic history](docs/screenshots/peer-details.png)
 
 ---
 

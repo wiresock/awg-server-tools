@@ -30,6 +30,26 @@ Once the installer was solid, it was hard to stop:
 
 ---
 
+## Web panel preview
+
+The panel brings client management, traffic history, configuration exports, and
+proxy session visibility into one place. These screenshots show v0.1.37 with
+demonstration data: client names, addresses, and traffic are fictional.
+
+**Peer overview** — connection status, traffic counters, expiration dates, and
+active standalone proxy sessions.
+
+![Web panel showing peers, traffic counters, and active proxy sessions](amneziawg-web/docs/screenshots/peer-overview.png)
+
+**Peer details** — configuration download and QR actions, editable client
+settings, and traffic usage over time.
+
+![Peer details showing configuration exports, the edit form, and traffic history](amneziawg-web/docs/screenshots/peer-details.png)
+
+See the [web panel documentation](amneziawg-web/README.md) for features and setup.
+
+---
+
 ## 🚀 Quick Start
 
 **VPN only (required):**
