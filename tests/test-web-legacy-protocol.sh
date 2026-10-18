@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf -- "$WORK"' EXIT
+# Load helper definitions with the params path redirected to the fixture.
+# shellcheck disable=SC1090
 source <(sed -e '/^main "\$@"$/d' -e "s|^readonly AWG_PARAMS_PATH=.*|readonly AWG_PARAMS_PATH=\"$WORK/params\"|" "$ROOT/amneziawg-web/scripts/amneziawg-web-privileged")
 require_root() { :; }
 # Fixture ownership stands in for the production root-owned params file.
