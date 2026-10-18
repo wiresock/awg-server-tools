@@ -4479,8 +4479,8 @@ fn render_proxy_sessions(base: &str, status: &ProxySessionsDto) -> String {
 
 const PANEL_CSS: &str = include_str!("panel.css");
 
-/// `GET /static/panel.css` – the shared stylesheet. Page links carry the panel
-/// version, so a release invalidates the long-lived cache entry.
+/// `GET /static/panel.css` – the shared stylesheet. Page links carry a content
+/// fingerprint so CSS updates invalidate the cache even within one panel version.
 async fn panel_css() -> impl IntoResponse {
     (
         [
@@ -4494,11 +4494,24 @@ async fn panel_css() -> impl IntoResponse {
     )
 }
 
+fn panel_stylesheet_href(base: &str, css: &str) -> String {
+    use std::hash::Hasher;
+
+    // This fingerprint is a cache key, not a security-sensitive digest.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hasher.write(css.as_bytes());
+    format!(
+        "{base}/static/panel.css?v={}-{:016x}",
+        env!("CARGO_PKG_VERSION"),
+        hasher.finish()
+    )
+}
+
 fn html_head(title: &str, base: &str) -> String {
     format!(
-        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n<link rel=\"stylesheet\" href=\"{base}/static/panel.css?v={version}\">\n</head>\n<body>\n",
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n<link rel=\"stylesheet\" href=\"{stylesheet}\">\n</head>\n<body>\n",
         title = esc(title),
-        version = env!("CARGO_PKG_VERSION"),
+        stylesheet = panel_stylesheet_href(base, PANEL_CSS),
     )
 }
 
@@ -4844,7 +4857,9 @@ fn render_peer_list_inner(
         )
     };
 
-    buf.push_str("<div class=\"workspace\">\n<div class=\"workspace-main\">\n");
+    buf.push_str("<div class=\"workspace\">\n");
+    buf.push_str(&server_tools);
+    buf.push_str("<div class=\"workspace-main\">\n");
     if peers.is_empty() {
         buf.push_str("<p class=\"empty\">No peers found. The poller may not have run yet.</p>\n");
     } else {
@@ -4909,7 +4924,6 @@ fn render_peer_list_inner(
         buf.push_str(&render_proxy_sessions(base, proxy_sessions));
     }
     buf.push_str("</div>\n");
-    buf.push_str(&server_tools);
     buf.push_str("</div>\n</body></html>");
     buf
 }
@@ -9556,10 +9570,19 @@ mod tests {
     fn html_head_links_versioned_stylesheet_under_base() {
         let head = html_head("AmneziaWG – Peers", "/vpn");
         assert!(head.contains(&format!(
-            "<link rel=\"stylesheet\" href=\"/vpn/static/panel.css?v={}\">",
+            "<link rel=\"stylesheet\" href=\"/vpn/static/panel.css?v={}-",
             env!("CARGO_PKG_VERSION")
         )));
         assert!(!head.contains("<style>"));
+    }
+
+    #[test]
+    fn stylesheet_cache_key_tracks_content_without_a_version_bump() {
+        let original = "body { color: white; }";
+        let changed = "body { color: cyan; }";
+        let href = panel_stylesheet_href("/vpn", original);
+        assert_eq!(href, panel_stylesheet_href("/vpn", original));
+        assert_ne!(href, panel_stylesheet_href("/vpn", changed));
     }
 
     #[tokio::test]
@@ -9568,7 +9591,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/static/panel.css")
+                    .uri(panel_stylesheet_href("", PANEL_CSS))
                     .body(Body::empty())
                     .unwrap(),
             )
