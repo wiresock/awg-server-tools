@@ -4740,7 +4740,7 @@ fn render_protocol_controls(base: &str, csrf_token: &str) -> String {
         r#"<details class="edit-form protocol-panel">
 <summary>AWG protocol</summary>
 <p id="protocol-current" class="meta" role="status">Current mode: loading…</p>
-<section id="protocol-enable-awg31">
+<section id="protocol-enable-awg31" hidden>
   <p class="creation-warning"><strong>AWG 3.1 requires compatible client software.</strong> The server checks backend support, then updates the interface and every recoverable client config together. Redistribute the regenerated configurations before clients reconnect.</p>
   <form method="POST" action="{base}/admin/protocol/enable-awg31">
     <input type="hidden" name="csrf_token" value="{csrf}">
@@ -4748,7 +4748,7 @@ fn render_protocol_controls(base: &str, csrf_token: &str) -> String {
     <button type="submit" class="btn-danger">Enable AWG 3.1</button>
   </form>
 </section>
-<section id="protocol-disable-awg3">
+<section id="protocol-disable-awg3" hidden>
   <p>Downgrade the interface and all recoverable client configs to AWG 2.0. AWG 3.x-only fields and the shared header-protection key are removed.</p>
   <form method="POST" action="{base}/admin/protocol/disable-awg3">
     <input type="hidden" name="csrf_token" value="{csrf}">
@@ -4775,8 +4775,8 @@ fn render_protocol_controls(base: &str, csrf_token: &str) -> String {
       if (data.version === '1.0') {{
         current.textContent += ' (legacy compatibility mode). Use the installer for a protocol upgrade, then redistribute client configs.';
       }}
-      enable31.hidden = data.version === '3.1' || data.version === '1.0';
-      disable.hidden = data.version === '2.0' || data.version === '1.0';
+      enable31.hidden = !['2.0', '3.0'].includes(data.version);
+      disable.hidden = !['3.0', '3.1'].includes(data.version);
     }})
     .catch(function() {{
       current.textContent = 'Current mode unavailable. No change occurs until a confirmed action succeeds.';

@@ -657,7 +657,16 @@ fail_protocol_migration() {
 
 run_protocol_migration() {
     local flag="$1"
-    local install_script
+    local install_script protocol
+
+    # AWG 1.0 requires a manual installer upgrade. Its old dispatcher may
+    # treat unsupported migration flags as interactive management commands.
+    protocol="$(emit_protocol_status)" || fail "could not determine the current AWG protocol"
+    case "$protocol" in
+        2|3|3.1) ;;
+        1) fail "AWG 1.0 protocol upgrades must be performed with the installer" ;;
+        *) fail "unsupported current AWG protocol for migration" ;;
+    esac
 
     install_script="$(resolve_awg_install_script)"
     # Older installers have no vetted diagnostic channel. They can still

@@ -23,7 +23,10 @@ for version in absent 1 1.0; do
 done
 # A legacy installer may treat unknown flags as mutations; AWG1 status must
 # not execute it, including when params explicitly name version 1 or 1.0.
-resolve_awg_install_script() { printf '%s\n' "$WORK/installer"; }
+resolve_awg_install_script() {
+    touch "$WORK/installer-resolved"
+    printf '%s\n' "$WORK/installer"
+}
 cat > "$WORK/installer" <<'EOF'
 #!/usr/bin/env bash
 exit 99
@@ -40,6 +43,20 @@ for version in absent 1 1.0; do
     [[ "$(sha256sum "$WORK/params")" == "$before" ]]
 done
 [[ "$(sha256sum "$WORK/params")" == "$before" ]]
+for version in absent 1 1.0; do
+    cp "$WORK/legacy" "$WORK/params"
+    [[ "$version" == absent ]] || printf "AWG_PROTOCOL_VERSION='%s'\n" "$version" >> "$WORK/params"
+    for operation in enable-awg31 disable-awg3; do
+        if (main "$operation") > "$WORK/output" 2> "$WORK/error"; then
+            echo 'FAIL: legacy protocol migration was accepted'; exit 1
+        fi
+        if [[ -e "$WORK/installer-resolved" ]]; then
+            echo 'FAIL: legacy protocol migration reached installer resolution'; exit 1
+        fi
+        [[ ! -s "$WORK/output" ]]
+        grep -q 'AWG 1.0.*installer' "$WORK/error"
+    done
+done
 for backend in boringtun other 'kernel;touch /tmp/unexpected'; do
     cp "$WORK/legacy" "$WORK/params"
     printf "AWG_BACKEND='%s'\n" "$backend" >> "$WORK/params"
@@ -57,4 +74,4 @@ for version in 2 2.0 3 3.0 3.1; do
 done
 printf "AWG_PROTOCOL_VERSION='4'\n" > "$WORK/params"
 if (main protocol-status) >/dev/null 2>&1; then exit 1; fi
-echo 'PASS: AWG 1.0 detection, explicit versions, and no params mutation'
+echo 'PASS: AWG 1.0 detection, explicit versions, migration rejection, and no params mutation'
