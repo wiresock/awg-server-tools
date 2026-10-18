@@ -4388,12 +4388,12 @@ fn render_proxy_sessions(base: &str, status: &ProxySessionsDto) -> String {
     let target = status
         .target_addr
         .as_deref()
-        .map(esc)
+        .map(|addr| esc(&display_socket_addr(addr)))
         .unwrap_or_else(|| "unknown".to_string());
     let listen = status
         .proxy_listen_addr
         .as_deref()
-        .map(esc)
+        .map(|addr| esc(&display_socket_addr(addr)))
         .unwrap_or_else(|| "unknown".to_string());
     let protocol = status
         .imitate_protocol
@@ -4460,7 +4460,7 @@ fn render_proxy_sessions(base: &str, status: &ProxySessionsDto) -> String {
                  <td data-label=\"Last activity\">{last_activity}</td>\
                  <td class=\"num\" data-label=\"RX\" title=\"{title}\">{rx}</td>\
                  <td class=\"num\" data-label=\"TX\" title=\"{title}\">{tx}</td></tr>\n",
-                remote = esc(&session.remote_addr),
+                remote = esc(&display_socket_addr(&session.remote_addr)),
                 proxy_port = session.local_proxy_port,
                 target_port = session.target_port,
                 protocol = esc(&session.obfuscation_protocol),
@@ -4599,6 +4599,17 @@ fn render_login_page_inner(base: &str, error_html: &str, csrf_token: &str) -> St
     buf
 }
 
+/// Show IPv4-mapped socket addresses as IPv4, preserving every other spelling
+/// (including native IPv6 scope IDs). Callers still need to escape HTML.
+fn display_socket_addr(raw: &str) -> String {
+    if let Ok(std::net::SocketAddr::V6(addr)) = raw.parse() {
+        if let Some(ipv4) = addr.ip().to_ipv4_mapped() {
+            return format!("{}:{}", ipv4, addr.port());
+        }
+    }
+    raw.to_string()
+}
+
 /// Render an endpoint table cell.
 ///
 /// For a peer connected through amneziawg-proxy the interface endpoint is the
@@ -4609,14 +4620,14 @@ fn render_endpoint_cell(endpoint: Option<&str>, proxy_remote_addr: Option<&str>)
     match (proxy_remote_addr, endpoint) {
         (Some(remote), Some(local)) => format!(
             r#"<span title="via amneziawg-proxy; interface endpoint: {local}">{remote} <span class="proxy-hint">proxy</span></span>"#,
-            local = esc(local),
-            remote = esc(remote),
+            local = esc(&display_socket_addr(local)),
+            remote = esc(&display_socket_addr(remote)),
         ),
         (Some(remote), None) => format!(
             r#"<span title="via amneziawg-proxy">{remote} <span class="proxy-hint">proxy</span></span>"#,
-            remote = esc(remote),
+            remote = esc(&display_socket_addr(remote)),
         ),
-        (None, Some(endpoint)) => esc(endpoint),
+        (None, Some(endpoint)) => esc(&display_socket_addr(endpoint)),
         (None, None) => "–".to_string(),
     }
 }
@@ -5383,7 +5394,7 @@ Historical data (snapshots, events) will be preserved.</p>
             let ep = s
                 .endpoint
                 .as_deref()
-                .map(esc)
+                .map(|addr| esc(&display_socket_addr(addr)))
                 .unwrap_or_else(|| "–".to_string());
             buf.push_str(&format!(
                 "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td></tr>\n",
@@ -5841,6 +5852,136 @@ mod tests {
 
         assert_eq!(json["endpoint"], "127.0.0.1:40000");
         assert_eq!(json["proxy_remote_addr"], "203.0.113.10:45678");
+    }
+
+    #[test]
+    fn endpoint_cell_formats_mapped_ipv4_and_preserves_other_addresses() {
+        for (raw, expected) in [
+            ("[::ffff:203.0.113.10]:45678", "203.0.113.10:45678"),
+            ("[::ffff:cb00:710a]:45678", "203.0.113.10:45678"),
+            ("203.0.113.10:45678", "203.0.113.10:45678"),
+            ("[2001:db8::10]:45678", "[2001:db8::10]:45678"),
+            (
+                "[2001:0DB8:0000:0000:0000:0000:0000:0010]:45678",
+                "[2001:0DB8:0000:0000:0000:0000:0000:0010]:45678",
+            ),
+            ("[fe80::1%3]:45678", "[fe80::1%3]:45678"),
+            ("[::1]:45678", "[::1]:45678"),
+            ("[::203.0.113.10]:45678", "[::203.0.113.10]:45678"),
+            ("[64:ff9b::cb00:710a]:45678", "[64:ff9b::cb00:710a]:45678"),
+            ("vpn.example:45678", "vpn.example:45678"),
+            ("[::ffff:invalid]:45678", "[::ffff:invalid]:45678"),
+        ] {
+            assert_eq!(render_endpoint_cell(Some(raw), None), expected, "{raw}");
+            let proxy_cell = render_endpoint_cell(Some("127.0.0.1:40000"), Some(raw));
+            assert!(proxy_cell.contains(&format!("{expected} <span")), "{raw}");
+            let remote_only = render_endpoint_cell(None, Some(raw));
+            assert!(remote_only.contains(&format!("{expected} <span")), "{raw}");
+        }
+        let cell = render_endpoint_cell(
+            Some("[::ffff:127.0.0.1]:40000"),
+            Some("[::ffff:203.0.113.10]:45678"),
+        );
+        assert!(cell.contains("interface endpoint: 127.0.0.1:40000"));
+        assert_eq!(render_endpoint_cell(None, None), "–");
+    }
+
+    #[test]
+    fn endpoint_cell_escapes_unparseable_addresses() {
+        let raw = "<script>\"&";
+        let escaped = "&lt;script&gt;&quot;&amp;";
+        assert_eq!(render_endpoint_cell(Some(raw), None), escaped);
+        let cell = render_endpoint_cell(Some(raw), Some(raw));
+        assert!(cell.contains(&format!("interface endpoint: {escaped}\"")));
+        assert!(cell.contains(&format!("{escaped} <span")));
+        assert!(!cell.contains(raw));
+    }
+
+    #[tokio::test]
+    async fn pages_format_mapped_ipv4_and_preserve_ipv6_endpoints() {
+        for (remote, remote_ip, displayed) in [
+            (
+                "[::ffff:203.0.113.10]:45678",
+                "::ffff:203.0.113.10",
+                "203.0.113.10:45678",
+            ),
+            (
+                "[::ffff:cb00:710a]:45678",
+                "::ffff:cb00:710a",
+                "203.0.113.10:45678",
+            ),
+            (
+                "[2001:db8::10]:45678",
+                "2001:db8::10",
+                "[2001:db8::10]:45678",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let status_file = dir.path().join("sessions.json");
+            write_proxy_status_file(&status_file);
+            let mut status: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&status_file).unwrap()).unwrap();
+            status["proxy_listen_addr"] = "[::ffff:0.0.0.0]:51820".into();
+            status["target_addr"] = "[::ffff:127.0.0.1]:51821".into();
+            status["sessions"][0]["remote_addr"] = remote.into();
+            status["sessions"][0]["remote_ip"] = remote_ip.into();
+            std::fs::write(&status_file, serde_json::to_vec(&status).unwrap()).unwrap();
+
+            let db = test_db().await;
+            let peer_id =
+                insert_peer_with_endpoint(&db, "pk-proxied-peer", "iphone", "127.0.0.1:40000")
+                    .await;
+            insert_peer_with_endpoint(&db, "pk-direct-peer", "laptop", remote).await;
+            sqlx::query(
+                "INSERT INTO snapshots (public_key, captured_at, rx_bytes, tx_bytes, endpoint)
+                 VALUES (?, ?, 0, 0, ?)",
+            )
+            .bind("pk-proxied-peer")
+            .bind(Utc::now().to_rfc3339())
+            .bind(remote)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+            let app = test_router_with_proxy_sessions_file(db, status_file);
+            for uri in ["/".to_string(), format!("/peers/{peer_id}")] {
+                let response = app
+                    .clone()
+                    .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let html = std::str::from_utf8(&body).unwrap();
+                assert!(
+                    html.contains(&format!(
+                        r#"{displayed} <span class="proxy-hint">proxy</span>"#,
+                    )),
+                    "{uri}: proxied endpoint {remote}"
+                );
+                if uri == "/" {
+                    assert!(
+                        html.contains(&format!(r#"<td data-label="Endpoint">{displayed}</td>"#)),
+                        "direct endpoint {remote}"
+                    );
+                    assert!(
+                        html.contains(&format!(
+                            r#"<td data-label="Remote client"><code>{displayed}</code></td>"#,
+                        )),
+                        "proxy session {remote}"
+                    );
+                    assert!(html.contains("listen: <code>0.0.0.0:51820</code>"));
+                    assert!(html.contains("target: <code>127.0.0.1:51821</code>"));
+                } else {
+                    let snapshots = html.split("Recent snapshots").nth(1).unwrap();
+                    assert!(
+                        snapshots.contains(&format!("<td>{displayed}</td>")),
+                        "snapshot endpoint {remote}"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
