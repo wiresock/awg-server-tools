@@ -9,6 +9,7 @@ export TMPDIR="$WORK"
 # shellcheck disable=SC1090
 source <(sed '/^main "\$@"$/d' "$ROOT/amneziawg-web/scripts/amneziawg-web-privileged")
 require_root() { :; }
+emit_protocol_status() { printf '2\n'; }
 resolve_awg_install_script() { printf '%s\n' "$WORK/mock-installer.sh"; }
 
 fail_test() {

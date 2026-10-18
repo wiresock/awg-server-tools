@@ -4,9 +4,9 @@
 //! the traffic as a legitimate application protocol (QUIC, DNS, STUN, or SIP)
 //! to defeat Deep Packet Inspection (DPI).
 //!
-//! ## Protocol Compatibility: AmneziaWG 2.0 only
+//! ## Protocol Compatibility: AmneziaWG 1.0 and 2.0
 //!
-//! `amneziawg-proxy` is compatible **only with AmneziaWG 2.0**; it is **incompatible
+//! `amneziawg-proxy` is compatible **only with AmneziaWG 1.0 and 2.0**; it is **incompatible
 //! with AmneziaWG 3.0+**.
 //!
 //! In AmneziaWG 2.0, the S1–S4 padding prefix consists of random bytes preceding

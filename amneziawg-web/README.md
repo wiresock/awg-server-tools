@@ -70,7 +70,7 @@ A shell script like `awg show` gives you a live snapshot of the tunnel.
   their saved metadata and traffic history deleted from the panel. The public
   key remains archived and disabled so enforcement can continue.
 - **Traffic history** – counter-reset-safe per-snapshot deltas over 24 h / 7 d / 30 d.
-- **Proxy session visibility** – when `amneziawg-proxy` is enabled (AmneziaWG 2.0
+- **Proxy session visibility** – when `amneziawg-proxy` is enabled (AmneziaWG 1.0 or 2.0
   interfaces only), reads its local status file and shows active remote client sessions
   on the peer list.
 - **Native BoringTun imitation** – the peer list offers Off, DNS, QUIC, SIP and
@@ -234,7 +234,7 @@ For a full production setup, see [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Configuration
 
-The header distinguishes the configured **AWG protocol** (2.0, 3.0 or 3.1)
+The header distinguishes the configured **AWG protocol** (1.0, 2.0, 3.0 or 3.1)
 from the **backend** (AWG kernel or BoringTun) and the **panel version**.
 For BoringTun, the version comes from the installer's verified running daemon,
 not an installed WireGuard kernel module or the AWG command-line tools.
@@ -242,6 +242,18 @@ The standalone proxy is omitted on BoringTun hosts and when it is not installed.
 Unavailable runtime information is shown as unknown; it is never inferred from
 an unrelated module version. `/api/system/versions` retains its component fields
 and adds `runtime` details and the same `summary` used by the header.
+
+Legacy AWG 1.0 params with scalar H1–H4 and no S3/S4 are supported without
+migrating the server or existing clients. Polling, config downloads, QR codes,
+Amnezia links and client management use the original framing; new AWG 1.0
+client configs omit S3/S4. Explicit `AWG_PROTOCOL_VERSION=1` or `1.0` is also
+recognized. Protocol upgrades from 1.0 are left to the installer, where they
+require redistributing client configs. Update the panel binary and privileged
+helper together. AWG 1.0 kernel status is read directly, without executing
+legacy installer commands. Newer protocols use the lifecycle installer's
+`--backend-status`. Old root-owned params files should be mode 600 because they
+contain a private key: `sudo chmod 600 /etc/amnezia/amneziawg/params`.
+Status probes do not change permissions or protocol settings.
 
 All settings are read from environment variables (or a `.env`-style file via systemd `EnvironmentFile`).
 
@@ -330,7 +342,7 @@ See [`.env.example`](.env.example) for a ready-to-copy template.
 | `GET` | `/api/events` | Yes | Audit log (`?peer_id=`, `?event_type=`, `?limit=`) |
 | `POST` | `/api/admin/users` | Yes | JSON API: create user `{"name":"...","comment":"optional note"}` (`comment` optional, max 512 characters) |
 | `POST` | `/api/admin/users/:id/remove` | Yes | JSON API: remove user |
-| `GET` | `/api/admin/protocol` | Yes | Normalized protocol status (`2.0` for legacy/missing state, `3.0`, or `3.1`) |
+| `GET` | `/api/admin/protocol` | Yes | Protocol status (`1.0` for legacy framing without S3/S4; otherwise `2.0`, `3.0`, or `3.1`) |
 
 ---
 
@@ -405,9 +417,10 @@ API, or written to application logs.
 
 > [!WARNING]
 > **Compatibility with amneziawg-proxy:**
-> `amneziawg-proxy` is compatible **only with AmneziaWG 2.0**. Enabling AWG 3.1 via
+> `amneziawg-proxy` is compatible **only with AmneziaWG 1.0 and 2.0**. Enabling AWG 3.1 via
 > `/admin/protocol/enable-awg31` will cause `amneziawg-proxy` to fail packet classification
-> and stop camouflaging traffic. If `amneziawg-proxy` is in use, keep the interface on AWG 2.0.
+> and stop camouflaging traffic. Keep proxied interfaces on AWG 1.0 or 2.0.
+> AWG 1.0 has no cookie or transport padding; those packets are forwarded unchanged.
 
 **Troubleshooting:** If peer polling fails with "Operation not permitted",
 verify the sudoers file exists and is correct:

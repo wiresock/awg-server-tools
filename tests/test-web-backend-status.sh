@@ -13,6 +13,9 @@ source <(sed '/^main "\$@"$/d' "$ROOT/amneziawg-web/scripts/amneziawg-web-privil
 installer_supports_backend_status "$ROOT/amneziawg-install.sh"
 require_root() { :; }
 resolve_awg_install_script() { printf '%s\n' "$WORK/installer"; }
+emit_protocol_status() {
+    if [[ "${TEST_KERNEL_STATUS:-}" == 1 ]]; then printf '3.1\n'; else printf '2.0\n'; fi
+}
 cat > "$WORK/installer" <<'EOF'
 #!/usr/bin/env bash
 AWG_INSTALLER_CAPABILITY_BORINGTUN_HOST="boringtun-host-v1"

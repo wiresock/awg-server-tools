@@ -4740,7 +4740,7 @@ fn render_protocol_controls(base: &str, csrf_token: &str) -> String {
         r#"<details class="edit-form protocol-panel">
 <summary>AWG protocol</summary>
 <p id="protocol-current" class="meta" role="status">Current mode: loading…</p>
-<section id="protocol-enable-awg31">
+<section id="protocol-enable-awg31" hidden>
   <p class="creation-warning"><strong>AWG 3.1 requires compatible client software.</strong> The server checks backend support, then updates the interface and every recoverable client config together. Redistribute the regenerated configurations before clients reconnect.</p>
   <form method="POST" action="{base}/admin/protocol/enable-awg31">
     <input type="hidden" name="csrf_token" value="{csrf}">
@@ -4748,7 +4748,7 @@ fn render_protocol_controls(base: &str, csrf_token: &str) -> String {
     <button type="submit" class="btn-danger">Enable AWG 3.1</button>
   </form>
 </section>
-<section id="protocol-disable-awg3">
+<section id="protocol-disable-awg3" hidden>
   <p>Downgrade the interface and all recoverable client configs to AWG 2.0. AWG 3.x-only fields and the shared header-protection key are removed.</p>
   <form method="POST" action="{base}/admin/protocol/disable-awg3">
     <input type="hidden" name="csrf_token" value="{csrf}">
@@ -4772,8 +4772,11 @@ fn render_protocol_controls(base: &str, csrf_token: &str) -> String {
       if (data.version === '3.0') {{
         current.textContent += ' (legacy). Choose AWG 3.1 or AWG 2.0 below.';
       }}
-      enable31.hidden = data.version === '3.1';
-      disable.hidden = data.version === '2.0';
+      if (data.version === '1.0') {{
+        current.textContent += ' (legacy compatibility mode). Use the installer for a protocol upgrade, then redistribute client configs.';
+      }}
+      enable31.hidden = !['2.0', '3.0'].includes(data.version);
+      disable.hidden = !['3.0', '3.1'].includes(data.version);
     }})
     .catch(function() {{
       current.textContent = 'Current mode unavailable. No change occurs until a confirmed action succeeds.';
@@ -11069,6 +11072,75 @@ mod tests {
             svg, expected,
             "QR must encode the original config bytes, not the vpn:// envelope"
         );
+    }
+
+    #[tokio::test]
+    async fn awg1_exports_verify_ownership_without_s3_s4() {
+        let db = test_db().await;
+        let id = insert_peer(&db, "LEGACY_CLIENT=", None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("awg0-client-legacy.conf");
+        std::fs::write(
+            &path,
+            "[Interface]\nAddress = 10.8.0.2/32\nS1 = 30\nS2 = 100\n[Peer]\nPublicKey = PUB\n",
+        )
+        .unwrap();
+        crate::db::peers::apply_config_mapping(
+            &db.pool,
+            "LEGACY_CLIENT=",
+            "awg0-client-legacy",
+            path.to_str().unwrap(),
+            "legacy",
+            None,
+        )
+        .await
+        .unwrap();
+        let interface = InterfaceSelector::from_params().with_params_reader(|| {
+            Ok(crate::managed_interface::test_params("awg0")
+                .replace("SERVER_AWG_S3='45'\n", "")
+                .replace("SERVER_AWG_S4='120'\n", "")
+                .replace("5-10", "5")
+                .replace("11-20", "11")
+                .replace("21-30", "21")
+                .replace("31-40", "31"))
+        });
+        let app = router_with_lifecycle_lock_dir(
+            db,
+            AuthConfig::disabled(),
+            dir.path().into(),
+            dir.path().into(),
+            missing_proxy_sessions_file(),
+            interface,
+        );
+        for route in ["qr", "config", "vpn-uri"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/peers/{id}/{route}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{route}");
+            assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        }
+        std::fs::write(
+            &path,
+            "[Interface]\nAddress = 10.8.0.2/32\n[Peer]\nPublicKey = FOREIGN_SERVER\n",
+        )
+        .unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/peers/{id}/qr"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

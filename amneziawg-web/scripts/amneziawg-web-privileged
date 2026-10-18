@@ -439,20 +439,38 @@ emit_safe_params() {
 }
 
 emit_protocol_status() {
-    local line value="2"
+    local line key value version="" s3="" s4="" scalar_headers=0
+    local -A headers=()
 
     reject_symlinks "${AWG_PARAMS_PATH}"
     while IFS= read -r line || [[ -n "${line}" ]]; do
-        if [[ "${line}" =~ ^AWG_PROTOCOL_VERSION=(.*)$ ]]; then
-            value="${BASH_REMATCH[1]}"
+        line="${line#"${line%%[![:blank:]]*}"}"
+        [[ "$line" == *=* ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        if (( ${#value} >= 2 )) && { [[ "$value" == \'*\' ]] || [[ "$value" == \"*\" ]]; }; then
+            value="${value:1:${#value}-2}"
         fi
+        case "$key" in
+            AWG_PROTOCOL_VERSION) version="$value" ;;
+            SERVER_AWG_S3) s3="$value" ;;
+            SERVER_AWG_S4) s4="$value" ;;
+            SERVER_AWG_H[1-4]) headers["$key"]="$value" ;;
+        esac
     done < "${AWG_PARAMS_PATH}"
 
-    if (( ${#value} >= 2 )) && { \
-            [[ "${value}" == \'*\' ]] || [[ "${value}" == \"*\" ]]; }; then
-        value="${value:1:${#value}-2}"
+    # Before AWG 2.0, params had scalar H1-H4 and no S3/S4. The
+    # module's installed version does not identify the configured protocol.
+    for value in "${headers[@]}"; do
+        if [[ "$value" =~ ^[0-9]+$ ]]; then scalar_headers=$((scalar_headers + 1)); fi
+    done
+    if [[ -z "$version$s3$s4" && "$scalar_headers" == 4 ]]; then
+        version=1
     fi
-    case "${value}" in
+    case "${version}" in
+        1|1.0)
+            printf '1\n'
+            ;;
         2|2.0|"")
             printf '2\n'
             ;;
@@ -639,7 +657,16 @@ fail_protocol_migration() {
 
 run_protocol_migration() {
     local flag="$1"
-    local install_script
+    local install_script protocol
+
+    # AWG 1.0 requires a manual installer upgrade. Its old dispatcher may
+    # treat unsupported migration flags as interactive management commands.
+    protocol="$(emit_protocol_status)" || fail "could not determine the current AWG protocol"
+    case "$protocol" in
+        2|3|3.1) ;;
+        1) fail "AWG 1.0 protocol upgrades must be performed with the installer" ;;
+        *) fail "unsupported current AWG protocol for migration" ;;
+    esac
 
     install_script="$(resolve_awg_install_script)"
     # Older installers have no vetted diagnostic channel. They can still
@@ -685,8 +712,48 @@ installer_supports_boringtun_imitation_auto() {
         grep -qxF 'AWG_INSTALLER_CAPABILITY_BORINGTUN_IMITATION_AUTO="boringtun-imitation-auto-v1"' "$1"
 }
 
+# AWG 1.0 predates the installer's backend-status command and its protocol
+# normalizer. Inspect only the fixed kernel unit and params as data; never
+# execute a legacy installer to discover its capabilities.
+emit_legacy_kernel_status() {
+    local line key value interface="" backend="" state
+    validate_root_owned_directory "${AWG_CONFIG_ROOT}"
+    validate_root_owned_file "${AWG_PARAMS_PATH}" false
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line#"${line%%[![:blank:]]*}"}"
+        [[ "$line" == *=* ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        if (( ${#value} >= 2 )) && { [[ "$value" == \'*\' ]] || [[ "$value" == \"*\" ]]; }; then
+            value="${value:1:${#value}-2}"
+        fi
+        case "$key" in
+            SERVER_AWG_NIC) interface="$value" ;;
+            AWG_BACKEND) backend="$value" ;;
+        esac
+    done < "${AWG_PARAMS_PATH}"
+    validate_interface "$interface"
+    case "$backend" in
+        ""|kernel) ;;
+        *) fail "AWG 1.0 backend status requires the kernel backend" ;;
+    esac
+    state="$(systemctl show -p ActiveState --value "awg-quick@${interface}.service" 2>/dev/null)" || state=unknown
+    [[ "$state" =~ ^[a-z-]+$ ]] || state=unknown
+    printf 'backend=kernel\nawg_protocol=1\nservice_state=%s\n' "$state"
+    if [[ -d /sys/module/amneziawg ]]; then
+        printf 'module_state=loaded\n'
+    else
+        printf 'module_state=not-loaded\n'
+    fi
+}
+
 emit_backend_status() {
-    local install_script output line
+    local install_script output line protocol
+    protocol="$(emit_protocol_status)"
+    if [[ "$protocol" == 1 ]]; then
+        emit_legacy_kernel_status
+        return
+    fi
     install_script="$(resolve_awg_install_script)"
     if ! installer_supports_backend_status "${install_script}"; then
         fail "install script does not support backend status"
@@ -694,9 +761,12 @@ emit_backend_status() {
     if ! output="$("${install_script}" --backend-status 2>/dev/null)"; then
         fail "backend status inspection failed"
     fi
+    # The lifecycle installer normalizes pre-2.0 params to 2 for migrations.
+    # Status must describe their existing framing without migrating anything.
     while IFS= read -r line; do
         case "${line%%=*}" in
-            backend|awg_protocol|service_state|module_state|daemon_state|daemon_release|imitation_protocol|imitation_domain|daemon_imitation_protocol|daemon_imitation_domain|imitation_auto_support)
+            awg_protocol) printf 'awg_protocol=%s\n' "$protocol" ;;
+            backend|service_state|module_state|daemon_state|daemon_release|imitation_protocol|imitation_domain|daemon_imitation_protocol|daemon_imitation_domain|imitation_auto_support)
                 printf '%s\n' "${line}"
                 ;;
         esac

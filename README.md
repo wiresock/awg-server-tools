@@ -23,10 +23,10 @@ Once the installer was solid, it was hard to stop:
 
 1. **`amneziawg-install.sh`** — the original script, extended for AmneziaWG 2.0 (S3/S4, H1–H4, migration from pre-2.0 installs), optional AmneziaWG 3.0 header protection, and optional AmneziaWG 3.1 (`RandomTrailers` / `DisableCookies`).
 2. **`amneziawg-web.sh`** — a web panel for managing clients, switching between AWG 2.0 and 3.1, and configuring BoringTun's native protocol imitation without touching the CLI.
-3. **`amneziawg-proxy.sh`** — a UDP obfuscation proxy that takes traffic camouflage to the next level: it wraps AmneziaWG (AWG 2.0 only) so the datagrams on the wire look like a legitimate QUIC, DNS, STUN, or SIP service to Deep Packet Inspection (DPI).
+3. **`amneziawg-proxy.sh`** — a UDP obfuscation proxy that takes traffic camouflage to the next level: it wraps AmneziaWG (AWG 1.0 or 2.0) so the datagrams on the wire look like a legitimate QUIC, DNS, STUN, or SIP service to Deep Packet Inspection (DPI).
 
-> **⚠️ amneziawg-proxy is compatible only with AmneziaWG 2.0 and is most powerful with WireSock Secure Connect 3.5+.**
-> The proxy is compatible **only with AmneziaWG 2.0** (it is **not compatible with AWG 3.0+** because AWG 3.0 uses S1–S4 padding as key material for header encryption). The proxy's full protocol-imitation feature set — coordinated client/server cover traffic, junk-packet shaping, and per-protocol padding — is only fully unleashed when paired with [WireSock Secure Connect](https://www.wiresock.net/) **3.5 or later** on the client side. Standard AmneziaWG clients still connect through the proxy and benefit from the server-side obfuscation, but the bidirectional imitation requires the WireSock client.
+> **⚠️ amneziawg-proxy is compatible only with AmneziaWG 1.0 and 2.0 and is most powerful with WireSock Secure Connect 3.5+.**
+> The proxy is compatible **only with AmneziaWG 1.0 and 2.0** (it is **not compatible with AWG 3.0+** because AWG 3.0 uses S1–S4 padding as key material for header encryption). The proxy's full protocol-imitation feature set — coordinated client/server cover traffic, junk-packet shaping, and per-protocol padding — is only fully unleashed when paired with [WireSock Secure Connect](https://www.wiresock.net/) **3.5 or later** on the client side. Standard AmneziaWG clients still connect through the proxy and benefit from the server-side obfuscation, but the bidirectional imitation requires the WireSock client.
 
 ---
 
@@ -81,7 +81,7 @@ BoringTun users can enable **Off / DNS / QUIC / SIP / STUN** directly under
 supports it; see
 [native imitation and compatibility limits](#built-in-protocol-imitation-boringtun-only).
 
-**Add the obfuscation proxy (optional, kernel backend with AWG 2.0 only):**
+**Add the obfuscation proxy (optional, kernel backend with AWG 1.0 or 2.0):**
 
 ```bash
 curl -fLO https://raw.githubusercontent.com/wiresock/awg-server-tools/main/amneziawg-proxy.sh
@@ -90,7 +90,7 @@ sudo ./amneziawg-proxy.sh
 ```
 
 > Makes the VPN traffic look like QUIC/DNS/STUN/SIP to DPI. Compatible with
-> **AmneziaWG 2.0 only** (not compatible with AWG 3.0+). See
+> **AmneziaWG 1.0 and 2.0** (not compatible with AWG 3.0+). See
 > **[Traffic Obfuscation Proxy](#-traffic-obfuscation-proxy-amneziawg-proxy)**.
 
 ✅ **After installation:**
@@ -109,7 +109,7 @@ sudo ./amneziawg-proxy.sh
   - `upgrade` — upgrade the binary
   - `uninstall` — remove the panel
   - `status` — show installation status
-- **`amneziawg-proxy.sh`** — **optional.** Installs and manages the UDP obfuscation proxy that fronts AmneziaWG (**AWG 2.0 only**) and makes the traffic look like QUIC, DNS, STUN, or SIP. See **[Traffic Obfuscation Proxy](#-traffic-obfuscation-proxy-amneziawg-proxy)** below.
+- **`amneziawg-proxy.sh`** — **optional.** Installs and manages the UDP obfuscation proxy that fronts AmneziaWG (**AWG 1.0 or 2.0**) and makes the traffic look like QUIC, DNS, STUN, or SIP. See **[Traffic Obfuscation Proxy](#-traffic-obfuscation-proxy-amneziawg-proxy)** below.
 
 ---
 
@@ -121,8 +121,8 @@ sudo ./amneziawg-proxy.sh
 | VPN + web panel | `amneziawg-install.sh` then `amneziawg-web.sh install` |
 | Userspace VPN without a kernel module | Fresh install with `sudo AWG_BACKEND=boringtun ./amneziawg-install.sh` |
 | Userspace VPN + native imitation and web panel | Fresh BoringTun install, then `amneziawg-web.sh install`; configure imitation in the panel |
-| VPN + DPI-resistant obfuscation | `amneziawg-install.sh` then `amneziawg-proxy.sh` *(AWG 2.0 only)* |
-| Kernel VPN + panel + standalone proxy | `amneziawg-install.sh`, then `amneziawg-web.sh install`, then `amneziawg-proxy.sh` *(AWG 2.0 only)* |
+| VPN + DPI-resistant obfuscation | `amneziawg-install.sh` then `amneziawg-proxy.sh` *(AWG 1.0 or 2.0)* |
+| Kernel VPN + panel + standalone proxy | `amneziawg-install.sh`, then `amneziawg-web.sh install`, then `amneziawg-proxy.sh` *(AWG 1.0 or 2.0)* |
 | Advanced / development | Clone the repo, then run the scripts from the checkout |
 
 ---
@@ -182,9 +182,9 @@ See [amneziawg-web/docs/INSTALL.md](amneziawg-web/docs/INSTALL.md) for all insta
 > ⚠️ Requires VPN to be installed first (`amneziawg-install.sh`).
 
 > [!IMPORTANT]
-> **Compatibility: AmneziaWG 2.0 only (incompatible with AWG 3.0+)**
+> **Compatibility: AmneziaWG 1.0 and 2.0 (incompatible with AWG 3.0+)**
 >
-> `amneziawg-proxy` is compatible **only with AmneziaWG 2.0** and cannot be used when AWG 3.0 mode is enabled.
+> `amneziawg-proxy` is compatible **only with AmneziaWG 1.0 and 2.0** and cannot be used when AWG 3.0 mode is enabled.
 >
 > In AmneziaWG 2.0, the S1–S4 padding prefix consists of arbitrary random bytes that the proxy safely replaces with cover-protocol filler bytes (QUIC, DNS, STUN, or SIP headers) while preserving the encrypted payload. Starting with AmneziaWG 3.0, the S1–S4 padding values are used as key material for header encryption (`HeaderProtectionKey`). Modifying or rewriting them in flight breaks header decryption on the peer, and the encrypted headers prevent the proxy from classifying packets.
 >

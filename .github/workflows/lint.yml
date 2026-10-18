@@ -33,6 +33,7 @@ jobs:
           bash -n tests/test-dkms-compat.sh
           bash -n tests/test-backend.sh
           bash -n tests/test-web-backend-status.sh
+          bash -n tests/test-web-legacy-protocol.sh
           bash -n tests/test-web-imitation.sh
           bash -n tests/test-web-protocol-options.sh
           bash -n tests/test-web-protocol-diagnostics.sh
@@ -79,11 +80,14 @@ jobs:
       - name: Web backend status regression
         run: bash tests/test-web-backend-status.sh
 
+      - name: Web legacy protocol regression
+        run: bash tests/test-web-legacy-protocol.sh
+
       - name: Web imitation regression
         run: bash tests/test-web-imitation.sh
 
       - name: Web UI regressions
-        run: node --test tests/test-web-imitation-ui.cjs tests/test-web-vpn-uri-ui.cjs
+        run: node --test tests/test-web-imitation-ui.cjs tests/test-web-vpn-uri-ui.cjs tests/test-web-protocol-ui.cjs
 
       - name: Web protocol options regression
         run: bash tests/test-web-protocol-options.sh
@@ -125,6 +129,7 @@ jobs:
           shellcheck --severity=warning tests/test-dkms-compat.sh
           shellcheck --severity=warning tests/test-backend.sh
           shellcheck --severity=warning tests/test-web-backend-status.sh
+          shellcheck --severity=warning tests/test-web-legacy-protocol.sh
           shellcheck --severity=warning tests/test-web-imitation.sh
           shellcheck --severity=warning tests/test-web-protocol-options.sh
           shellcheck --severity=warning tests/test-web-protocol-diagnostics.sh

@@ -23,7 +23,7 @@ impl HRange {
 
 /// AmneziaWG 2.0 obfuscation parameters parsed from an AWG config file.
 ///
-/// Note: `amneziawg-proxy` is compatible **only with AmneziaWG 2.0**. In AmneziaWG 3.0+,
+/// Note: `amneziawg-proxy` is compatible **only with AmneziaWG 1.0 and 2.0**. In AmneziaWG 3.0+,
 /// S1–S4 padding values are used as key material for header encryption (`HeaderProtectionKey`),
 /// which breaks when padding is rewritten, and encrypted headers prevent packet classification.
 ///
@@ -66,7 +66,7 @@ pub struct AwgParams {
 /// Parse an AmneziaWG 2.0 config file (INI-style) and extract the obfuscation parameters
 /// from the `[Interface]` section.
 ///
-/// Note: The proxy is compatible only with AmneziaWG 2.0 configurations. AWG 3.0+
+/// Note: The proxy is compatible only with AmneziaWG 1.0 and 2.0 configurations. AWG 3.0+
 /// header protection configurations (`HeaderProtectionKey`) are not supported.
 ///
 /// Expected format (keys are case-insensitive):
@@ -123,6 +123,11 @@ pub fn parse_awg_config(text: &str) -> Result<AwgParams, ProxyError> {
             let value = value.trim();
 
             match key.to_ascii_lowercase().as_str() {
+                "headerprotectionkey" if !value.is_empty() => {
+                    return Err(ProxyError::Config(
+                        "AWG 3.x header protection is not compatible with the proxy".into(),
+                    ));
+                }
                 "jc" => jc = Some(parse_u32(key, value)?),
                 "jmin" => jmin = Some(parse_u32(key, value)?),
                 "jmax" => jmax = Some(parse_u32(key, value)?),
@@ -139,14 +144,26 @@ pub fn parse_awg_config(text: &str) -> Result<AwgParams, ProxyError> {
         }
     }
 
+    // AWG 1.0 has no cookie/transport padding fields. Keep requiring a
+    // complete pair when either field is present, so a partial modern config
+    // is not silently interpreted as legacy framing.
+    let legacy_padding = s3.is_none() && s4.is_none();
     let params = AwgParams {
         jc: jc.ok_or_else(|| ProxyError::Config("missing AWG parameter: Jc".into()))?,
         jmin: jmin.ok_or_else(|| ProxyError::Config("missing AWG parameter: Jmin".into()))?,
         jmax: jmax.ok_or_else(|| ProxyError::Config("missing AWG parameter: Jmax".into()))?,
         s1: s1.ok_or_else(|| ProxyError::Config("missing AWG parameter: S1".into()))?,
         s2: s2.ok_or_else(|| ProxyError::Config("missing AWG parameter: S2".into()))?,
-        s3: s3.ok_or_else(|| ProxyError::Config("missing AWG parameter: S3".into()))?,
-        s4: s4.ok_or_else(|| ProxyError::Config("missing AWG parameter: S4".into()))?,
+        s3: if legacy_padding {
+            0
+        } else {
+            s3.ok_or_else(|| ProxyError::Config("missing AWG parameter: S3".into()))?
+        },
+        s4: if legacy_padding {
+            0
+        } else {
+            s4.ok_or_else(|| ProxyError::Config("missing AWG parameter: S4".into()))?
+        },
         h1: h1.ok_or_else(|| ProxyError::Config("missing AWG parameter: H1".into()))?,
         h2: h2.ok_or_else(|| ProxyError::Config("missing AWG parameter: H2".into()))?,
         h3: h3.ok_or_else(|| ProxyError::Config("missing AWG parameter: H3".into()))?,
@@ -878,6 +895,46 @@ AllowedIPs = 10.66.66.2/32
         assert_eq!(p.h2, HRange { min: 300, max: 400 });
         assert_eq!(p.h3, HRange { min: 500, max: 600 });
         assert_eq!(p.h4, HRange { min: 700, max: 800 });
+    }
+
+    #[test]
+    fn parse_awg1_config_uses_unpadded_cookie_and_transport_packets() {
+        let legacy = sample_awg_conf()
+            .replace("S3 = 33\n", "")
+            .replace("S4 = 120\n", "")
+            .replace("100-200", "100")
+            .replace("300-400", "300")
+            .replace("500-600", "500")
+            .replace("700-800", "700");
+        let p = parse_awg_config(&legacy).unwrap();
+        assert_eq!((p.s1, p.s2, p.s3, p.s4), (42, 88, 0, 0));
+        assert_eq!(p.h4, HRange { min: 700, max: 700 });
+        // A half-present S3/S4 pair is an incomplete modern config.
+        assert!(parse_awg_config(&legacy.replace("S2 = 88", "S2 = 88\nS3 = 33")).is_err());
+        assert!(parse_awg_config(&legacy.replace("S2 = 88\n", "")).is_err());
+        assert!(parse_awg_config(
+            &legacy.replace("S2 = 88", "S2 = 88\nHeaderProtectionKey = secret")
+        )
+        .is_err());
+        use crate::responder::{classify_awg_packet, AwgPacketType, Protocol};
+        for (padding, length, header, kind) in [
+            (42, 148, 100_u32, AwgPacketType::HandshakeInit),
+            (88, 92, 300, AwgPacketType::HandshakeResponse),
+            (0, 64, 500, AwgPacketType::CookieReply),
+            (0, 32, 700, AwgPacketType::TransportData),
+        ] {
+            for protocol in [Protocol::Quic, Protocol::Dns, Protocol::Sip, Protocol::Stun] {
+                let mut packet = vec![0x55; padding + length];
+                packet[padding..padding + 4].copy_from_slice(&header.to_le_bytes());
+                let original = packet.clone();
+                assert_eq!(classify_awg_packet(&packet, &p), Some(kind));
+                assert_eq!(
+                    crate::transform::apply_awg_transform(&mut packet, &p, protocol, None),
+                    padding != 0
+                );
+                assert_eq!(&packet[padding..], &original[padding..]);
+            }
+        }
     }
 
     #[test]

@@ -15,11 +15,11 @@ The proxy is deliberately simple:
 - it can write a local session status file (`status_file`) for `amneziawg-web`.
 
 > [!IMPORTANT]
-> **Compatibility: AmneziaWG 2.0 only**
-> `amneziawg-proxy` is compatible **only with AmneziaWG 2.0**. It is **not compatible with AmneziaWG 3.0+**
+> **Compatibility: AmneziaWG 1.0 and 2.0**
+> `amneziawg-proxy` is compatible **only with AmneziaWG 1.0 and 2.0**. It is **not compatible with AmneziaWG 3.0+**
 > because AWG 3.0 uses S1–S4 padding as key material for header encryption (`HeaderProtectionKey`).
 > Rewriting padding in flight breaks header decryption, and encrypted headers prevent packet classification.
-> Ensure the target AWG backend is configured for AWG 2.0.
+> Ensure the target AWG backend is configured for AWG 1.0 or 2.0.
 
 The proxy does not need to manage the AWG interface. In a manual deployment,
 you only need to make sure the proxy can reach the AWG UDP backend and that

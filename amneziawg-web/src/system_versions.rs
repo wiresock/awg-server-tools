@@ -119,6 +119,7 @@ impl RuntimeInfo {
         let value = |key| fields.get(key).copied().unwrap_or("");
         let mut info = Self {
             protocol: match value("awg_protocol") {
+                "1" | "1.0" => Some("1.0".into()),
                 "2" | "2.0" => Some("2.0".into()),
                 "3" | "3.0" => Some("3.0".into()),
                 "3.1" => Some("3.1".into()),
@@ -478,6 +479,21 @@ mod tests {
     use super::*;
 
     const BORINGTUN_STATUS: &str = "backend=boringtun\nawg_protocol=2.0\nservice_state=active\ndaemon_state=running\ndaemon_release=boringtun-cli-0.7.1-gae2ab44e9a68-linux-x86_64-musl\ninstalled_release=boringtun-cli-9.9.9-gabcdef-linux-x86_64-musl\n";
+
+    #[test]
+    fn awg1_kernel_header_includes_standalone_proxy() {
+        let runtime = RuntimeInfo::parse(
+            "backend=kernel\nawg_protocol=1\nservice_state=active\nmodule_state=loaded\n",
+        );
+        assert_eq!(
+            header_summary(
+                &runtime,
+                "test",
+                &VersionInfo::installed("Proxy", "test", PROXY_BIN)
+            ),
+            "Protocol: AWG 1.0 · Backend: AWG kernel · Panel: test · Proxy: test"
+        );
+    }
 
     #[test]
     fn boringtun_header_separates_protocol_from_verified_running_release() {
