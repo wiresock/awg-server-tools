@@ -228,6 +228,7 @@ impl From<script_bridge::ScriptError> for RemoveClientError {
 /// settings needed to generate new client configs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AwgProtocolVersion {
+    V1,
     V2,
     V3,
     V31,
@@ -435,7 +436,19 @@ pub fn parse_params(content: &str) -> Result<ServerParams, CreateClientError> {
 
     let get_opt = |key: &str| -> String { map.get(key).cloned().unwrap_or_default() };
 
+    let legacy_framing = get_opt("SERVER_AWG_S3").is_empty()
+        && get_opt("SERVER_AWG_S4").is_empty()
+        && [
+            "SERVER_AWG_H1",
+            "SERVER_AWG_H2",
+            "SERVER_AWG_H3",
+            "SERVER_AWG_H4",
+        ]
+        .iter()
+        .all(|key| get_opt(key).parse::<u32>().is_ok());
     let protocol_version = match get_opt("AWG_PROTOCOL_VERSION").as_str() {
+        "1" | "1.0" => AwgProtocolVersion::V1,
+        "" if legacy_framing => AwgProtocolVersion::V1,
         "" | "2" | "2.0" => AwgProtocolVersion::V2,
         "3" | "3.0" => AwgProtocolVersion::V3,
         "3.1" => AwgProtocolVersion::V31,
@@ -462,8 +475,16 @@ pub fn parse_params(content: &str) -> Result<ServerParams, CreateClientError> {
         jmax: get("SERVER_AWG_JMAX")?,
         s1: get("SERVER_AWG_S1")?,
         s2: get("SERVER_AWG_S2")?,
-        s3: get("SERVER_AWG_S3")?,
-        s4: get("SERVER_AWG_S4")?,
+        s3: if protocol_version == AwgProtocolVersion::V1 {
+            get_opt("SERVER_AWG_S3")
+        } else {
+            get("SERVER_AWG_S3")?
+        },
+        s4: if protocol_version == AwgProtocolVersion::V1 {
+            get_opt("SERVER_AWG_S4")
+        } else {
+            get("SERVER_AWG_S4")?
+        },
         h1: get("SERVER_AWG_H1")?,
         h2: get("SERVER_AWG_H2")?,
         h3: get("SERVER_AWG_H3")?,
@@ -485,6 +506,21 @@ pub fn parse_params(content: &str) -> Result<ServerParams, CreateClientError> {
     // option-injection when the name is passed as a command argument.
     validate_interface_name(&params.server_awg_nic)?;
     match params.protocol_version {
+        AwgProtocolVersion::V1 => {
+            if [&params.s3, &params.s4]
+                .iter()
+                .any(|s| !s.is_empty() && s.parse::<u32>() != Ok(0))
+                || [&params.h1, &params.h2, &params.h3, &params.h4]
+                    .iter()
+                    .any(|h| h.parse::<u32>().is_err())
+                || !params.header_protection_key.is_empty()
+            {
+                return Err(CreateClientError::ParamsRead(
+                    "AWG 1.0 requires scalar headers, no S3/S4 padding, and no header protection"
+                        .into(),
+                ));
+            }
+        }
         AwgProtocolVersion::V2 => {}
         AwgProtocolVersion::V3 => {
             validate_awg3_params(&params)?;
@@ -1099,7 +1135,7 @@ fn build_client_config(
         .map(|mtu| format!("\nMTU = {mtu}"))
         .unwrap_or_default();
     let protocol_fields = match params.protocol_version {
-        AwgProtocolVersion::V2 => String::new(),
+        AwgProtocolVersion::V1 | AwgProtocolVersion::V2 => String::new(),
         AwgProtocolVersion::V3 | AwgProtocolVersion::V31 => {
             let extra_31 = if params.protocol_version == AwgProtocolVersion::V31 {
                 let (random_trailers, disable_cookies) = validate_awg31_params(params)?;
@@ -1139,6 +1175,11 @@ fn build_client_config(
         }
     };
 
+    let extra_padding = if params.protocol_version == AwgProtocolVersion::V1 {
+        String::new()
+    } else {
+        format!("S3 = {}\nS4 = {}\n", params.s3, params.s4)
+    };
     Ok(format!(
         "\
 [Interface]
@@ -1150,9 +1191,7 @@ Jmin = {jmin}
 Jmax = {jmax}
 S1 = {s1}
 S2 = {s2}
-S3 = {s3}
-S4 = {s4}
-H1 = {h1}
+{extra_padding}H1 = {h1}
 H2 = {h2}
 H3 = {h3}
 H4 = {h4}
@@ -1168,8 +1207,6 @@ AllowedIPs = {allowed_ips}",
         jmax = params.jmax,
         s1 = params.s1,
         s2 = params.s2,
-        s3 = params.s3,
-        s4 = params.s4,
         h1 = params.h1,
         h2 = params.h2,
         h3 = params.h3,
@@ -1929,6 +1966,40 @@ SERVER_AWG_H4='1837068650'
     // boundary must not silently produce a configuration without the override.
     fn mtu_test_params() -> &'static str {
         "SERVER_PUB_IP='198.51.100.1'\nSERVER_AWG_NIC='awg0'\nSERVER_AWG_IPV4='10.66.66.1'\nSERVER_AWG_IPV6='fd42:42:42::1'\nSERVER_PORT='51820'\nSERVER_PUB_KEY='PUB'\nCLIENT_DNS_1='1.1.1.1'\nALLOWED_IPS='0.0.0.0/0, ::/0'\nSERVER_AWG_JC='4'\nSERVER_AWG_JMIN='50'\nSERVER_AWG_JMAX='1000'\nSERVER_AWG_S1='30'\nSERVER_AWG_S2='100'\nSERVER_AWG_S3='45'\nSERVER_AWG_S4='120'\nSERVER_AWG_H1='5-10'\nSERVER_AWG_H2='11-20'\nSERVER_AWG_H3='21-30'\nSERVER_AWG_H4='31-40'\n"
+    }
+
+    #[test]
+    fn awg1_params_preserve_legacy_client_format() {
+        let legacy = mtu_test_params()
+            .replace("SERVER_AWG_S3='45'\n", "")
+            .replace("SERVER_AWG_S4='120'\n", "")
+            .replace("5-10", "5")
+            .replace("11-20", "11")
+            .replace("21-30", "21")
+            .replace("31-40", "31");
+        for version in [
+            "",
+            "AWG_PROTOCOL_VERSION='1'\n",
+            "AWG_PROTOCOL_VERSION='1.0'\n",
+        ] {
+            let params = parse_params(&format!("{legacy}{version}")).unwrap();
+            let config = build_client_config(
+                &params,
+                "PRIVATE",
+                "10.66.66.2",
+                None,
+                "PSK",
+                "1.1.1.1",
+                "example.org:51820",
+            )
+            .unwrap();
+            assert!(config.contains("S1 = 30\nS2 = 100\nH1 = 5"), "{config}");
+            assert!(!config.contains("S3 =") && !config.contains("S4 ="));
+            assert!(!config.contains("HeaderProtectionKey"));
+        }
+        // An incomplete newer installation must not silently become AWG 1.0.
+        assert!(parse_params(&format!("{legacy}AWG_PROTOCOL_VERSION='2'\n")).is_err());
+        assert!(parse_params(&format!("{legacy}SERVER_AWG_S3='45'\n")).is_err());
     }
 
     #[test]

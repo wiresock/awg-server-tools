@@ -299,9 +299,8 @@ pub fn read_params_via_sudo() -> Result<String, AwgError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Read the persisted AWG protocol mode. Missing state is normalized by the
-/// privileged helper to version 2 for compatibility with existing installs.
-/// Returns a display string: `2.0`, `3.0`, or `3.1`.
+/// Read the protocol mode, including legacy AWG 1.0 framing without S3/S4.
+/// Returns a display string: `1.0`, `2.0`, `3.0`, or `3.1`.
 pub fn protocol_status_via_sudo() -> Result<String, AwgError> {
     let output = Command::new(SUDO_BIN)
         .args(["-n", PRIVILEGED_HELPER_BIN, "protocol-status"])
@@ -315,6 +314,7 @@ pub fn protocol_status_via_sudo() -> Result<String, AwgError> {
         });
     }
     match String::from_utf8_lossy(&output.stdout).trim() {
+        "1" => Ok("1.0".to_string()),
         "2" => Ok("2.0".to_string()),
         "3" => Ok("3.0".to_string()),
         "3.1" => Ok("3.1".to_string()),

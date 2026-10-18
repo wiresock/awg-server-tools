@@ -21,7 +21,7 @@
 #      restricted (for example with firewall rules) to avoid unintended exposure
 #   8. Installs and optionally enables the systemd service
 #
-# Note: amneziawg-proxy is compatible ONLY with AmneziaWG 2.0. It is incompatible
+# Note: amneziawg-proxy is compatible ONLY with AmneziaWG 1.0 and 2.0. It is incompatible
 # with AmneziaWG 3.0+ because AWG 3.0 uses S1-S4 padding as key material for
 # header encryption, which is corrupted by proxy padding rewrites.
 #
@@ -124,9 +124,9 @@ AWG_NIC=""
 
 usage() {
     cat <<EOF
-amneziawg-proxy installer (AmneziaWG 2.0 only)
+amneziawg-proxy installer (AmneziaWG 1.0 and 2.0)
 
-Note: amneziawg-proxy is compatible ONLY with AmneziaWG 2.0. It is incompatible
+Note: amneziawg-proxy is compatible ONLY with AmneziaWG 1.0 and 2.0. It is incompatible
 with AmneziaWG 3.0+ because AWG 3.0 uses S1-S4 padding as key material for
 header encryption, which is corrupted by proxy padding rewrites.
 
@@ -319,15 +319,15 @@ Install AmneziaWG first (https://github.com/wiresock/awg-server-tools)."
 
 # ── AWG configuration detection ───────────────────────────────────────────────
 
-# Proxy setup is allowed only for AWG 2.0. Missing/empty protocol state is the
-# same legacy default the installer uses (AWG 2.0). Any 3.x generation, later
+# Proxy setup is allowed for AWG 1.0 and 2.0. Missing/empty protocol state
+# is also supported for legacy installations. Any 3.x generation, later
 # major version, or malformed value must fail closed.
 awg_protocol_is_proxy_compatible() {
     local proto="${1:-}"
     proto="${proto#"${proto%%[![:space:]]*}"}"
     proto="${proto%"${proto##*[![:space:]]}"}"
     case "${proto}" in
-        ""|2|2.0) return 0 ;;
+        ""|1|1.0|2|2.0) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -439,7 +439,7 @@ with the kernel backend."
             else
                 error "AmneziaWG ${proto} protocol detected."
             fi
-            die "amneziawg-proxy is compatible ONLY with AmneziaWG 2.0.
+            die "amneziawg-proxy is compatible ONLY with AmneziaWG 1.0 and 2.0.
 AWG 3.0+ uses S1-S4 padding as key material for header encryption,
 so proxy obfuscation breaks packet classification and compatibility.
 Please downgrade the interface to AWG 2.0 via 'amneziawg-install.sh --disable-awg3'."

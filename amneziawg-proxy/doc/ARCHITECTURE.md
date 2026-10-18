@@ -7,8 +7,8 @@ server and makes the traffic look like a legitimate application protocol
 (QUIC, DNS, STUN, or SIP) to defeat Deep Packet Inspection (DPI).
 
 > [!IMPORTANT]
-> **Compatibility: AmneziaWG 2.0 only**
-> `amneziawg-proxy` is compatible **only with AmneziaWG 2.0**. It is **incompatible with AmneziaWG 3.0+**.
+> **Compatibility: AmneziaWG 1.0 and 2.0**
+> `amneziawg-proxy` is compatible **only with AmneziaWG 1.0 and 2.0**. It is **incompatible with AmneziaWG 3.0+**.
 > The proxy's traffic-shaping mechanism relies on rewriting the leading S1–S4 padding prefix.
 > In AWG 3.0+, these padding values are used as key material for header encryption (`HeaderProtectionKey`),
 > so modifying them breaks header decryption. Furthermore, header encryption prevents the proxy
@@ -506,7 +506,7 @@ This breaks the proxy in two fatal ways:
    - Inbound client packets may trigger probe detection and receive spurious probe responses (e.g., QUIC Version Negotiation).
 2. **Header decryption corruption:** Starting with AWG 3.0, the `S1`–`S4` padding bytes are not mere discard bytes; they are also incorporated as key material for the header encryption cipher. Overwriting the S-padding bytes with cover-protocol data alters the key material, causing header decryption to fail on the receiving side.
 
-Therefore, `amneziawg-proxy` **must only be used with AmneziaWG 2.0**. Interfaces running AWG 3.0 cannot be proxied with `amneziawg-proxy`.
+Therefore, `amneziawg-proxy` **must only be used with AmneziaWG 1.0 or 2.0**. Interfaces running AWG 3.0 cannot be proxied with `amneziawg-proxy`.
 
 ---
 

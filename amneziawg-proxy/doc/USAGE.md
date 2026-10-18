@@ -24,8 +24,8 @@
 ## Prerequisites
 
 - Linux host with **systemd** (Debian/Ubuntu/CentOS/Fedora/Arch)
-- **AmneziaWG 2.0** already installed and a working `awg0` interface.
-  *(**Important:** `amneziawg-proxy` is compatible **only with AmneziaWG 2.0**;
+- **AmneziaWG 1.0 or 2.0** already installed and a working `awg0` interface.
+  *(**Important:** `amneziawg-proxy` is compatible **only with AmneziaWG 1.0 and 2.0**;
   it is **not compatible with AmneziaWG 3.0+** because AWG 3.0 uses S1–S4 padding
   as key material for header encryption).*
 - **Rust toolchain ≥ 1.75** (only needed for a source build; the installer
@@ -303,15 +303,17 @@ quic_certificate_domain = "localhost"
 ### AWG config integration
 
 > [!IMPORTANT]
-> **Compatibility limitation: AmneziaWG 2.0 only**
-> The proxy is compatible **only with AmneziaWG 2.0**. It expects standard AWG 2.0
-> parameters (`Jc`, `Jmin`, `Jmax`, `S1`–`S4`, and `H1`–`H4`). Starting with AmneziaWG 3.0,
+> **Compatibility limitation: AmneziaWG 1.0 and 2.0**
+> The proxy is compatible **only with AmneziaWG 1.0 and 2.0**. It reads
+> `Jc`, `Jmin`, `Jmax`, `S1`–`S4`, and `H1`–`H4`. AWG 1.0 may omit both
+> S3/S4; they default to zero, so cookie and transport packets pass through
+> unchanged. A partially specified pair is rejected. Starting with AmneziaWG 3.0,
 > the S1–S4 padding values are used as key material for header encryption (`HeaderProtectionKey`).
 > Modifying them breaks compatibility with AWG 3.0+, and the resulting encrypted headers
 > prevent the proxy from classifying packets. Configurations enabled for AWG 3.0
 > must not be used with `amneziawg-proxy`.
 
-The proxy reads a subset of the `[Interface]` section from the AmneziaWG 2.0
+The proxy reads a subset of the `[Interface]` section from the AmneziaWG
 config file. Only the `[Interface]` section is parsed; `[Peer]` sections and
 unknown keys (e.g. `Address`, `PrivateKey`, `DNS`) are silently ignored.
 
@@ -613,7 +615,7 @@ Then update the `User=` in the service unit to a non-root user if desired.
 
 ### Incompatibility with AmneziaWG 3.0+ (packets not transformed or probe misbehavior)
 
-`amneziawg-proxy` is **compatible only with AmneziaWG 2.0**.
+`amneziawg-proxy` is **compatible only with AmneziaWG 1.0 and 2.0**.
 
 If the backend server was migrated to AWG 3.0 (e.g. via `sudo ./amneziawg-install.sh --enable-awg3`):
 1. In AWG 3.0, the kernel module encrypts the 4-byte header with `HeaderProtectionKey`, so `classify_awg_packet()` fails to match plaintext headers against H1–H4 and every packet returns as unclassified.

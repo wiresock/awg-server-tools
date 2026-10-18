@@ -552,6 +552,8 @@ echo "=== awg_protocol_is_proxy_compatible ==="
 _proxy_proto() { run_install_helper awg_protocol_is_proxy_compatible "$@"; }
 # Legacy missing/empty protocol state and AWG 2.0 aliases are allowed.
 assert_rc 0 _proxy_proto ""
+assert_rc 0 _proxy_proto "1"
+assert_rc 0 _proxy_proto "1.0"
 assert_rc 0 _proxy_proto "2"
 assert_rc 0 _proxy_proto "2.0"
 assert_rc 0 _proxy_proto " 2.0 "
