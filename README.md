@@ -941,6 +941,20 @@ AmneziaWG 2.0 adds S3/S4 and H1–H4 range parameters for enhanced traffic obfus
 
 H parameters accept a range (`min-max`) or a single value.
 
+These are the ranges the installer generates and accepts at install time.
+When it loads an existing installation it also keeps two kinds of values set
+by hand in `params` (keep `awg0.conf` matching, then regenerate the clients):
+
+- `S3` and `S4` from 0 upwards (still at most 150, with the same `+ 56`
+  rules). The protocol allows padding below 15, and a small `S4` saves MTU.
+- The standard WireGuard headers `H1=1`, `H2=2`, `H3=3`, `H4=4`, exactly in
+  that order. These turn off header obfuscation, so the installer never
+  generates them and prints a warning on every run. Any other value below 5
+  is rejected.
+
+Hand-set values outside these rules are reported by name before the
+installer offers to replace them; answer `N` to keep the files unchanged.
+
 `S4` is prepended to every transport packet, so it also sets the MTU: a new
 installation uses the uplink MTU minus 80 minus `S4` for the server interface
 and `1420 − S4` (a 1500-byte path) as the `CLIENT_MTU` default, both at least
