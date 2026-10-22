@@ -8463,14 +8463,13 @@ function readH1AndH2AndH3AndH4Ranges() {
 # These headers turn off header obfuscation, so the installer never generates
 # them, but an operator may set them explicitly in params. Any other value
 # below 5, including a partial or reordered standard set, is not accepted.
+# Matched as text: bash arithmetic wraps values past 2^63, so a huge number
+# must never be compared as a number.
 function awgHeadersAreStandard() {
-	local IDX H_VAR H_STD_MIN H_STD_MAX
+	local IDX H_VAR
 	for IDX in 1 2 3 4; do
 		H_VAR="SERVER_AWG_H${IDX}"
-		parseRange "${!H_VAR:-}" "H_STD_MIN" "H_STD_MAX" || return 1
-		if (( H_STD_MIN != IDX )) || (( H_STD_MAX != IDX )); then
-			return 1
-		fi
+		[[ "${!H_VAR:-}" =~ ^0*${IDX}(-0*${IDX})?$ ]] || return 1
 	done
 	return 0
 }

@@ -356,6 +356,19 @@ fi
 SERVER_AWG_H1="1-4"; SERVER_AWG_H2="2"; SERVER_AWG_H3="3"; SERVER_AWG_H4="4"
 assert_rc 1 awgHeadersAreStandard
 
+SERVER_AWG_H1="01"; SERVER_AWG_H2="002-2"; SERVER_AWG_H3="3"; SERVER_AWG_H4="4"
+assert_rc 0 awgHeadersAreStandard
+
+# 2^64 + 1 wraps to 1 in bash arithmetic; it is not a standard header
+for H_HUGE in "18446744073709551617" "18446744073709551617-18446744073709551617" "9223372036854775809"; do
+	SERVER_AWG_H1="${H_HUGE}"; SERVER_AWG_H2="2"; SERVER_AWG_H3="3"; SERVER_AWG_H4="4"
+	assert_rc 1 awgHeadersAreStandard
+	migrateH1H4 ; RC=$?
+	assert_eq "0" "${RC}" "overflowing H1=${H_HUGE} -> regenerated"
+	assert_eq "H1=${H_HUGE} H2=2 H3=3 H4=4" "${_MIGRATE_H_INVALID_VALUES}" "overflowing H1=${H_HUGE} reported"
+done
+unset H_HUGE
+
 SERVER_AWG_H1=""; SERVER_AWG_H2=""; SERVER_AWG_H3=""; SERVER_AWG_H4=""
 assert_rc 1 awgHeadersAreStandard
 migrateH1H4 ; RC=$?
@@ -764,6 +777,15 @@ _standard_header_warning() ( # <SKIP_LEGACY_MIGRATIONS>
 	AWG_BACKEND=kernel; AWG_PROTOCOL_VERSION=2
 	serializeParams "${dir}/params" || exit 1
 	chmod 600 "${dir}/params"
+	# validateParamsFile requires a root-owned params file; the fixture is
+	# owned by whoever runs the tests, so report root ownership for it only
+	stat() {
+		if [[ "$1" == "-c" && "$2" == "%u" && "$3" == "${dir}/params" ]]; then
+			echo 0
+		else
+			command stat "$@"
+		fi
+	}
 	printf '[Interface]\nAddress = 10.66.66.1/24,fd42:42:42::1/64\nListenPort = 51820\nPrivateKey = SRVPRIV\nJc = 4\nJmin = 50\nJmax = 1000\nS1 = 30\nS2 = 100\nS3 = 140\nS4 = 12\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\n' >"${dir}/awg0.conf"
 	AUTO_INSTALL=""
 	loadParams 0 "$1" 2>&1 >/dev/null </dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -c '^WARNING: H1-H4 are set to the standard WireGuard values 1-4; header obfuscation is off.$'
