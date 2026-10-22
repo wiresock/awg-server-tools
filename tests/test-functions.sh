@@ -321,6 +321,52 @@ TEST_H="200-100"
 convertHToRangeIfNeeded "TEST_H" ; RC=$?
 assert_eq "2" "${RC}" "reversed range -> INVALID"
 
+echo "=== awgHeadersAreStandard / migrateH1H4 ==="
+SERVER_AWG_H1="1"; SERVER_AWG_H2="2"; SERVER_AWG_H3="3"; SERVER_AWG_H4="4"
+assert_rc 0 awgHeadersAreStandard
+migrateH1H4 ; RC=$?
+assert_eq "1" "${RC}" "standard headers -> NO_CHANGE"
+assert_eq "1 2 3 4" "${SERVER_AWG_H1} ${SERVER_AWG_H2} ${SERVER_AWG_H3} ${SERVER_AWG_H4}" "standard headers preserved"
+assert_eq "" "${_MIGRATE_H_INVALID_VALUES}" "standard headers -> no invalid report"
+
+SERVER_AWG_H1="1-1"; SERVER_AWG_H2="2-2"; SERVER_AWG_H3="3-3"; SERVER_AWG_H4="4-4"
+assert_rc 0 awgHeadersAreStandard
+migrateH1H4 ; RC=$?
+assert_eq "1" "${RC}" "standard headers as N-N ranges -> NO_CHANGE"
+assert_eq "1-1 2-2 3-3 4-4" "${SERVER_AWG_H1} ${SERVER_AWG_H2} ${SERVER_AWG_H3} ${SERVER_AWG_H4}" "standard N-N headers preserved"
+
+SERVER_AWG_H1="2"; SERVER_AWG_H2="1"; SERVER_AWG_H3="3"; SERVER_AWG_H4="4"
+assert_rc 1 awgHeadersAreStandard
+migrateH1H4 ; RC=$?
+assert_eq "0" "${RC}" "reordered standard headers -> regenerated"
+assert_eq "H1=2 H2=1 H3=3 H4=4" "${_MIGRATE_H_INVALID_VALUES}" "reordered standard headers reported"
+
+SERVER_AWG_H1="1"; SERVER_AWG_H2="2"; SERVER_AWG_H3="3"; SERVER_AWG_H4="100-200"
+assert_rc 1 awgHeadersAreStandard
+migrateH1H4 ; RC=$?
+assert_eq "0" "${RC}" "partial standard headers -> regenerated"
+TESTS_RUN=$((TESTS_RUN + 1))
+if parseRange "${SERVER_AWG_H1}" H_LO H_HI && (( H_LO >= 5 )); then
+	TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+	TESTS_FAILED=$((TESTS_FAILED + 1))
+	echo "  FAIL: partial standard headers not regenerated (H1=${SERVER_AWG_H1})"
+fi
+
+SERVER_AWG_H1="1-4"; SERVER_AWG_H2="2"; SERVER_AWG_H3="3"; SERVER_AWG_H4="4"
+assert_rc 1 awgHeadersAreStandard
+
+SERVER_AWG_H1=""; SERVER_AWG_H2=""; SERVER_AWG_H3=""; SERVER_AWG_H4=""
+assert_rc 1 awgHeadersAreStandard
+migrateH1H4 ; RC=$?
+assert_eq "0" "${RC}" "missing pre-2.0 headers -> generated"
+assert_eq "" "${_MIGRATE_H_INVALID_VALUES}" "missing pre-2.0 headers -> no invalid report"
+
+SERVER_AWG_H1="100-200"; SERVER_AWG_H2="300-400"; SERVER_AWG_H3="500-600"; SERVER_AWG_H4="700-800"
+migrateH1H4 ; RC=$?
+assert_eq "1" "${RC}" "valid ranges -> NO_CHANGE"
+unset H_LO H_HI SERVER_AWG_H1 SERVER_AWG_H2 SERVER_AWG_H3 SERVER_AWG_H4 _MIGRATE_H_INVALID_VALUES
+
 echo "=== generateH1AndH2AndH3AndH4Ranges ==="
 for ITER in {1..5}; do
 	generateH1AndH2AndH3AndH4Ranges
@@ -607,6 +653,32 @@ for S4_SOURCE in params config; do
 	assert_eq '0|45|120' "$(_migrate_decimal_s3s4 "${S4_SOURCE}" 45 18446744073709551736)" "${S4_SOURCE}: migration rejects overflowing S4"
 done
 unset S4_SOURCE
+# Operator-set values below the generated 15 are valid AWG padding and stay
+assert_eq '1|140|12' "$(_migrate_decimal_s3s4 params 140 12)" "params: migration keeps an S4 below 15"
+assert_eq '1|0|0' "$(_migrate_decimal_s3s4 params 0 0)" "params: migration keeps zero S3/S4"
+assert_eq '0|140|12' "$(_migrate_decimal_s3s4 config 140 12)" "config: migration takes over an S4 below 15"
+assert_eq '0|45|120' "$(_migrate_decimal_s3s4 params 0 56)" "params: migration rejects the zero S3 plus 56 collision"
+assert_eq '0|45|120' "$(_migrate_decimal_s3s4 params '' 10)" "params: a one-sided S4 is replaced"
+# Hand-set values that get replaced are reported, whatever replaces them
+_migrate_s3s4_report() ( # <params S3> <params S4> <conf S3> <conf S4>
+	local dir rc=0; dir="$(mktemp -d)"
+	trap 'rm -rf "${dir}"' EXIT
+	SERVER_AWG_CONF="${dir}/awg0.conf"
+	SERVER_AWG_S3="$1"; SERVER_AWG_S4="$2"
+	if [[ -n "$3$4" ]]; then
+		printf 'S3 = %s\nS4 = %s\n' "$3" "$4" >"${SERVER_AWG_CONF}"
+	else
+		: >"${SERVER_AWG_CONF}"
+	fi
+	generateS3AndS4() { RANDOM_AWG_S3=45; RANDOM_AWG_S4=120; }
+	migrateS3S4 || rc=$?
+	printf '%s|%s|%s|%s' "${rc}" "${SERVER_AWG_S3}" "${SERVER_AWG_S4}" "${_MIGRATE_S_INVALID_VALUES}"
+)
+assert_eq '0|45|120|S3=45 S4=151' "$(_migrate_s3s4_report 45 151 '' '')" "invalid operator-set S3/S4 are reported when regenerated"
+assert_eq '0|30|100|S3=45 S4=151' "$(_migrate_s3s4_report 45 151 30 100)" "invalid operator-set S3/S4 are reported when the config pair is taken over"
+assert_eq '0|30|100|S3= S4=10' "$(_migrate_s3s4_report '' 10 30 100)" "a one-sided S4 is reported"
+assert_eq '0|45|120|' "$(_migrate_s3s4_report '' '' '' '')" "a pre-2.0 install without S3/S4 is not reported"
+assert_eq '1|140|12|' "$(_migrate_s3s4_report 140 12 '' '')" "valid S3/S4 are neither replaced nor reported"
 
 echo "=== pre-2.0 migration recommends an MTU for a new S4 ==="
 # The migration is the one path that gives an existing server a new S4. It
@@ -640,6 +712,67 @@ _check_migration_mtu_note() ( # <server config S3/S4: none or S3:S4>
 )
 assert_eq "1|0|CLIENT_MTU=''|1" "$(_check_migration_mtu_note none)" "a generated S4 is persisted with an MTU note and no MTU change"
 assert_eq "0|0|CLIENT_MTU=''|1" "$(_check_migration_mtu_note 45:120)" "an S4 taken over from the server config gets no MTU note"
+
+echo "=== migration prompt names replaced hand-set values ==="
+_migration_prompt() ( # <AUTO_INSTALL> <params H1> <params H2> <params H3> <params H4>
+	local dir; dir="$(mktemp -d)"
+	trap 'rm -rf "${dir}"' EXIT
+	AMNEZIAWG_DIR="${dir}"; SERVER_AWG_NIC=awg0; SERVER_AWG_CONF="${dir}/awg0.conf"
+	SERVER_PUB_IP=198.51.100.1; SERVER_PUB_NIC=eth0; SERVER_AWG_IPV4=10.66.66.1
+	SERVER_AWG_IPV6="fd42:42:42::1"; SERVER_PORT=51820; SERVER_PRIV_KEY=SRVPRIV; SERVER_PUB_KEY=SRVPUB
+	CLIENT_DNS_1=1.1.1.1; CLIENT_DNS_2=""; CLIENT_MTU=""; ALLOWED_IPS="0.0.0.0/0,::/0"; ENABLE_IPV6=y
+	SERVER_AWG_JC=4; SERVER_AWG_JMIN=50; SERVER_AWG_JMAX=1000
+	SERVER_AWG_S1=30; SERVER_AWG_S2=100; SERVER_AWG_S3=140; SERVER_AWG_S4=12
+	SERVER_AWG_H1="$2"; SERVER_AWG_H2="$3"; SERVER_AWG_H3="$4"; SERVER_AWG_H4="$5"
+	serializeParams "${dir}/params" || exit 1
+	printf '[Interface]\nAddress = 10.66.66.1/24,fd42:42:42::1/64\nListenPort = 51820\nPrivateKey = SRVPRIV\nJc = 4\nJmin = 50\nJmax = 1000\nS1 = 30\nS2 = 100\nS3 = 140\nS4 = 12\nH1 = %s\nH2 = %s\nH3 = %s\nH4 = %s\n' "$2" "$3" "$4" "$5" >"${SERVER_AWG_CONF}"
+	systemctl() { return 1; }
+	getHomeDirForClient() { echo "${dir}/home"; }
+	generateH1AndH2AndH3AndH4Ranges() {
+		RANDOM_AWG_H1_MIN=10; RANDOM_AWG_H1_MAX=20; RANDOM_AWG_H2_MIN=30; RANDOM_AWG_H2_MAX=40
+		RANDOM_AWG_H3_MIN=50; RANDOM_AWG_H3_MAX=60; RANDOM_AWG_H4_MIN=70; RANDOM_AWG_H4_MAX=80
+	}
+	AUTO_INSTALL="$1"
+	migrateS3S4 && exit 1
+	migrateH1H4 || exit 1
+	# Under AUTO_INSTALL the prompt auto-confirms; otherwise decline it
+	printf 'n\n' | persistMigration "${SERVER_AWG_IPV6}" 0 2>/dev/null | sed -e 's/\x1b\[[0-9;]*m//g' -e "s|${dir}|DIR|g" \
+		| grep -E '^(H1-H4 in|Proceeding sets|in params and|To keep|AUTO_INSTALL replaces)'
+	printf 'H=%s' "$(grep -E '^H[1-4] = ' "${SERVER_AWG_CONF}" | tr '\n' ' ')"
+)
+assert_eq "H1-H4 in DIR/params are not valid: H1=2 H2=1 H3=3 H4=4
+Proceeding sets H1=10-20 H2=30-40 H3=50-60 H4=70-80
+in params and the server config. To keep your own values, answer N, set them in params and DIR/awg0.conf, and rerun the script.
+H=H1 = 2 H2 = 1 H3 = 3 H4 = 4 " "$(_migration_prompt n 2 1 3 4)" "declined prompt names the old and new H values and leaves the config alone"
+AUTO_PROMPT="$(_migration_prompt y 2 1 3 4)"
+assert_eq "1" "$(printf '%s\n' "${AUTO_PROMPT}" | grep -c '^in params and the server config. AUTO_INSTALL replaces them without asking.$')" "AUTO_INSTALL prompt does not offer a choice"
+assert_eq "0" "$(printf '%s\n' "${AUTO_PROMPT}" | grep -c 'answer N')" "AUTO_INSTALL prompt has no answer-N hint"
+assert_eq "H=H1 = 10-20 H2 = 30-40 H3 = 50-60 H4 = 70-80 " "$(printf '%s\n' "${AUTO_PROMPT}" | tail -1)" "AUTO_INSTALL replaces the config values"
+unset AUTO_PROMPT
+
+echo "=== standard WireGuard headers warn on every loadParams ==="
+_standard_header_warning() ( # <SKIP_LEGACY_MIGRATIONS>
+	local dir; dir="$(mktemp -d)"
+	trap 'rm -rf "${dir}"' EXIT
+	AMNEZIAWG_DIR="${dir}"; SERVER_AWG_NIC=awg0
+	SERVER_PUB_IP=198.51.100.1; SERVER_PUB_NIC=eth0; SERVER_AWG_IPV4=10.66.66.1
+	SERVER_AWG_IPV6="fd42:42:42::1"; SERVER_PORT=51820; SERVER_PRIV_KEY=SRVPRIV; SERVER_PUB_KEY=SRVPUB
+	CLIENT_DNS_1=1.1.1.1; CLIENT_DNS_2=""; CLIENT_MTU=""; ALLOWED_IPS="0.0.0.0/0,::/0"; ENABLE_IPV6=y
+	SERVER_AWG_JC=4; SERVER_AWG_JMIN=50; SERVER_AWG_JMAX=1000
+	SERVER_AWG_S1=30; SERVER_AWG_S2=100; SERVER_AWG_S3=140; SERVER_AWG_S4=12
+	SERVER_AWG_H1=1; SERVER_AWG_H2=2; SERVER_AWG_H3=3; SERVER_AWG_H4=4
+	AWG_BACKEND=kernel; AWG_PROTOCOL_VERSION=2
+	serializeParams "${dir}/params" || exit 1
+	chmod 600 "${dir}/params"
+	printf '[Interface]\nAddress = 10.66.66.1/24,fd42:42:42::1/64\nListenPort = 51820\nPrivateKey = SRVPRIV\nJc = 4\nJmin = 50\nJmax = 1000\nS1 = 30\nS2 = 100\nS3 = 140\nS4 = 12\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\n' >"${dir}/awg0.conf"
+	AUTO_INSTALL=""
+	loadParams 0 "$1" 2>&1 >/dev/null </dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -c '^WARNING: H1-H4 are set to the standard WireGuard values 1-4; header obfuscation is off.$'
+	printf '|%s %s %s %s|%s' "${SERVER_AWG_H1}" "${SERVER_AWG_H2}" "${SERVER_AWG_H3}" "${SERVER_AWG_H4}" "$(grep -c 'params.bak' <(ls "${dir}") || true)"
+)
+assert_eq "1
+|1 2 3 4|0" "$(_standard_header_warning 0)" "ordinary load keeps standard headers, warns once, migrates nothing"
+assert_eq "1
+|1 2 3 4|0" "$(_standard_header_warning 1)" "protocol-transition load warns too"
 
 echo "=== optional client MTU persistence ==="
 MTU_PARAMS_DIR="$(mktemp -d)"

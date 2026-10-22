@@ -8458,6 +8458,23 @@ function readH1AndH2AndH3AndH4Ranges() {
 	SERVER_AWG_H4="${SERVER_AWG_H4_MIN}-${SERVER_AWG_H4_MAX}"
 }
 
+# Return success when SERVER_AWG_H1-H4 hold exactly the standard WireGuard
+# message types (H1=1, H2=2, H3=3, H4=4, as single values or N-N ranges).
+# These headers turn off header obfuscation, so the installer never generates
+# them, but an operator may set them explicitly in params. Any other value
+# below 5, including a partial or reordered standard set, is not accepted.
+function awgHeadersAreStandard() {
+	local IDX H_VAR H_STD_MIN H_STD_MAX
+	for IDX in 1 2 3 4; do
+		H_VAR="SERVER_AWG_H${IDX}"
+		parseRange "${!H_VAR:-}" "H_STD_MIN" "H_STD_MAX" || return 1
+		if (( H_STD_MIN != IDX )) || (( H_STD_MAX != IDX )); then
+			return 1
+		fi
+	done
+	return 0
+}
+
 # Helper function to convert a single H value to range format if needed
 # Validates that the value is numeric and within bounds [5-2147483647]
 #
@@ -11052,22 +11069,45 @@ function validateParamsFile() {
 	SERVER_AWG_IPV6=$(normalizeIPv6 "${SERVER_AWG_IPV6}")
 }
 
+# Validate an existing S3/S4 pair: decimal, at most 150 each, with
+# S3 + 56 != S4 and S4 + 56 != S3 (56 is the WireGuard handshake initiation
+# message size). Unlike generation and interactive input, which start at 15,
+# existing values may go down to 0: the protocol allows that, and operators
+# pick small S4 values to save MTU.
+function isValidS3S4Pair() { # <S3> <S4>
+	local S3="$1" S4="$2"
+	[[ "${S3}" =~ ^0*[0-9]{1,3}$ ]] && [[ "${S4}" =~ ^0*[0-9]{1,3}$ ]] && \
+	   (( 10#${S3} <= 150 )) && (( 10#${S4} <= 150 )) && \
+	   (( 10#${S3} + 56 != 10#${S4} )) && (( 10#${S4} + 56 != 10#${S3} ))
+}
+
 # Migration for pre-2.0 installations: check for missing or invalid S3/S4 parameters
 # Sets SERVER_AWG_S3 and SERVER_AWG_S4 if they are missing or invalid
 # Returns 0 if migration was needed, 1 if no change
 function migrateS3S4() {
+	# Global read by persistMigration to explain why operator-set S3/S4 values
+	# are being replaced; prefixed with _ to denote script-internal state
+	_MIGRATE_S_INVALID_VALUES=""
+	# Pre-2.0 installations had no S3/S4 at all; anything else was set in
+	# params and deserves an explanation before it is replaced
+	local HAD_S_VALUES=0
+	if [[ -n "${SERVER_AWG_S3}${SERVER_AWG_S4}" ]]; then
+		HAD_S_VALUES=1
+	fi
+	local ORIG_S_VALUES="S3=${SERVER_AWG_S3} S4=${SERVER_AWG_S4}"
+
 	# If both S3/S4 are present, validate them before skipping migration.
 	# This catches invalid values from manual edits or partial writes.
 	if [[ -n "${SERVER_AWG_S3}" ]] && [[ -n "${SERVER_AWG_S4}" ]]; then
-		if [[ "${SERVER_AWG_S3}" =~ ^0*[0-9]{1,3}$ ]] && [[ "${SERVER_AWG_S4}" =~ ^0*[0-9]{1,3}$ ]] && \
-		   (( 10#${SERVER_AWG_S3} >= 15 )) && (( 10#${SERVER_AWG_S3} <= 150 )) && \
-		   (( 10#${SERVER_AWG_S4} >= 15 )) && (( 10#${SERVER_AWG_S4} <= 150 )) && \
-		   (( 10#${SERVER_AWG_S3} + 56 != 10#${SERVER_AWG_S4} )) && (( 10#${SERVER_AWG_S4} + 56 != 10#${SERVER_AWG_S3} )); then
+		if isValidS3S4Pair "${SERVER_AWG_S3}" "${SERVER_AWG_S4}"; then
 			return 1
 		fi
 		# Values are present but invalid — clear them so the logic below regenerates
 		SERVER_AWG_S3=""
 		SERVER_AWG_S4=""
+	fi
+	if (( HAD_S_VALUES )); then
+		_MIGRATE_S_INVALID_VALUES="${ORIG_S_VALUES}"
 	fi
 
 	# Try to read existing S3/S4 from config file before using defaults
@@ -11076,24 +11116,9 @@ function migrateS3S4() {
 	CONF_S3=$(grep -E "^S3 = " "${SERVER_AWG_CONF}" 2>/dev/null | sed 's/^S3 = //')
 	CONF_S4=$(grep -E "^S4 = " "${SERVER_AWG_CONF}" 2>/dev/null | sed 's/^S4 = //')
 
-	if [[ -n "${CONF_S3}" ]] && [[ -n "${CONF_S4}" ]]; then
-		# Validate that loaded values are numeric, within valid range [15-150],
-		# and satisfy the bidirectional constraint S3 + 56 != S4 and S4 + 56 != S3
-		if [[ "${CONF_S3}" =~ ^0*[0-9]{1,3}$ ]] && [[ "${CONF_S4}" =~ ^0*[0-9]{1,3}$ ]] && \
-		   (( 10#${CONF_S3} >= 15 )) && (( 10#${CONF_S3} <= 150 )) && \
-		   (( 10#${CONF_S4} >= 15 )) && (( 10#${CONF_S4} <= 150 )) && \
-		   (( 10#${CONF_S3} + 56 != 10#${CONF_S4} )) && (( 10#${CONF_S4} + 56 != 10#${CONF_S3} )); then
-			SERVER_AWG_S3="${CONF_S3}"
-			SERVER_AWG_S4="${CONF_S4}"
-		else
-			# Fallback: regenerate S3/S4 if config values are invalid
-			generateS3AndS4
-			while (( RANDOM_AWG_S3 + 56 == RANDOM_AWG_S4 )) || (( RANDOM_AWG_S4 + 56 == RANDOM_AWG_S3 )); do
-				generateS3AndS4
-			done
-			SERVER_AWG_S3=${RANDOM_AWG_S3}
-			SERVER_AWG_S4=${RANDOM_AWG_S4}
-		fi
+	if [[ -n "${CONF_S3}" ]] && [[ -n "${CONF_S4}" ]] && isValidS3S4Pair "${CONF_S3}" "${CONF_S4}"; then
+		SERVER_AWG_S3="${CONF_S3}"
+		SERVER_AWG_S4="${CONF_S4}"
 	else
 		# Generate random S3/S4 values within the valid range [15-150]
 		# ensuring they satisfy the bidirectional constraint S3 + 56 != S4 and S4 + 56 != S3
@@ -11112,6 +11137,24 @@ function migrateS3S4() {
 # Migration for pre-2.0 installations: convert/validate H1-H4 range parameters
 # Returns 0 if migration was needed, 1 if no change
 function migrateH1H4() {
+	# Global read by persistMigration to explain why operator-set H1-H4 values
+	# are being replaced; prefixed with _ to denote script-internal state
+	_MIGRATE_H_INVALID_VALUES=""
+
+	# The standard WireGuard headers are an explicit operator choice, not a
+	# pre-2.0 leftover; keep them as written
+	if awgHeadersAreStandard; then
+		return 1
+	fi
+
+	# Pre-2.0 installations had no H1-H4 at all; anything else was set in
+	# params and deserves an explanation before it is replaced
+	local HAD_H_VALUES=0
+	if [[ -n "${SERVER_AWG_H1}${SERVER_AWG_H2}${SERVER_AWG_H3}${SERVER_AWG_H4}" ]]; then
+		HAD_H_VALUES=1
+	fi
+	local ORIG_H_VALUES="H1=${SERVER_AWG_H1} H2=${SERVER_AWG_H2} H3=${SERVER_AWG_H3} H4=${SERVER_AWG_H4}"
+
 	# Check each H1-H4 independently for conversion
 	# Return codes: 0=converted, 1=no change needed, 2=invalid (needs regeneration)
 	local H_CONVERTED=0
@@ -11184,6 +11227,9 @@ function migrateH1H4() {
 	# If any H value failed validation or ranges overlap, regenerate all H1-H4 ranges
 	# We regenerate all to ensure non-overlapping ranges
 	if [[ ${H_INVALID} == 1 ]]; then
+		if (( HAD_H_VALUES )); then
+			_MIGRATE_H_INVALID_VALUES="${ORIG_H_VALUES}"
+		fi
 		generateH1AndH2AndH3AndH4Ranges
 		SERVER_AWG_H1="${RANDOM_AWG_H1_MIN}-${RANDOM_AWG_H1_MAX}"
 		SERVER_AWG_H2="${RANDOM_AWG_H2_MIN}-${RANDOM_AWG_H2_MAX}"
@@ -11262,6 +11308,30 @@ function persistMigration() {
 	echo -e "${RED}  You MUST regenerate all client configurations for them to connect.${NC}"
 	echo -e "${RED}================================================================================${NC}"
 	echo ""
+	# Explain which hand-set values are about to be replaced and with what.
+	# Under AUTO_INSTALL there is no prompt to decline at, so say that instead.
+	local KEEP_HINT
+	if [[ "${AUTO_INSTALL,,}" == "y" ]]; then
+		KEEP_HINT="AUTO_INSTALL replaces them without asking."
+	else
+		KEEP_HINT="To keep your own values, answer N, set them in params and ${SERVER_AWG_CONF}, and rerun the script."
+	fi
+	if [[ -n "${_MIGRATE_S_INVALID_VALUES:-}" ]]; then
+		echo -e "${ORANGE}S3/S4 in ${AMNEZIAWG_DIR}/params are not valid: ${_MIGRATE_S_INVALID_VALUES}${NC}"
+		echo -e "${ORANGE}Both must be set, each within 0-150, with S3 + 56 != S4 and S4 + 56 != S3.${NC}"
+		echo -e "${ORANGE}Proceeding sets S3=${SERVER_AWG_S3} S4=${SERVER_AWG_S4} in params and the server config.${NC}"
+		echo -e "${ORANGE}${KEEP_HINT}${NC}"
+		echo ""
+	fi
+	if [[ -n "${_MIGRATE_H_INVALID_VALUES:-}" ]]; then
+		echo -e "${ORANGE}H1-H4 in ${AMNEZIAWG_DIR}/params are not valid: ${_MIGRATE_H_INVALID_VALUES}${NC}"
+		echo -e "${ORANGE}Each must be a single value or min-max range within 5-2147483647, and the${NC}"
+		echo -e "${ORANGE}four must not overlap. The only exception is the standard WireGuard set${NC}"
+		echo -e "${ORANGE}H1=1 H2=2 H3=3 H4=4, which turns off header obfuscation.${NC}"
+		echo -e "${ORANGE}Proceeding sets H1=${SERVER_AWG_H1} H2=${SERVER_AWG_H2} H3=${SERVER_AWG_H3} H4=${SERVER_AWG_H4}${NC}"
+		echo -e "${ORANGE}in params and the server config. ${KEEP_HINT}${NC}"
+		echo ""
+	fi
 
 	# Require explicit user confirmation before proceeding with migration
 	if [[ "${AUTO_INSTALL,,}" == "y" ]]; then
@@ -11565,6 +11635,10 @@ function loadParams() {
 	# The explicit AWG 2.0 recovery path must not mutate params or configs before
 	# the protocol transaction has captured its backups. Any legacy normalization
 	# can run on a later ordinary management invocation after the downgrade.
+	# A warning changes nothing, so it belongs before that early return too
+	if awgHeadersAreStandard; then
+		echo -e "${ORANGE}WARNING: H1-H4 are set to the standard WireGuard values 1-4; header obfuscation is off.${NC}" >&2
+	fi
 	if [[ "${SKIP_LEGACY_MIGRATIONS}" == "1" ]]; then
 		return 0
 	fi
