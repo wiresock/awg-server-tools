@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 #[cfg(test)]
 use bytes::{BufMut, BytesMut};
 

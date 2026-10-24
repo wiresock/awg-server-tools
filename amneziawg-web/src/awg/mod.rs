@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! AWG integration layer.
 //!
 //! Executes a root-owned privileged helper via `sudo` and

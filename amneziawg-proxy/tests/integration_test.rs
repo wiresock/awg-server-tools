@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! Integration test: full proxy round-trip with a mock echo backend.
 
 use std::net::SocketAddr;

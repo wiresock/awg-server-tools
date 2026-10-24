@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! Direct client creation without the external install script.
 //!
 //! Implements client creation using individual AWG commands and file

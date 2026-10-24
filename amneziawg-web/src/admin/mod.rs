@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! Admin action helpers (disable/enable peer, config download, user lifecycle).
 //!
 //! These functions encapsulate the DB mutations and audit logging so that both

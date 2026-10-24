@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 use std::path::PathBuf;
 
 use amneziawg_proxy::config;

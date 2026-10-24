@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 WireSock
+# SPDX-License-Identifier: MIT
+#
 # amneziawg-proxy-uninstall.sh
 # Uninstaller for the amneziawg-proxy UDP obfuscation proxy.
 #

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! BoringTun's native packet imitation settings. No proxy is involved.
 use serde::Serialize;
 

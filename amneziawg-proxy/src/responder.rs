@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 

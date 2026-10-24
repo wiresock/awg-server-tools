@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 WireSock
+# SPDX-License-Identifier: MIT
+#
 # amneziawg-web-upgrade.sh
 # Companion upgrade script for the amneziawg-web management panel.
 #

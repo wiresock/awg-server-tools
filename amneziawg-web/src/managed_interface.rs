@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! Selection of the AmneziaWG interface the panel follows, and what it may do
 //! with it.
 //!
