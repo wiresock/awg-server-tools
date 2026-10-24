@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 WireSock
+# SPDX-License-Identifier: MIT
+#
 # Shared resource preparation for amneziawg-web and amneziawg-proxy builds.
 #
 # This file is sourced by the component install/upgrade scripts. Call

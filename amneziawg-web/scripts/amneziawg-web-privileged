@@ -1,4 +1,6 @@
 #!/bin/bash -p
+# SPDX-FileCopyrightText: 2026 WireSock
+# SPDX-License-Identifier: MIT
 
 # Privileged command gateway for amneziawg-web.
 #

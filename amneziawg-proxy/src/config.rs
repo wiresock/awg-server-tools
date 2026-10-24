@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 use serde::Deserialize;
 use std::path::Path;
 

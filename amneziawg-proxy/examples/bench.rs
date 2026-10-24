@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! Benchmark harness for `amneziawg-proxy`.
 //!
 //! Two modes, zero dependencies beyond the crate itself:

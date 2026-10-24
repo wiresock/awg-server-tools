@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! # amneziawg-proxy
 //!
 //! An async UDP proxy that sits in front of an AmneziaWG server and disguises

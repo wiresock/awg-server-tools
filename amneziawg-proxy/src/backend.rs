@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 use std::sync::Arc;
 
 use tokio::net::UdpSocket;

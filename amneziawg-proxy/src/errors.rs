@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 use thiserror::Error;
 
 /// Top-level errors for the proxy application.

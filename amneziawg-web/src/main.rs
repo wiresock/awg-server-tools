@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! amneziawg-web – main entry point
 //!
 //! Starts the HTTP server, initialises the database, and launches the background poller.

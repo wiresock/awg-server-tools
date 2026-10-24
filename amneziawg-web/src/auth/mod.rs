@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! Authentication, session management, CSRF protection and login rate-limiting.
 //!
 //! # Session cookie auth

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 WireSock
+# SPDX-License-Identifier: MIT
+#
 # amneziawg-web.sh — unified entry point for the amneziawg-web management panel.
 #
 # Usage:

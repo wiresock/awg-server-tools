@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 WireSock
+# SPDX-License-Identifier: MIT
+#
 # amneziawg-proxy-common.sh
 # Shared helpers sourced by both amneziawg-proxy-install.sh and
 # amneziawg-proxy-uninstall.sh.  Not intended to be executed directly.

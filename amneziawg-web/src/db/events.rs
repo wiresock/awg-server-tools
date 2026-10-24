@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! Database query layer for the `events` (audit log) table.
 //!
 //! # Schema

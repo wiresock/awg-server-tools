@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! HTTP router and request handlers.
 //!
 //! All handlers are intentionally thin: they delegate DB queries to

@@ -1,0 +1,52 @@
+name: Licensing
+
+# REUSE compliance, license-file and Cargo metadata consistency, and the
+# licenses of the Rust dependencies of amneziawg-web and amneziawg-proxy. All
+# checks are in scripts/check-licensing.sh, which contributors can run locally;
+# see docs/LICENSING.md. The BoringTun artifact license gate is separate and
+# unchanged (BoringTun Artifacts workflow).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  REUSE_VERSION: 5.0.2
+  CARGO_DENY_VERSION: 0.20.2
+  # SHA-256 of cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz,
+  # as published next to the release asset.
+  CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+
+jobs:
+  licensing:
+    name: Licensing checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install reuse
+        run: pipx install "reuse==${REUSE_VERSION}"
+
+      - name: Install cargo-deny
+        run: |
+          asset="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          curl --proto '=https' -fsSL --retry 3 -o "$RUNNER_TEMP/$asset.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/$asset.tar.gz"
+          echo "${CARGO_DENY_SHA256}  $RUNNER_TEMP/$asset.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$asset.tar.gz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/$asset/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+          cargo deny --version
+
+      - name: Run the licensing checks
+        run: bash scripts/check-licensing.sh

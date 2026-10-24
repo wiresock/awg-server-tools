@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-License-Identifier: MIT
+
 //! Config-file discovery and metadata extraction.
 //!
 //! Scans a directory for `*.conf` files (AWG client configs), extracts
