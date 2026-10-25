@@ -1,5 +1,9 @@
 # Installation Guide
 
+Email delivery defaults off and uses additive migrations 0011/0012. Back up the
+database before upgrade and read [Email delivery](EMAIL_DELIVERY.md) before
+enabling SMTP or provisioning public download routes.
+
 This guide covers building and deploying `amneziawg-web` on a Linux host.
 
 For a quick orientation, see the [README](../README.md).

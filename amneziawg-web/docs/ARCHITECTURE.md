@@ -1,5 +1,10 @@
 # Architecture
 
+Email delivery uses the existing Rust process and SQLite, with independent
+contact identity, durable intent/revocation and short admission checks before
+SMTP. See [Email delivery](EMAIL_DELIVERY.md) for validity, concurrency, retry and
+public-route boundaries; no new service or privileged-helper operation is added.
+
 ## Overview
 
 `amneziawg-web` is a thin overlay that reads from a running

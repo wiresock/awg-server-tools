@@ -7,6 +7,7 @@ mod auth;
 mod awg;
 mod config_store;
 mod db;
+mod delivery;
 mod domain;
 mod imitation;
 mod managed_interface;
@@ -23,7 +24,7 @@ use crate::auth::AuthConfig;
 use crate::db::Database;
 use crate::managed_interface::InterfaceSelector;
 use crate::poller::Poller;
-use crate::web::{normalize_base_path, router_with_base_path};
+use crate::web::{normalize_base_path, router_with_delivery};
 
 /// CLI arguments / environment variable configuration.
 #[derive(Parser, Debug)]
@@ -275,6 +276,39 @@ async fn main() -> anyhow::Result<()> {
     }
     info!(path = %lifecycle_lock_dir.display(), "lifecycle lock directory validated");
 
+    // Recovery and settings invalidation happen before poller/router/worker.
+    let (settings, revision) = match delivery::settings::load_saved(&db.pool, auth.enabled).await? {
+        Some(saved) => (saved.settings, saved.revision),
+        None => (delivery::config::Settings::from_env(auth.enabled)?, 0),
+    };
+    web::delivery_base_path(
+        &base_path,
+        settings.enabled && settings.public_base.is_some(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let owner = delivery::service::worker_lock(&lifecycle_lock_dir)?;
+    let transport: std::sync::Arc<dyn delivery::smtp::Transport> = if settings.enabled {
+        std::sync::Arc::new(delivery::smtp::Smtp::new(&settings)?)
+    } else {
+        std::sync::Arc::new(delivery::smtp::Disabled)
+    };
+    let delivery = std::sync::Arc::new(delivery::service::DeliveryContext::new(
+        delivery::exports::ExportSource {
+            db: db.clone(),
+            directory: config.config_dir.clone(),
+            lock_directory: lifecycle_lock_dir.clone(),
+            ownership: std::sync::Arc::new(delivery::exports::ServerOwnership {
+                override_name: interface.override_name().map(str::to_owned),
+            }),
+        },
+        settings,
+        transport,
+        Some(owner),
+        revision,
+    ));
+    delivery.recover().await?;
+    tokio::spawn(delivery.clone().run());
+
     // --- Background poller --------------------------------------------------
     let config_dir = config.config_dir.clone();
     let poller = Poller::new_full(
@@ -290,7 +324,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // --- HTTP server --------------------------------------------------------
-    let app = router_with_base_path(
+    let app = router_with_delivery(
         db,
         auth,
         config_dir,
@@ -298,15 +332,19 @@ async fn main() -> anyhow::Result<()> {
         config.proxy_sessions_file,
         interface,
         &base_path,
+        delivery,
     )
     .map_err(|err| anyhow::anyhow!("invalid AWG_WEB_BASE_PATH '{}': {err}", base_path))?;
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .context("failed to bind TCP listener")?;
     info!(addr = %config.listen, "HTTP server listening");
-    axum::serve(listener, app)
-        .await
-        .context("HTTP server error")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .context("HTTP server error")?;
 
     Ok(())
 }

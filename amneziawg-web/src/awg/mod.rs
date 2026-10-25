@@ -481,6 +481,170 @@ pub fn read_server_state_via_sudo(interface: &str) -> Result<String, AwgError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+// Delivery admission uses bounded, cancellable subprocesses. No secret stdout
+// or stderr is attached to errors; timed-out children are killed and reaped.
+// Own the child separately from a pending IO future. Aborting a bounded batch
+// must kill AND arrange reaping, even when it cancels delivery_command itself.
+struct DeliveryChild(Option<tokio::process::Child>);
+impl Drop for DeliveryChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.start_kill();
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+        }
+    }
+}
+async fn delivery_command(
+    mut command: tokio::process::Command,
+    input: Option<&str>,
+) -> crate::delivery::Result<String> {
+    use crate::delivery::DeliveryError;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let child = command
+        .spawn()
+        .map_err(|_| DeliveryError("ownership_unverified"))?;
+    let mut owned = DeliveryChild(Some(child));
+    let child = owned.0.as_mut().expect("child owned until reaped");
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(DeliveryError("ownership_unverified"))?;
+    let mut stdin = child.stdin.take();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        if let (Some(stream), Some(value)) = (stdin.as_mut(), input) {
+            stream.write_all(value.as_bytes()).await?;
+        }
+        drop(stdin.take());
+        let mut bytes = Vec::new();
+        stdout.take(262145).read_to_end(&mut bytes).await?;
+        if bytes.len() > 262144 {
+            return Err(std::io::Error::other("output limit"));
+        }
+        let status = child.wait().await?;
+        if !status.success() {
+            return Err(std::io::Error::other("helper failed"));
+        }
+        String::from_utf8(bytes).map_err(|_| std::io::Error::other("invalid output"))
+    })
+    .await;
+    match result {
+        Ok(Ok(text)) => {
+            owned.0.take();
+            Ok(text)
+        }
+        _ => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            owned.0.take();
+            Err(DeliveryError("ownership_unverified"))
+        }
+    }
+}
+pub(crate) async fn delivery_read_params() -> crate::delivery::Result<String> {
+    let mut cmd = tokio::process::Command::new(SUDO_BIN);
+    cmd.args(["-n", PRIVILEGED_HELPER_BIN, "read-params"]);
+    delivery_command(cmd, None).await
+}
+
+#[cfg(all(test, unix))]
+mod delivery_helper_tests {
+    use super::*;
+    #[tokio::test]
+    async fn delivery_helper_batch_cancellation_kills_and_reaps_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_path = temp.path().join("cancel-pid");
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "echo $$ > \"$1\"; exec sleep 60", "fixture"])
+            .arg(&pid_path);
+        let task = tokio::spawn(delivery_command(cmd, None));
+        let pid: i32 = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&pid_path).await {
+                    if let Ok(pid) = text.trim().parse() {
+                        break pid;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if unsafe { libc::kill(pid, 0) } == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled helper must be killed and reaped");
+    }
+    #[tokio::test]
+    async fn delivery_helper_timeout_kills_and_reaps_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_path = temp.path().join("pid");
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "echo $$ > \"$1\"; exec sleep 60", "fixture"])
+            .arg(&pid_path);
+        let started = std::time::Instant::now();
+        let result = delivery_command(cmd, None).await;
+        assert!(matches!(
+            result,
+            Err(crate::delivery::DeliveryError("ownership_unverified"))
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(8));
+        let pid: i32 = std::fs::read_to_string(pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // No signal is sent; ESRCH proves the fixture was killed and reaped.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+    #[tokio::test]
+    async fn delivery_helper_output_bound_and_errors_hide_secret_input() {
+        let mut cmd = tokio::process::Command::new("head");
+        cmd.args(["-c", "262145", "/dev/zero"]);
+        assert!(delivery_command(cmd, None).await.is_err());
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "cat >&2; exit 1"]);
+        let error = delivery_command(cmd, Some("private-fixture-secret"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, "ownership_unverified");
+    }
+}
+pub(crate) async fn delivery_server_state(interface: &str) -> crate::delivery::Result<String> {
+    crate::admin::client_manager::validate_interface_name_for("interface", interface)
+        .map_err(|_| crate::delivery::DeliveryError("ownership_unverified"))?;
+    let mut cmd = tokio::process::Command::new(SUDO_BIN);
+    cmd.args(["-n", PRIVILEGED_HELPER_BIN, "read-server-state", interface]);
+    delivery_command(cmd, None).await
+}
+pub(crate) async fn delivery_pubkey(private: &str) -> crate::delivery::Result<String> {
+    let mut cmd = tokio::process::Command::new(AWG_BIN);
+    cmd.arg("pubkey");
+    delivery_command(cmd, Some(private))
+        .await
+        .map(|text| text.trim().to_owned())
+}
+
 /// Append one strictly validated peer block through the privileged helper.
 ///
 /// The content is piped via stdin to avoid shell interpolation.  Used to

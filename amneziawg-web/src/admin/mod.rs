@@ -25,7 +25,7 @@ use self::client_manager::{acquire_lifecycle_lock, RemoveClientError};
 /// automated expiration cleanup. The native lifecycle lock still protects
 /// server/config rewrites; this lock closes the smaller in-process races at
 /// the database/lifecycle boundary.
-static EXPIRATION_STATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static EXPIRATION_STATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn map_lock_error(err: std::io::Error) -> RemoveClientError {
     match err.raw_os_error() {
@@ -100,6 +100,8 @@ pub async fn execute_set_peer_enabled(
 /// Result of a successful user creation.
 #[derive(Debug)]
 pub struct CreateUserResult {
+    /// Exact created key, so optional contact metadata cannot follow name reuse.
+    pub public_key: String,
     /// Absolute path to the generated client config file.
     pub config_path: String,
     /// The client name that was requested.
@@ -429,6 +431,7 @@ async fn execute_create_user_transaction(
             )
             .await;
             Ok(CreateUserResult {
+                public_key: r.public_key,
                 config_path: r.config_path,
                 client_name: r.client_name,
                 sync_required: r.sync_required,
@@ -488,6 +491,34 @@ pub async fn execute_remove_user(
         actor,
         "manual",
         None,
+        None,
+        true,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Remove only the identity reviewed by a bulk-action confirmation.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_remove_user_checked(
+    db: &Database,
+    config_dir: &std::path::Path,
+    lifecycle_lock_dir: &std::path::Path,
+    peer_id: i64,
+    client_name: &str,
+    actor: &str,
+    expected_public_key: &str,
+) -> Result<(), RemoveClientError> {
+    execute_remove_user_inner(
+        db,
+        config_dir,
+        lifecycle_lock_dir,
+        peer_id,
+        client_name,
+        actor,
+        "manual",
+        None,
+        Some(expected_public_key),
         true,
     )
     .await
@@ -537,6 +568,7 @@ async fn execute_remove_user_inner(
     actor: &str,
     reason: &str,
     expected_expires_at: Option<&str>,
+    reviewed_public_key: Option<&str>,
     persist_attempt_events: bool,
 ) -> Result<bool, RemoveClientError> {
     let task = tokio::spawn(execute_remove_user_transaction(
@@ -548,6 +580,7 @@ async fn execute_remove_user_inner(
         actor.to_string(),
         reason.to_string(),
         expected_expires_at.map(str::to_string),
+        reviewed_public_key.map(str::to_string),
         persist_attempt_events,
     ));
 
@@ -572,6 +605,7 @@ async fn execute_remove_user_transaction(
     actor: String,
     reason: String,
     expected_expires_at: Option<String>,
+    reviewed_public_key: Option<String>,
     persist_attempt_events: bool,
 ) -> Result<bool, RemoveClientError> {
     script_bridge::validate_client_name(&client_name)?;
@@ -664,6 +698,14 @@ async fn execute_remove_user_transaction(
             )
         })?
         .public_key;
+    if reviewed_public_key
+        .as_deref()
+        .is_some_and(|key| key != expected_public_key)
+    {
+        return Err(RemoveClientError::IdentityMismatch(
+            "peer changed since review".into(),
+        ));
+    }
 
     let disabled_keys = match crate::db::peers::list_disabled_public_keys(&db.pool).await {
         Ok(keys) => keys,
@@ -694,9 +736,16 @@ async fn execute_remove_user_transaction(
     // From this point onward the native path may partially remove the server
     // block, live peer, or client config. Persist retry ownership before the
     // first external mutation so poller stale cleanup cannot discard the row.
-    let removal_marked = crate::db::peers::mark_removal_pending(&db.pool, peer_id)
-        .await
-        .map_err(|e| RemoveClientError::DbRead(e.to_string()))?;
+    let removal_marked = match reviewed_public_key.as_deref() {
+        Some(key) => crate::db::peers::mark_removal_pending_matching(&db.pool, peer_id, key).await,
+        None => crate::db::peers::mark_removal_pending(&db.pool, peer_id).await,
+    }
+    .map_err(|e| RemoveClientError::DbRead(e.to_string()))?;
+    if !removal_marked && reviewed_public_key.is_some() {
+        return Err(RemoveClientError::IdentityMismatch(
+            "peer changed since review".into(),
+        ));
+    }
     if !removal_marked {
         return Err(RemoveClientError::DbRead(
             "peer disappeared before native removal could start".to_string(),
@@ -926,6 +975,7 @@ pub async fn cleanup_expired_users(
             "system",
             "expiration",
             Some(expires_at),
+            None,
             false,
         )
         .await

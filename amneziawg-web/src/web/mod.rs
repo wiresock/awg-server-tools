@@ -2,6 +2,8 @@
 //!
 //! All handlers are intentionally thin: they delegate DB queries to
 //! `crate::db::peers` and status derivation/history to `crate::domain`.
+mod delivery_admin;
+mod delivery_public;
 
 use axum::{
     extract::{Path, Query, State},
@@ -46,6 +48,7 @@ use crate::system_versions::{ComponentVersions, RuntimeInfo, SystemVersions};
 /// Shared application state passed to every handler.
 #[derive(Clone)]
 pub struct AppState {
+    pub delivery: Option<std::sync::Arc<crate::delivery::service::DeliveryContext>>,
     pub db: Database,
     pub auth: AuthConfig,
     pub sessions: SessionStore,
@@ -149,6 +152,7 @@ impl AppState {
         let system_booted_at =
             detect_system_boot_time(system_uptime_baseline.as_ref().map(|b| b.uptime_seconds));
         Self {
+            delivery: None,
             db,
             auth,
             sessions: new_session_store(),
@@ -662,6 +666,7 @@ pub struct EventDto {
 /// JSON request body for `POST /api/admin/users`.
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {
+    pub email: Option<String>,
     pub name: String,
     /// Optional comment stored with the newly created peer.
     pub comment: Option<String>,
@@ -676,6 +681,7 @@ pub struct CreateUserRequest {
 /// HTML form body for `POST /admin/users/add`.
 #[derive(Debug, Deserialize)]
 pub struct AddUserForm {
+    pub email: Option<String>,
     pub name: String,
     /// Optional comment stored with the newly created peer.
     pub comment: Option<String>,
@@ -1256,6 +1262,16 @@ pub fn normalize_base_path(raw: &str) -> Result<String, &'static str> {
     Ok(raw.to_string())
 }
 
+/// Validate with the same normalization as routing before any worker starts.
+/// Reserve the whole public namespace, including descendants and endpoint bases.
+pub fn delivery_base_path(raw: &str, public_enabled: bool) -> Result<String, &'static str> {
+    let base = normalize_base_path(raw)?;
+    if public_enabled && (base == "/delivery" || base.starts_with("/delivery/")) {
+        return Err("AWG_WEB_BASE_PATH overlaps the reserved public /delivery namespace");
+    }
+    Ok(base)
+}
+
 /// Prefix `path` with a normalized base path.
 ///
 /// `path` is an absolute panel path, including an optional query string.
@@ -1347,6 +1363,7 @@ pub fn router_with_lifecycle_lock_dir(
 }
 
 /// Build the application router mounted at `base_path`.
+#[cfg(test)]
 pub fn router_with_base_path(
     db: Database,
     auth: AuthConfig,
@@ -1368,6 +1385,7 @@ pub fn router_with_base_path(
     ))
 }
 
+#[cfg(test)]
 fn build_router(
     db: Database,
     auth: AuthConfig,
@@ -1387,8 +1405,48 @@ fn build_router(
     .with_interface(interface)
     .with_base_path(base_path.clone());
 
+    build_router_state(state)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn router_with_delivery(
+    db: Database,
+    auth: AuthConfig,
+    config_dir: PathBuf,
+    lifecycle_lock_dir: PathBuf,
+    proxy_sessions_file: PathBuf,
+    interface: InterfaceSelector,
+    base_path: &str,
+    delivery: std::sync::Arc<crate::delivery::service::DeliveryContext>,
+) -> Result<Router, String> {
+    let base_path = delivery_base_path(
+        base_path,
+        delivery.runtime().settings.enabled && delivery.runtime().settings.public_base.is_some(),
+    )?;
+    let mut state = AppState::new(
+        db,
+        auth,
+        config_dir,
+        lifecycle_lock_dir,
+        proxy_sessions_file,
+    )
+    .with_interface(interface)
+    .with_base_path(base_path);
+    state.delivery = Some(delivery);
+    Ok(build_router_state(state))
+}
+
+fn build_router_state(state: AppState) -> Router {
+    let base_path = state.base_path.clone();
+    let public = state
+        .delivery
+        .as_ref()
+        .filter(|_| state.auth.enabled && delivery_base_path(&base_path, true).is_ok())
+        .map(|ctx| delivery_public::router(ctx.clone()));
+
     // Protected routes – all require a valid session.
     let protected = Router::new()
+        .merge(delivery_admin::routes())
         .route("/", get(page_peer_list))
         .route("/peers/:id", get(page_peer_detail).post(post_peer_edit))
         .route("/archived/peers/:id", get(page_archived_peer_detail))
@@ -1439,7 +1497,11 @@ fn build_router(
         .merge(vpn_export)
         .with_state(state)
         .layer(TraceLayer::new_for_http());
-    mount_at_base(inner, &base_path)
+    let admin = mount_at_base(inner, &base_path);
+    match public {
+        Some(public) => admin.merge(public),
+        None => admin,
+    }
 }
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
@@ -2122,41 +2184,6 @@ fn is_safe_config_path(path: &std::path::Path) -> bool {
         })
 }
 
-/// Open a file with `O_NOFOLLOW` and read its contents.
-/// On Unix, `O_NOFOLLOW` only applies to the final path component: the
-/// kernel will refuse to follow a symlink at that point and the `open`
-/// will fail with `ELOOP` if the target file is (or has become) a
-/// symlink between the earlier `symlink_metadata` / `canonicalize`
-/// checks and this call. Ancestor directories may still be symlinks, so
-/// callers must ensure `path` and its parent directories are not
-/// replaceable by untrusted users (or use fd-based traversal such as
-/// `openat`/dirfd if stronger guarantees are required).
-#[cfg(unix)]
-async fn read_file_nofollow(path: &std::path::Path) -> std::io::Result<String> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)?;
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
-        Ok(content)
-    })
-    .await
-    .unwrap_or_else(|e| Err(std::io::Error::other(e)))
-}
-
-/// Fallback for non-Unix: regular async read (the `symlink_metadata`
-/// check still provides best-effort protection, but without `O_NOFOLLOW`
-/// there is an inherent TOCTOU window).
-#[cfg(not(unix))]
-async fn read_file_nofollow(path: &std::path::Path) -> std::io::Result<String> {
-    tokio::fs::read_to_string(path).await
-}
-
 /// Resolve, validate, and read a peer's config file.
 ///
 /// Shared by `get_peer_config` and `get_peer_qr` to keep the security
@@ -2253,16 +2280,17 @@ async fn read_validated_config(
 
     // Open with O_NOFOLLOW to prevent symlink-following at read time,
     // eliminating the TOCTOU gap after the checks above.
-    let content = match read_file_nofollow(&canonical_path).await {
-        Ok(c) => c,
-        Err(_) => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "config file not found on disk" })),
-            )
-                .into_response())
-        }
-    };
+    let content =
+        match crate::config_store::export::read_config(&state.config_dir, &config_path).await {
+            Ok(c) => c,
+            Err(_) => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "config file not found on disk" })),
+                )
+                    .into_response())
+            }
+        };
 
     // Database mappings may predate interface scoping or a file replacement.
     // Recheck the actual bytes for every export, including before the first
@@ -2702,14 +2730,25 @@ async fn page_peer_detail(
             annotate_peer_detail_with_proxy_remote(&mut dto, &proxy_sessions_status(&state).await);
             let csrf = session_csrf_from_headers(&state, &headers);
             let monitoring_only = monitoring_only_notice(&state).await;
-            Ok(Html(render_peer_detail(
+            let mut html = render_peer_detail(
                 &dto,
                 &csrf,
                 &events,
                 monitoring_only.as_deref(),
                 &state.base_path,
-            ))
-            .into_response())
+            );
+            if state.auth.enabled {
+                if let Some(delivery) = &state.delivery {
+                    if let Ok(contacts) = delivery.contacts().await {
+                        if let Some(contact) = contacts.iter().find(|c| c.peer_id == Some(id)) {
+                            let panel = delivery_admin::peer_panel(&state, contact, &csrf);
+                            let at = html.rfind("</body>").unwrap_or(html.len());
+                            html.insert_str(at, &panel);
+                        }
+                    }
+                }
+            }
+            Ok(Html(html).into_response())
         }
     }
 }
@@ -3106,6 +3145,7 @@ fn create_user_notice_message(code: &str) -> Option<&'static str> {
         CREATE_NOTICE_SYNC_AND_METADATA => Some(
             "User created, but interface sync is still required and its metadata could not be saved. If you entered a comment, it was not persisted; do not add this user again.",
         ),
+        "email_not_saved" => Some("User created, but the optional email was not saved. Check sync/metadata status and save the email from the peer page; do not create this user again."),
         _ => None,
     }
 }
@@ -3376,6 +3416,11 @@ async fn api_create_user(
     headers: HeaderMap,
     Json(body): Json<CreateUserRequest>,
 ) -> Result<Response, ApiError> {
+    let email = match delivery_admin::creation_email(&state, &headers, body.email.as_deref(), None)
+    {
+        Ok(email) => email,
+        Err(error) => return Ok(error.into_response()),
+    };
     #[cfg(test)]
     if headers.contains_key("x-test-force-create-user-failure") {
         let e = crate::admin::client_manager::CreateClientError::Internal(
@@ -3428,7 +3473,9 @@ async fn api_create_user(
         Ok(result) => {
             refresh_peer_state_after_lifecycle(&state).await;
             let warning_codes = create_user_warning_codes(&result);
+            let email_saved=delivery_admin::save_created_email(&state,&result,email.as_deref()).await;
             let mut payload = json!({
+                "email_saved":email_saved,
                 "name": result.client_name,
                 "config_path": result.config_path,
                 "comment": comment,
@@ -3442,6 +3489,7 @@ async fn api_create_user(
                     payload["warning"] = json!(message);
                 }
             }
+            if !email_saved {payload["email_warning"]=json!("User created; optional email was not saved. Save it from the peer page; do not create the user again.");}
             Ok((StatusCode::CREATED, Json(payload)).into_response())
         }
         Err(crate::admin::client_manager::CreateClientError::InvalidName(msg)) => {
@@ -3493,10 +3541,15 @@ async fn api_create_user(
 ///
 /// Requires a JSON body (even if empty) so that browsers cannot submit this
 /// request via a cross-site `<form>` POST (CSRF mitigation).
+fn peer_identity_digest(public_key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(public_key.as_bytes()))
+}
+
 async fn api_remove_user(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-    Json(_body): Json<serde_json::Value>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Response, ApiError> {
     let peer = match crate::db::peers::find_visible_by_id(&state.db.pool, id).await? {
         Some(p) => p,
@@ -3508,6 +3561,28 @@ async fn api_remove_user(
                 .into_response());
         }
     };
+
+    let reviewed_key = match body.get("expected_public_key_sha256") {
+        None => None,
+        Some(value) => match value.as_str().filter(|key| {
+            key.len() == 64
+                && key
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        }) {
+            Some(key) => Some(key),
+            None => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"invalid_expected_identity"})),
+                )
+                    .into_response())
+            }
+        },
+    };
+    if reviewed_key.is_some_and(|key| key != peer_identity_digest(&peer.public_key)) {
+        return Ok((StatusCode::CONFLICT, Json(json!({"error":"peer_changed"}))).into_response());
+    }
 
     if let Some(reason) = management_unavailable_reason(&state).await {
         return Ok(management_unavailable_json(&reason));
@@ -3536,22 +3611,41 @@ async fn api_remove_user(
             .into_response());
     }
 
-    match crate::admin::execute_remove_user(
-        &state.db,
-        &state.config_dir,
-        &state.lifecycle_lock_dir,
-        id,
-        &client_name,
-        &state.auth.username,
-    )
-    .await
-    {
+    let result = match reviewed_key {
+        Some(_) => {
+            crate::admin::execute_remove_user_checked(
+                &state.db,
+                &state.config_dir,
+                &state.lifecycle_lock_dir,
+                id,
+                &client_name,
+                &state.auth.username,
+                &peer.public_key,
+            )
+            .await
+        }
+        None => {
+            crate::admin::execute_remove_user(
+                &state.db,
+                &state.config_dir,
+                &state.lifecycle_lock_dir,
+                id,
+                &client_name,
+                &state.auth.username,
+            )
+            .await
+        }
+    };
+    match result {
         Ok(()) => {
             refresh_peer_state_after_lifecycle(&state).await;
             Ok(Json(json!({ "ok": true })).into_response())
         }
         Err(crate::admin::client_manager::RemoveClientError::InvalidName(msg)) => {
             Ok((StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response())
+        }
+        Err(crate::admin::client_manager::RemoveClientError::IdentityMismatch(_)) if reviewed_key.is_some() => {
+            Ok((StatusCode::CONFLICT, Json(json!({"error":"peer_changed"}))).into_response())
         }
         Err(crate::admin::client_manager::RemoveClientError::LockBusy) => {
             Ok((
@@ -3577,6 +3671,15 @@ async fn post_add_user_form(
     headers: axum::http::HeaderMap,
     Form(form): Form<AddUserForm>,
 ) -> Result<Response, ApiError> {
+    let email = match delivery_admin::creation_email(
+        &state,
+        &headers,
+        form.email.as_deref(),
+        form.csrf_token.as_deref(),
+    ) {
+        Ok(email) => email,
+        Err(error) => return Ok(error.into_response()),
+    };
     #[cfg(test)]
     if headers.contains_key("x-test-force-create-user-failure") {
         let rows = crate::db::peers::list_visible(&state.db.pool).await?;
@@ -3690,7 +3793,14 @@ async fn post_add_user_form(
     {
         Ok(result) => {
             refresh_peer_state_after_lifecycle(&state).await;
-            let location = create_user_notice_code(&result)
+            let email_saved =
+                delivery_admin::save_created_email(&state, &result, email.as_deref()).await;
+            let notice = if email_saved {
+                create_user_notice_code(&result)
+            } else {
+                Some("email_not_saved")
+            };
+            let location = notice
                 .map(|notice| state.url(&format!("/?create_notice={notice}")))
                 .unwrap_or_else(|| state.url("/"));
             Ok(Redirect::to(&location).into_response())
@@ -4519,6 +4629,12 @@ fn html_head(title: &str, base: &str) -> String {
 ///
 /// `csrf_token` is embedded as a hidden field in the logout form.
 fn nav_bar(base: &str, csrf_token: &str) -> String {
+    nav_bar_section(base, csrf_token, false)
+}
+
+fn nav_bar_section(base: &str, csrf_token: &str, email: bool) -> String {
+    let peers_current = if email { "" } else { r#" aria-current="page""# };
+    let email_current = if email { r#" aria-current="page""# } else { "" };
     format!(
         r#"<nav class="nav">
   <div class="nav-brand">
@@ -4529,6 +4645,7 @@ fn nav_bar(base: &str, csrf_token: &str) -> String {
     <input type="hidden" name="csrf_token" value="{csrf}">
     <button type="submit">Log out</button>
   </form>
+  <div class="panel-tabs" aria-label="Panel sections"><a href="{base}/"{peers_current}>Peers</a><a class="delivery-nav" href="{base}/admin/delivery"{email_current}>Email settings</a></div>
   <div id="system-versions" class="versions">Protocol: checking &nbsp;·&nbsp; Backend: checking &nbsp;·&nbsp; Panel: {web_version}</div>
 </nav>
 <script>
@@ -4874,14 +4991,19 @@ fn render_peer_list_inner(
     buf.push_str("<div class=\"workspace\">\n");
     buf.push_str(&server_tools);
     buf.push_str("<div class=\"workspace-main\">\n");
+    buf.push_str(&format!(r#"<section id="peer-email-tools">
+<input type="hidden" id="email-base" value="{base}"><input type="hidden" id="email-csrf" value="{csrf}">
+<p id="email-readiness" class="meta">Loading email readiness…</p><a href="{base}/admin/delivery">Email settings</a>
+<div class="email-toolbar"><label><input id="email-select-all" type="checkbox">Select all (up to 50)</label><span id="email-selection-count">0 selected</span><details class="email-actions"><summary>Bulk actions</summary><button id="email-bulk-send" type="button" disabled>Send configs by email</button><button id="peer-bulk-delete" type="button" class="btn-danger" disabled>Delete selected peers</button><button id="email-clear-selection" type="button">Clear selection</button></details></div>
+<p id="email-peer-status" role="status" aria-live="polite"></p><button id="email-pending-check" type="button" hidden>Check previous email request</button></section>"#,base=esc(base),csrf=esc(csrf_token)));
     if peers.is_empty() {
         buf.push_str("<p class=\"empty\">No peers found. The poller may not have run yet.</p>\n");
     } else {
         buf.push_str(
             "<div class=\"table-scroll\"><table class=\"peer-table\">\n\
-             <tr><th>Name</th><th>Connection</th><th>Identity</th><th>Endpoint</th>\
+             <tr><th>Select</th><th>Name / email</th><th>Connection</th><th>Identity</th><th>Endpoint</th>\
              <th>Comment</th><th>Expiration</th><th>Last handshake</th><th class=\"num\">RX<span class=\"th-hint\">current period</span></th>\
-             <th class=\"num\">TX<span class=\"th-hint\">current period</span></th></tr>\n",
+             <th class=\"num\">TX<span class=\"th-hint\">current period</span></th><th>Actions</th></tr>\n",
         );
         for p in peers {
             let detail_href = if p.archived {
@@ -4917,14 +5039,17 @@ fn render_peer_list_inner(
                 ""
             };
             buf.push_str(&format!(
-                "<tr{row_class}><td data-label=\"Name\">{name_link}</td>\
+                "<tr{row_class}><td data-label=\"Select\"><input type=\"checkbox\" data-email-select=\"{peer_id}\" data-peer-key=\"{peer_key}\" data-peer-name=\"{peer_name}\" aria-label=\"Select {peer_name}\"></td><td data-label=\"Name\">{name_link}<span class=\"email-readiness\" data-email-readiness=\"{peer_id}\"></span></td>\
                  <td data-label=\"Connection\">{conn}</td><td data-label=\"Identity\">{ident}</td>\
                  <td data-label=\"Endpoint\">{endpoint}</td>\
                  <td class=\"comment-cell\" data-label=\"Comment\">{comment}</td>\
                  <td data-label=\"Expiration\">{expiration}</td>\
                  <td data-label=\"Last handshake\">{handshake}</td>\
                  <td class=\"num\" data-label=\"RX\">{rx}</td>\
-                 <td class=\"num\" data-label=\"TX\">{tx}</td></tr>\n",
+                 <td class=\"num\" data-label=\"TX\">{tx}</td><td data-label=\"Actions\"><details class=\"email-actions\"><summary>Actions</summary><button type=\"button\" data-email-send=\"{peer_id}\">Send config</button><button type=\"button\" data-email-edit=\"{peer_id}\">Edit email</button><a href=\"{detail_href}\">Peer details</a></details></td></tr>\n",
+                peer_id=p.id,
+                peer_name=esc(&p.name),
+                peer_key=peer_identity_digest(&p.public_key),
                 conn = connection_badge(&p.connection_status),
                 ident = identity_badge(&p.identity_status),
                 rx = fmt_bytes(p.rx_bytes),
@@ -4938,7 +5063,9 @@ fn render_peer_list_inner(
         buf.push_str(&render_proxy_sessions(base, proxy_sessions));
     }
     buf.push_str("</div>\n");
-    buf.push_str("</div>\n</body></html>");
+    buf.push_str("</div>\n");
+    buf.push_str(&format!(include_str!("peer_email.html"), base = esc(base)));
+    buf.push_str("</body></html>");
     buf
 }
 
@@ -4969,6 +5096,9 @@ fn render_add_user_panel(base: &str, csrf_token: &str, error: Option<&str>) -> S
   <label for="add_user_comment">Comment <span class="meta">(optional)</span></label>
   <textarea id="add_user_comment" name="comment" maxlength="512"
             placeholder="e.g. Primary phone"></textarea>
+  <label for="add_user_email">Email <span class="meta">(optional; requires panel authentication)</span></label>
+  <input type="email" id="add_user_email" name="email" maxlength="254" autocomplete="off">
+  <p class="meta">Saved as contact metadata. Sending always requires a separate recipient preview and confirmation.</p>
   <label for="add_user_expiration_days">Lifetime in days</label>
   <input type="number" id="add_user_expiration_days" name="expiration_days"
          value="0" min="0" max="36500" step="1" list="expiration_lifetime_presets">
@@ -5152,6 +5282,11 @@ fn render_peer_detail_inner(
         ));
         buf.push_str(&with_js_base(include_str!("vpn_uri.html"), base));
     }
+
+    buf.push_str(&format!(
+        "<div class=\"actions\"><a class=\"btn peer-send-email\" href=\"{base}/?send_peer={id}\">Send config by email</a></div>\n",
+        id = dto.id,
+    ));
 
     buf.push_str("<div class=\"detail-layout\">\n<table class=\"facts\">\n");
     buf.push_str(&format!(
@@ -10998,6 +11133,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn panel_bulk_remove_rejects_stale_identity_before_mutation() {
+        let db = test_db().await;
+        let id = insert_peer(&db, "current-key", Some("Phone")).await;
+        let response = test_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/admin/users/{id}/remove"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"expected_public_key_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            crate::db::peers::find_by_id(&db.pool, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .public_key,
+            "current-key"
+        );
+        let pending: i64 = sqlx::query_scalar("SELECT removal_pending FROM peers WHERE id=?")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(pending, 0);
+    }
+
+    #[test]
+    fn panel_tabs_mark_current_page_without_javascript() {
+        let html = nav_bar("/private", "csrf");
+        assert!(html.contains("WireSock <span aria-hidden=\"true\">\u{2197}</span>"));
+        assert!(html.contains(r#"href="/private/" aria-current="page""#));
+        assert!(!html.contains(r#"href="/private/admin/delivery" aria-current="page""#));
+        let email = nav_bar_section("/private", "csrf", true);
+        assert!(email.contains(r#"href="/private/admin/delivery" aria-current="page""#));
+        assert!(!email.contains(r#"href="/private/" aria-current="page""#));
+    }
+
+    #[tokio::test]
     async fn api_remove_user_not_found_returns_404() {
         let app = test_router(test_db().await);
         let response = app
@@ -11150,7 +11328,7 @@ mod tests {
         // Create a temp config file inside the config directory.
         let dir = tempfile::tempdir().unwrap();
         let conf_path = dir.path().join("test-qr.conf");
-        let config = "# Raw QR payload: café\r\n[Interface]\r\nAddress = 10.8.0.2/32\r\nMTU = 1380\r\n\r\n[Peer]\r\nPublicKey = SERVER_KEY=\r\nAllowedIPs = 0.0.0.0/0, ::/0";
+        let config = "# Raw QR payload: cafÃ©\r\n[Interface]\r\nAddress = 10.8.0.2/32\r\nMTU = 1380\r\n\r\n[Peer]\r\nPublicKey = SERVER_KEY=\r\nAllowedIPs = 0.0.0.0/0, ::/0";
         std::fs::write(&conf_path, config).unwrap();
 
         crate::db::peers::apply_config_mapping(
@@ -11487,6 +11665,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_peer_config_oversize_is_rejected_before_export() {
+        let db = test_db().await;
+        let id = insert_peer(&db, "KEY_LARGE=", None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.conf");
+        let content = format!(
+            "[Interface]\nAddress = 10.8.0.2/32\n[Peer]\nPublicKey = SERVER_KEY=\n#{}",
+            "x".repeat(crate::config_store::export::MAX_EXPORT_BYTES)
+        );
+        std::fs::write(&path, content).unwrap();
+        crate::db::peers::apply_config_mapping(
+            &db.pool,
+            "KEY_LARGE=",
+            "large",
+            path.to_str().unwrap(),
+            "large",
+            None,
+        )
+        .await
+        .unwrap();
+        let app = test_router_with_config_dir(db, dir.path().to_path_buf());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/peers/{id}/config"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn get_peer_qr_outside_config_dir_returns_404() {
         let db = test_db().await;
         let id = insert_peer(&db, "KEY_QROUT=", None).await;
@@ -11677,7 +11889,7 @@ mod tests {
             "/panel#secret",
             "/panel secret",
             "/%2Fpanel",
-            "/панель",
+            "/Ð¿Ð°Ð½ÐµÐ»ÑŒ",
             &format!("/{}", "a".repeat(MAX_BASE_PATH_LEN)),
         ] {
             assert!(normalize_base_path(raw).is_err(), "{raw}");

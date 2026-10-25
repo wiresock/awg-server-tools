@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Retrieve VPN configuration</title>
+<body><main><h1>Retrieve VPN configuration</h1>
+<p>This grants access to your private VPN key. Keep downloads private. Links expire and can be revoked.</p>
+<input id="bootstrap" type="hidden" value="BOOTSTRAP_NONCE">
+<button id="retrieve" type="button">Retrieve configuration</button>
+<p id="status" role="status"></p>
+<section id="exports" hidden>
+<p>You may use all formats in this session (up to 10 exports, 10 minutes).</p>
+<button data-format="conf" type="button">Download .conf</button>
+<button data-format="qr" type="button">View QR</button>
+<button data-format="vpn-uri" type="button">Download vpn:// text</button>
+<img id="qr" alt="VPN configuration QR code" hidden>
+</section></main><script src="./app.js" defer></script></body></html>

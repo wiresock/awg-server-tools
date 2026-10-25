@@ -1,5 +1,6 @@
 //! Database access layer (SQLite via sqlx).
 
+pub mod delivery;
 pub mod events;
 pub mod peers;
 

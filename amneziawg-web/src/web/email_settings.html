@@ -1,0 +1,39 @@
+<main class="email-page">
+<header class="page-head"><div><p class="eyebrow">Panel settings</p><h1>Email settings</h1><p class="meta">Connect your mail server, then send from peer Actions or Bulk actions.</p></div></header>
+<input type="hidden" id="email-base" value="{base}"><input type="hidden" id="email-csrf" value="{csrf}">
+<p id="email-settings-status" class="email-notice" role="status" aria-live="polite">Loading saved settings…</p>
+<div class="email-layout"><form id="email-settings-form" class="edit-form email-card" autocomplete="off">
+<h2>SMTP server</h2><p id="email-source" class="meta"></p>
+<label class="email-choice"><input id="smtp-enabled" type="checkbox"> Enable email sending</label>
+<div class="email-fields">
+<label class="email-wide">SMTP host<input id="smtp-host" type="text" maxlength="253" placeholder="smtp.example.com" autocomplete="off"></label>
+<label>Port<input id="smtp-port" type="number" min="1" max="65535" required></label>
+<label>Encryption<select id="smtp-tls"><option value="starttls">STARTTLS (usually 587)</option><option value="implicit">TLS (usually 465)</option><option value="none">None (plaintext relay)</option></select></label>
+<div id="smtp-plaintext-warning" class="email-notice email-wide" hidden><strong>No transport encryption.</strong> Message bodies, configurations with private keys and temporary-link tokens travel in plaintext. Use only a trusted local relay. Authentication is forbidden: uncheck authentication, empty the username and explicitly clear any stored password.<label class="email-choice"><input id="smtp-allow-plaintext" type="checkbox"> I understand and explicitly allow plaintext SMTP for this saved profile.</label></div>
+<label class="email-choice email-wide"><input id="smtp-authenticate" type="checkbox"> Server requires authentication</label>
+<label class="email-wide">Username<input id="smtp-username" type="text" maxlength="320" autocomplete="off"></label>
+<label>Password action<select id="smtp-password-action"><option value="keep">Keep stored password</option><option value="replace">Replace password</option><option value="clear">Clear stored password</option></select></label>
+<label>New password<input id="smtp-password" type="password" maxlength="4096" autocomplete="new-password" disabled aria-describedby="email-credential-state"></label>
+<p id="email-credential-state" class="meta email-wide"></p>
+<label>From address<input id="smtp-from" type="email" maxlength="254" placeholder="vpn@example.com" autocomplete="off"></label>
+<label>Reply-to (optional)<input id="smtp-reply-to" type="email" maxlength="254" autocomplete="off"></label>
+</div>
+<h2>Download links <span class="meta">Optional</span></h2><p class="meta">Direct attachments work without a public download address.</p>
+<div class="email-fields"><label class="email-wide">Public HTTPS base URL<input id="smtp-public-base" type="url" placeholder="https://download.example.com/share" autocomplete="off"></label>
+<label>Default lifetime (seconds)<input id="smtp-ttl" type="number" min="300" max="604800" required step="1"></label><p class="meta">86400 = 24 hours. From 5 minutes to 7 days.</p></div>
+<p class="meta">The public URL is independent of the admin address. Saving it does not open a port or configure a reverse proxy.</p>
+<p class="email-notice">Saving cancels queued sends and revokes old download links. Mail already being submitted may still arrive.</p>
+<p id="email-storage-notice" class="email-notice" hidden></p>
+<p class="meta">Credentials are stored in the private panel database. Database files, sidecars and backups must be protected by the server operator.</p>
+<div class="email-buttons"><button id="email-save" type="submit" disabled>Save settings</button><button id="email-reload" type="button">Reload saved settings</button></div>
+</form>
+<aside class="edit-form email-card"><h2>Connection status</h2><p id="email-connection-state">Loading…</p><p class="meta">Enabled is configuration readiness, not a successful connection test.</p>
+<button id="email-smtp-check" type="button" disabled>Check SMTP</button><p id="email-smtp-hint" class="meta">Checks saved settings: connection, selected transport security and authentication when configured. No message is sent. Save or reload edited settings first.</p><p id="email-smtp-result" role="status" aria-live="polite"></p>
+<h2>Send a test email</h2><p class="meta">A separate action using the saved profile. No VPN configuration or private key is included.</p>
+<label for="email-test-recipient">Test recipient</label><input id="email-test-recipient" type="email" maxlength="254" required autocomplete="off" placeholder="you@example.com">
+<button id="email-test-open" type="button" disabled>Send test email</button><p class="meta">Save or reload edited settings before testing. SMTP acceptance does not confirm delivery.</p>
+<p id="email-test-recovery" role="status" aria-live="polite"></p><button id="email-test-check" type="button" hidden>Check previous test status</button><button id="email-test-dismiss" type="button" hidden>Finish reviewing this test</button>
+<hr><a href="{base}/admin/delivery/advanced">Contact recovery &amp; revocation</a><p class="meta">Review retained email after external key changes, rebind contacts or revoke access.</p></aside></div>
+</main>
+<dialog id="email-test-dialog" class="email-dialog" aria-labelledby="email-test-title"><h2 id="email-test-title">Send a test email?</h2><p id="email-test-recipient-confirm"></p><p id="email-test-status" role="status" aria-live="polite"></p><div class="email-buttons"><button id="email-test-cancel" type="button">Close</button><button id="email-test-confirm" type="button">Send / check this test</button></div></dialog>
+<script src="{base}/static/email-common.js" defer></script><script src="{base}/static/email-settings.js" defer></script>
