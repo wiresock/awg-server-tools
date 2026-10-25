@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! Explicit delivery of immutable, freshly admitted exports. No SMTP under guards.
 pub mod config;
 pub mod exports;

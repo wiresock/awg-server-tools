@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! Immutable configuration snapshots and cancellation-safe configuration apply.
 use super::{config::Settings, service::DeliveryContext, settings, smtp::Transport, *};
 use std::sync::{atomic::Ordering, Arc};

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 use super::*;
 use crate::delivery::{self, service::DeliveryContext, DeliveryError, Format, Mode};
 use std::sync::Arc;

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! Durable client identity and invalidation, independent of peer row lifetime.
 use crate::delivery::{DeliveryError, Result};
 use serde::Serialize;

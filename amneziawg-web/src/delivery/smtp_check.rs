@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! Explicit saved-profile or transient-draft checks, never message submission.
 use super::{config::TransportSecurity, service::DeliveryContext, smtp::ConnectionCheck, *};
 use std::sync::Arc;

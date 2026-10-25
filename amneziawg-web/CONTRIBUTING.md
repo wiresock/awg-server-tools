@@ -58,4 +58,8 @@ Contact the maintainers directly via the repository contact methods.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+By contributing, you agree that your contributions will be licensed under the
+MIT License, and that you have the right to submit them under it. You keep the
+copyright in your contribution; there is no copyright assignment or CLA. See
+the repository's [`CONTRIBUTING.md`](../CONTRIBUTING.md#licensing-of-contributions)
+for the full terms and for the license headers new files need.

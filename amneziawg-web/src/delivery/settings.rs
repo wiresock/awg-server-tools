@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! Panel-owned settings. Secret-bearing values deliberately lack Debug/Serialize.
 use super::{config::Settings, DeliveryError, Result};
 use serde::Deserialize;

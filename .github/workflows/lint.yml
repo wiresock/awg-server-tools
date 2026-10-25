@@ -24,6 +24,7 @@ jobs:
           bash -n scripts/amneziawg-cargo-build.sh
           bash -n scripts/boringtun-artifact.sh
           bash -n scripts/boringtun-release.sh
+          bash -n scripts/check-licensing.sh
           bash -n amneziawg-proxy/scripts/amneziawg-proxy-common.sh
           bash -n amneziawg-proxy/scripts/amneziawg-proxy-install.sh
           bash -n amneziawg-proxy/scripts/amneziawg-proxy-uninstall.sh
@@ -120,6 +121,7 @@ jobs:
           shellcheck --severity=warning scripts/amneziawg-cargo-build.sh
           shellcheck --severity=warning scripts/boringtun-artifact.sh
           shellcheck --severity=warning -x scripts/boringtun-release.sh
+          shellcheck --severity=warning scripts/check-licensing.sh
           shellcheck --severity=warning amneziawg-proxy/scripts/amneziawg-proxy-common.sh
           shellcheck --severity=warning amneziawg-proxy/scripts/amneziawg-proxy-install.sh
           shellcheck --severity=warning amneziawg-proxy/scripts/amneziawg-proxy-uninstall.sh

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! Explicit, deduplicated harmless test messages; never VPN export jobs.
 use super::{
     service::DeliveryContext,

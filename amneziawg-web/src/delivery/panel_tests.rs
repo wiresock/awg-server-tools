@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 use super::{settings::PanelSettingsInput, smtp::*, test_mail::TestRequest, tests::*, *};
 use crate::db::delivery;
 use std::sync::{

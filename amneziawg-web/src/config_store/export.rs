@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! Shared bounded export reader for authenticated and email delivery routes.
 //! The configured directory and its ancestors must be administrator-controlled.
 use std::{

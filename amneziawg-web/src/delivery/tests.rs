@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 use super::{exports::*, service::*, smtp::*, *};
 use crate::db::{delivery, Database};
 use std::sync::Arc;
