@@ -12,6 +12,7 @@ pub struct TestRequest {
     pub revision: i64,
     pub recipient: String,
     pub request_id: String,
+    pub draft: Option<super::settings::PanelSettingsInput>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -81,7 +82,7 @@ impl DeliveryContext {
             .await
             .map_err(|_| DeliveryError("test_result_unknown"))?
     }
-    async fn submit_test(&self, body: TestRequest) -> Result<TestOutcome> {
+    async fn submit_test(&self, mut body: TestRequest) -> Result<TestOutcome> {
         if let Some(row) = self.test_outcome(&body).await? {
             return Ok(row);
         }
@@ -90,11 +91,12 @@ impl DeliveryContext {
             .clone()
             .try_acquire_owned()
             .map_err(|_| DeliveryError("test_busy"))?;
-        let runtime = tokio::time::timeout(self.admission_budget, async {
+        // Existing attempt IDs above always recover the original attempt,
+        // even if a caller accidentally includes a different draft on retry.
+        let runtime = self.test_configuration(body.revision, body.draft.take())?;
+        tokio::time::timeout(self.admission_budget, async {
             let _guards = self.guards().await?;
-            self.enabled()?;
-            let runtime = self.runtime();
-            if runtime.revision != body.revision { return Err(DeliveryError("settings_changed")); }
+            self.validate_test_revision(runtime.revision)?;
             let mut tx = self.source.db.pool.begin().await?;
             sqlx::query("UPDATE email_test_attempts SET state=state WHERE id=?")
                 .bind(&body.request_id).execute(&mut *tx).await?;
@@ -110,7 +112,7 @@ impl DeliveryContext {
                 .bind(&body.request_id).bind(runtime.revision).bind(&body.recipient).bind(self.time())
                 .execute(&mut *tx).await?;
             tx.commit().await?;
-            Ok::<_,DeliveryError>(runtime)
+            Ok::<_,DeliveryError>(())
         }).await.map_err(|_|DeliveryError("test_result_unknown"))??;
         let mail=MailMessage {recipient:body.recipient.clone(),subject:"SMTP test from AmneziaWG panel".into(),
             body:"This is an explicitly requested SMTP test. It contains no VPN configuration or private key.".into(),attachments:Vec::new()};

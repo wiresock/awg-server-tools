@@ -52,6 +52,60 @@ pub struct SettingsView {
 }
 
 impl DeliveryContext {
+    /// Explicit admin-only tests may use an unsaved snapshot. Building a
+    /// transport performs no network I/O and never changes the active runtime.
+    pub(crate) fn test_configuration(
+        &self,
+        revision: i64,
+        draft: Option<settings::PanelSettingsInput>,
+    ) -> Result<Arc<RuntimeConfiguration>> {
+        self.validate_test_revision(revision)?;
+        let before = self.runtime();
+        if before.revision != revision {
+            return Err(DeliveryError("settings_changed"));
+        }
+        let Some(mut input) = draft else {
+            self.enabled()?;
+            return Ok(before);
+        };
+        if input.revision != revision {
+            return Err(DeliveryError("settings_changed"));
+        }
+        // Enable only this transient transport, regardless of the form's
+        // persisted sending toggle. The caller has already required admin auth.
+        input.enabled = true;
+        let candidate = input.resolve(&before.settings, true)?;
+        // A draft must not turn Keep into credential forwarding. Only explicit
+        // replacement/clearing may test a different server or login identity.
+        if matches!(input.password_action, settings::PasswordAction::Keep)
+            && !before.settings.password.is_empty()
+            && (!candidate.host.eq_ignore_ascii_case(&before.settings.host)
+                || candidate.port != before.settings.port
+                || candidate.tls != before.settings.tls
+                || candidate.username != before.settings.username
+                || candidate.authenticate != before.settings.authenticate)
+        {
+            return Err(DeliveryError("draft_password_scope_changed"));
+        }
+        let transport = self.transport_factory.build(&candidate)?;
+        Ok(Arc::new(RuntimeConfiguration {
+            revision,
+            settings: candidate,
+            transport,
+        }))
+    }
+
+    /// Repeat under admission guards after resolving Keep against a snapshot.
+    pub(crate) fn validate_test_revision(&self, revision: i64) -> Result<()> {
+        if self.quarantined.load(Ordering::Acquire) {
+            return Err(DeliveryError("delivery_recovery_required"));
+        }
+        if self.runtime().revision != revision {
+            return Err(DeliveryError("settings_changed"));
+        }
+        Ok(())
+    }
+
     pub fn runtime(&self) -> Arc<RuntimeConfiguration> {
         self.runtime.read().unwrap().clone()
     }

@@ -1,4 +1,4 @@
-//! Explicit saved-profile connection checks, never message submission.
+//! Explicit saved-profile or transient-draft checks, never message submission.
 use super::{config::TransportSecurity, service::DeliveryContext, smtp::ConnectionCheck, *};
 use std::sync::Arc;
 
@@ -6,6 +6,7 @@ use std::sync::Arc;
 #[serde(deny_unknown_fields)]
 pub struct CheckRequest {
     pub revision: i64,
+    pub draft: Option<super::settings::PanelSettingsInput>,
 }
 #[derive(Serialize)]
 pub struct CheckOutcome {
@@ -30,13 +31,10 @@ impl DeliveryContext {
             .clone()
             .try_acquire_owned()
             .map_err(|_| DeliveryError("test_busy"))?;
-        let runtime = tokio::time::timeout(self.admission_budget, async {
+        let runtime = self.test_configuration(body.revision, body.draft)?;
+        tokio::time::timeout(self.admission_budget, async {
             let _guards = self.guards().await?;
-            self.enabled()?;
-            let runtime = self.runtime();
-            if runtime.revision != body.revision {
-                return Err(DeliveryError("settings_changed"));
-            }
+            self.validate_test_revision(runtime.revision)?;
             let mut tx = self.source.db.pool.begin().await?;
             sqlx::query("DELETE FROM smtp_connection_checks WHERE created_at<=?")
                 .bind(self.time() - 3600)
@@ -53,7 +51,7 @@ impl DeliveryContext {
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
-            Ok::<_, DeliveryError>(runtime)
+            Ok::<_, DeliveryError>(())
         })
         .await
         .map_err(|_| DeliveryError("admission_timeout"))??;

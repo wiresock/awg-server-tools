@@ -147,19 +147,19 @@ pub(super) fn peer_panel(
     csrf: &str,
 ) -> String {
     format!(
-        r#"<section id="peer-email" class="delivery-peer edit-form"><h2>Email configuration</h2>
-<form method="POST" action="{base}/admin/delivery/contact-form">
+        r#"<div id="peer-email" class="peer-email-editor">
+<form method="POST" action="{base}/admin/delivery/contact-form" aria-label="Peer email">
 <input type="hidden" name="client_id" value="{id}"><input type="hidden" name="version" value="{version}"><input type="hidden" name="csrf_token" value="{csrf}">
 <label for="peer-delivery-email">Email (optional)</label><input id="peer-delivery-email" type="email" name="email" maxlength="254" value="{email}">
-<button type="submit">Save email</button></form>
-<p>Clearing or changing email revokes existing links and queued sends. Saving never sends automatically.</p>
-<a href="{base}/?send_peer={peer}">Send config by email</a></section>"#,
+<p class="meta">Email is saved separately. Save any peer details above first; saving email reloads this page.</p>
+<button type="submit">Save email</button> <button type="reset" aria-label="Cancel email changes">Cancel</button></form>
+<p class="meta">Clearing or changing email revokes existing links and queued sends. Saving never sends automatically.</p>
+</div>"#,
         base = esc(&state.base_path),
         id = esc(&contact.id),
         version = contact.binding_version,
         csrf = esc(csrf),
         email = esc(contact.email.as_deref().unwrap_or("")),
-        peer = contact.peer_id.unwrap_or_default()
     )
 }
 
@@ -202,7 +202,7 @@ async fn page(
 ) -> Result<Html<String>, DeliveryError> {
     authorize(&state, &headers, false)?;
     let csrf = session_csrf_from_headers(&state, &headers);
-    let mut html = html_head("AmneziaWG - Email settings", &state.base_path);
+    let mut html = html_head("AmneziaWG - Settings", &state.base_path);
     // This secret-bearing page retains the strict no-inline-script CSP. The
     // shared email script updates versions through the same read-only endpoint.
     let nav = nav_bar_section(&state.base_path, &csrf, true);
@@ -624,7 +624,7 @@ mod tests {
                 "/admin/delivery",
                 vec![
                     "SMTP server",
-                    "<h1>Email settings</h1>",
+                    "<h1>Settings</h1>",
                     "id=\"email-settings-form\"",
                     "Password action",
                     "Send test email",
@@ -636,7 +636,7 @@ mod tests {
                 vec![
                     "Bulk actions",
                     "data-email-select=\"1\"",
-                    "data-email-send=\"1\"",
+                    "href=\"/peers/1\"",
                     "Send config",
                     "id=\"email-send-dialog\"",
                 ],
@@ -663,6 +663,45 @@ mod tests {
             .unwrap();
             for needle in needles {
                 assert!(body.contains(needle), "{path} is missing {needle}");
+            }
+            if path == "/peers/1" {
+                let editor = body
+                    .split("id=\"peer-editor\"")
+                    .nth(1)
+                    .expect("one Edit peer card");
+                let editor = editor.split("<!-- peer-editor-end -->").next().unwrap();
+                let forms: Vec<_> = editor.split("<form ").skip(1).collect();
+                assert_eq!(
+                    forms.len(),
+                    2,
+                    "details and email have separate forms in the same card"
+                );
+                assert!(forms[0].contains("action=\"/peers/1\""));
+                assert!(!forms[0].contains("name=\"email\""));
+                assert!(
+                    forms[0].contains("</form>"),
+                    "email must not nest inside details form"
+                );
+                assert!(forms[1].contains("action=\"/admin/delivery/contact-form\""));
+                assert_eq!(forms[1].matches("name=\"email\"").count(), 1);
+                assert!(forms[1].contains("name=\"version\""));
+                assert!(
+                    forms[1].contains("type=\"reset\""),
+                    "Cancel must not submit email"
+                );
+                assert_eq!(body.matches("class=\"btn peer-send-email\"").count(), 1);
+            } else if path == "/" {
+                let table = body
+                    .split("class=\"peer-table\"")
+                    .nth(1)
+                    .unwrap()
+                    .split("</table>")
+                    .next()
+                    .unwrap();
+                assert!(!table.contains("data-label=\"Actions\""));
+                assert!(!table.contains("<th>Actions</th>"));
+                assert!(table.contains("href=\"/peers/1\""));
+                assert!(table.contains("data-email-select=\"1\""));
             }
             assert!(!body.contains("<pre id=\"settings\""));
             assert!(!body.contains("value=\"fixture-secret"));
@@ -700,6 +739,62 @@ mod tests {
             }
         }
         assert_eq!(f.ctx.runtime().revision, 0);
+    }
+    #[tokio::test]
+    async fn draft_test_routes_redact_nested_secrets_and_enforce_csrf() {
+        let mut f = Fixture::new().await;
+        crate::delivery::tests::runtime_mut(&mut f.ctx)
+            .settings
+            .password = "stored-secret-canary".into();
+        let state = panel_state(&f);
+        let session = generate_session_id();
+        let csrf = add_session(&state.sessions, session.clone());
+        let app = super::super::build_router_state(state);
+        for path in [
+            "/api/admin/delivery/settings/check",
+            "/api/admin/delivery/settings/test",
+        ] {
+            for malformed in [false, true] {
+                for authorized in [false, true] {
+                    let mut draft = panel_body();
+                    draft["password_action"] = "keep".into();
+                    draft["password"] = if malformed {
+                        json!({"nested-secret-canary": true})
+                    } else {
+                        serde_json::Value::Null
+                    };
+                    let mut body = json!({"revision":0,"draft":draft});
+                    if path.ends_with("/test") {
+                        body["recipient"] = "recipient@example.test".into();
+                        body["request_id"] = "a".repeat(43).into();
+                    }
+                    let mut request = Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("cookie", format!("awg_session={session}"))
+                        .header("content-type", "application/json");
+                    if authorized {
+                        request = request.header("x-csrf-token", &csrf);
+                    }
+                    let response = app
+                        .clone()
+                        .oneshot(request.body(Body::from(body.to_string())).unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::CONFLICT);
+                    let bytes = to_bytes(response.into_body(), 8192).await.unwrap();
+                    let text = std::str::from_utf8(&bytes).unwrap();
+                    assert!(!text.contains("secret-canary"));
+                    if !authorized {
+                        assert!(text.contains("csrf_required"));
+                    } else if !malformed {
+                        assert!(text.contains("draft_password_scope_changed"));
+                    }
+                }
+            }
+        }
+        assert_eq!(f.ctx.runtime().revision, 0);
+        assert!(f.ctx.jobs().await.unwrap().is_empty());
     }
     #[tokio::test]
     async fn panel_disabled_start_exposes_public_routes_only_after_safe_enable() {
@@ -1001,8 +1096,42 @@ mod tests {
             .unwrap();
         let panel = peer_panel(&state, &contact, &csrf);
         assert!(panel.contains("type=\"email\""));
-        assert!(panel.contains("?send_peer=1"));
+        assert!(panel.contains("aria-label=\"Peer email\""));
         let app = super::super::build_router_state(state);
+        for (version, email) in [
+            (contact.binding_version, "not-an-email"),
+            (contact.binding_version - 1, "stale@example.test"),
+        ] {
+            let rejected = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/delivery/contact-form")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("cookie", format!("awg_session={session}"))
+                        .body(Body::from(format!(
+                            "client_id={}&version={version}&email={email}&csrf_token={csrf}",
+                            f.client
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(rejected.status(), StatusCode::CONFLICT);
+            let unchanged = crate::db::delivery::client(&f.ctx.source.db.pool, &f.client)
+                .await
+                .unwrap();
+            assert_eq!(unchanged.email, contact.email);
+            assert_eq!(unchanged.binding_version, contact.binding_version);
+            assert_eq!(
+                crate::db::delivery::job(&f.ctx.source.db.pool, &job)
+                    .await
+                    .unwrap()
+                    .state,
+                "queued"
+            );
+        }
         let response = app
             .oneshot(
                 Request::builder()

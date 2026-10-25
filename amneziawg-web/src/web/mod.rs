@@ -2742,8 +2742,7 @@ async fn page_peer_detail(
                     if let Ok(contacts) = delivery.contacts().await {
                         if let Some(contact) = contacts.iter().find(|c| c.peer_id == Some(id)) {
                             let panel = delivery_admin::peer_panel(&state, contact, &csrf);
-                            let at = html.rfind("</body>").unwrap_or(html.len());
-                            html.insert_str(at, &panel);
+                            html = html.replacen("<!-- peer-email-editor -->", &panel, 1);
                         }
                     }
                 }
@@ -4645,7 +4644,7 @@ fn nav_bar_section(base: &str, csrf_token: &str, email: bool) -> String {
     <input type="hidden" name="csrf_token" value="{csrf}">
     <button type="submit">Log out</button>
   </form>
-  <div class="panel-tabs" aria-label="Panel sections"><a href="{base}/"{peers_current}>Peers</a><a class="delivery-nav" href="{base}/admin/delivery"{email_current}>Email settings</a></div>
+  <div class="panel-tabs" aria-label="Panel sections"><a href="{base}/"{peers_current}>Peers</a><a class="delivery-nav" href="{base}/admin/delivery"{email_current}>Settings</a></div>
   <div id="system-versions" class="versions">Protocol: checking &nbsp;·&nbsp; Backend: checking &nbsp;·&nbsp; Panel: {web_version}</div>
 </nav>
 <script>
@@ -4993,7 +4992,7 @@ fn render_peer_list_inner(
     buf.push_str("<div class=\"workspace-main\">\n");
     buf.push_str(&format!(r#"<section id="peer-email-tools">
 <input type="hidden" id="email-base" value="{base}"><input type="hidden" id="email-csrf" value="{csrf}">
-<p id="email-readiness" class="meta">Loading email readiness…</p><a href="{base}/admin/delivery">Email settings</a>
+<p id="email-readiness" class="meta">Loading email readiness…</p><a href="{base}/admin/delivery">Settings</a>
 <div class="email-toolbar"><label><input id="email-select-all" type="checkbox">Select all (up to 50)</label><span id="email-selection-count">0 selected</span><details class="email-actions"><summary>Bulk actions</summary><button id="email-bulk-send" type="button" disabled>Send configs by email</button><button id="peer-bulk-delete" type="button" class="btn-danger" disabled>Delete selected peers</button><button id="email-clear-selection" type="button">Clear selection</button></details></div>
 <p id="email-peer-status" role="status" aria-live="polite"></p><button id="email-pending-check" type="button" hidden>Check previous email request</button></section>"#,base=esc(base),csrf=esc(csrf_token)));
     if peers.is_empty() {
@@ -5003,7 +5002,7 @@ fn render_peer_list_inner(
             "<div class=\"table-scroll\"><table class=\"peer-table\">\n\
              <tr><th>Select</th><th>Name / email</th><th>Connection</th><th>Identity</th><th>Endpoint</th>\
              <th>Comment</th><th>Expiration</th><th>Last handshake</th><th class=\"num\">RX<span class=\"th-hint\">current period</span></th>\
-             <th class=\"num\">TX<span class=\"th-hint\">current period</span></th><th>Actions</th></tr>\n",
+             <th class=\"num\">TX<span class=\"th-hint\">current period</span></th></tr>\n",
         );
         for p in peers {
             let detail_href = if p.archived {
@@ -5046,7 +5045,7 @@ fn render_peer_list_inner(
                  <td data-label=\"Expiration\">{expiration}</td>\
                  <td data-label=\"Last handshake\">{handshake}</td>\
                  <td class=\"num\" data-label=\"RX\">{rx}</td>\
-                 <td class=\"num\" data-label=\"TX\">{tx}</td><td data-label=\"Actions\"><details class=\"email-actions\"><summary>Actions</summary><button type=\"button\" data-email-send=\"{peer_id}\">Send config</button><button type=\"button\" data-email-edit=\"{peer_id}\">Edit email</button><a href=\"{detail_href}\">Peer details</a></details></td></tr>\n",
+                 <td class=\"num\" data-label=\"TX\">{tx}</td></tr>\n",
                 peer_id=p.id,
                 peer_name=esc(&p.name),
                 peer_key=peer_identity_digest(&p.public_key),
@@ -5382,9 +5381,9 @@ fn render_peer_detail_inner(
         )
     };
     buf.push_str(&format!(
-        r#"<div class="edit-form">
+        r#"<div class="edit-form" id="peer-editor">
 <h2>Edit peer</h2>
-<form method="POST" action="{base}/peers/{id}">
+<form method="POST" action="{base}/peers/{id}" aria-label="Peer details">
   <input type="hidden" name="csrf_token" value="{csrf}">
   <label for="display_name">Display name</label>
   <input type="text" id="display_name" name="display_name"
@@ -5393,7 +5392,10 @@ fn render_peer_detail_inner(
   <textarea id="comment" name="comment" maxlength="512"
             placeholder="Optional note about this peer">{cm}</textarea>
 {lifecycle_controls}  <button type="submit">Save</button>
+  <button type="reset" aria-label="Cancel peer changes">Cancel</button>
 </form>
+<!-- peer-email-editor -->
+<!-- peer-editor-end -->
 </div>
 </div>
 "#,
@@ -5426,34 +5428,6 @@ Audit-log entries are retained and may still contain earlier values.</p>
 "#,
             id = dto.id,
             csrf = esc(csrf_token),
-        ));
-    }
-
-    // Keep the retry action available after a partial removal clears transient
-    // config discovery metadata; managed_client_name is the durable identity.
-    if let Some(managed_name) = dto
-        .managed_client_name
-        .as_ref()
-        .filter(|_| monitoring_only.is_none())
-    {
-        buf.push_str(&format!(
-            r#"<div class="edit-form danger-panel">
-<h2>Remove user</h2>
-<p>This will permanently revoke the client <strong>{name}</strong> and delete its config file.
-Historical data (snapshots, events) will be preserved.</p>
-<form method="POST" action="{base}/admin/users/{id}/remove">
-  <input type="hidden" name="csrf_token" value="{csrf}">
-  <label class="choice" for="confirm_remove">
-    <input type="checkbox" id="confirm_remove" name="confirm" value="yes" required>
-    I understand this action will permanently remove this user and cannot be undone.
-  </label>
-  <button type="submit" class="btn-danger">Remove user</button>
-</form>
-</div>
-"#,
-            id = dto.id,
-            csrf = esc(csrf_token),
-            name = esc(managed_name),
         ));
     }
 
@@ -5571,6 +5545,34 @@ Historical data (snapshots, events) will be preserved.</p>
             ));
         }
         buf.push_str("</table></div>\n");
+    }
+
+    // Keep the retry action available after a partial removal clears transient
+    // config discovery metadata; managed_client_name is the durable identity.
+    if let Some(managed_name) = dto
+        .managed_client_name
+        .as_ref()
+        .filter(|_| monitoring_only.is_none())
+    {
+        buf.push_str(&format!(
+            r#"<div class="edit-form danger-panel">
+<h2>Remove user</h2>
+<p>This will permanently revoke the client <strong>{name}</strong> and delete its config file.
+Historical data (snapshots, events) will be preserved.</p>
+<form method="POST" action="{base}/admin/users/{id}/remove">
+  <input type="hidden" name="csrf_token" value="{csrf}">
+  <label class="choice" for="confirm_remove">
+    <input type="checkbox" id="confirm_remove" name="confirm" value="yes" required>
+    I understand this action will permanently remove this user and cannot be undone.
+  </label>
+  <button type="submit" class="btn-danger">Remove user</button>
+</form>
+</div>
+"#,
+            id = dto.id,
+            csrf = esc(csrf_token),
+            name = esc(managed_name),
+        ));
     }
 
     // QR code modal overlay (only when config exists)
@@ -10248,6 +10250,16 @@ mod tests {
         assert!(
             html.contains("Remove user"),
             "detail page should contain 'Remove user' when config is linked"
+        );
+        assert!(
+            html.find("<h2>Remove user</h2>").unwrap() > html.find("<h2>Recent activity").unwrap(),
+            "destructive removal belongs below peer history and activity"
+        );
+        let removal = html.split("<h2>Remove user</h2>").nth(1).unwrap();
+        assert!(removal.contains("name=\"confirm\" value=\"yes\" required"));
+        assert!(
+            !removal.contains("<h2>"),
+            "removal is the final visible page section"
         );
         assert!(
             html.contains(&format!("/admin/users/{id}/remove")),

@@ -21,7 +21,7 @@
     const [settings, rows, jobs] = await Promise.all([api('settings'), api('contacts'), api('jobs')]);
     if (load !== loading) return;
     operational = settings.enabled && settings.operational !== false;
-    document.getElementById('settings').textContent = operational ? 'Email sending enabled. SMTP acceptance is not delivery confirmation.' : 'Email is not ready. Configure it in Email settings.';
+    document.getElementById('settings').textContent = operational ? 'Email sending enabled.' : 'Email is not ready. Configure it in Settings.';
     document.getElementById('preview').disabled = !operational;
     document.querySelector('#mode option[value="link"]').disabled = !settings.link_enabled;
     contacts = rows; const table = document.getElementById('contacts'); table.replaceChildren();
@@ -48,7 +48,7 @@
       }
       table.append(row);
     }
-    document.getElementById('jobs').textContent = jobs.map(j => j.recipient + ': ' + (j.state === 'accepted' ? 'accepted by SMTP (delivery unconfirmed)' : j.state) + (j.invalidated_at ? ' — stale/revoked: ' + j.invalidation_code : '') + ' / attempts ' + j.attempts + ' / ' + (j.error_code || '')).join('\n');
+    document.getElementById('jobs').textContent = jobs.map(j => j.recipient + ': ' + (j.state === 'accepted' ? 'sent - accepted by SMTP' : j.state) + (j.invalidated_at ? ' — stale/revoked: ' + j.invalidation_code : '') + ' / attempts ' + j.attempts + ' / ' + (j.error_code || '')).join('\n');
   };
   document.getElementById('preview').addEventListener('click', report(async () => {
     if (previewBusy || sending || !operational) return;
@@ -64,7 +64,7 @@
   }));
   document.getElementById('confirm').addEventListener('click', report(async () => {
     if (!preview || sending) return; const p = preview; sending = true; document.getElementById('confirm').disabled = true;
-    try { await api('send', {preview_id: p.id, request_id: p.id}); status.textContent = 'Queued. Check submission status; acceptance is not delivery.'; await reload(); }
+    try { await api('send', {preview_id: p.id, request_id: p.id}); status.textContent = 'Queued for SMTP. Check submission status.'; await reload(); }
     finally { sending = false; document.getElementById('confirm').disabled = false; }
   }));
   document.getElementById('mode').addEventListener('change', invalidate);

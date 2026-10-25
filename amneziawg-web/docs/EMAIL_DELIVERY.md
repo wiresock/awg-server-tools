@@ -1,9 +1,10 @@
 # Explicit email delivery
 
-Email is optional contact metadata. Use **Actions → Send config** on the main peer
-table, or select peers and choose **Bulk actions → Send configs by email**.
-**Actions → Edit email** edits one recipient without sending. An address can also be
-saved during client creation. Saving, editing, regenerating or rotating a client
+Email is optional contact metadata. Open a peer page to send its config, or
+select peers and choose **Bulk actions > Send configs by email**. **Edit Peer >
+Save email** edits one recipient without sending; email and peer details have
+separate forms and save actions. An address can also be saved during client
+creation. Saving, editing, regenerating or rotating a client
 never sends mail. Select up to 50 clients, preview named recipients and skip reasons, then
 confirm. The preview identifies skipped ineligible clients. If anything changes
 after preview, create a fresh preview. A repeated confirmation uses the same
@@ -17,7 +18,7 @@ delivered. No bounce tracking or delivery receipts are provided.
 
 ## Email settings and storage
 
-The **Email settings** tab edits host, port, explicit transport security, authentication,
+The **Settings** tab edits host, port, explicit transport security, authentication,
 username, From, optional Reply-to, public HTTPS base and link lifetime. Save and
 Check SMTP and Test email are separate actions. Password starts blank: **Keep** preserves its
 current value, **Replace** requires a new value, and **Clear** removes it. An empty
@@ -40,12 +41,24 @@ installations keep working before first Save. Backups and old WAL/pages are also
 secret-bearing: Clear removes the active value, not historical copies. Protect and
 retire those copies under the operator's backup policy.
 
-**Check SMTP** uses the saved, enabled profile, never unsaved fields. Save or
-reload edits first. It connects with the selected TLS/authentication settings,
-sends SMTP NOOP and closes; it never issues MAIL FROM, RCPT TO or DATA. Success
-does not prove sender/recipient permission or inbox delivery. Results name the
-saved revision; a change during the check is reported and does not mark the new
-profile tested. TLS errors and an explicit SMTP535 authentication rejection are
+**Check SMTP** and **Test email** use the current form without saving it or
+enabling the saved profile. Keep resolves the stored password on the server;
+Replace uses the entered password only for that attempt; Clear tests without it.
+With a stored password, Keep is rejected if host (case-insensitive), port, TLS,
+username or authentication mode changes. Explicitly Replace or Clear to test a
+new endpoint. Draft credentials are never stored in SQLite, browser storage or
+responses. A manually entered replacement stays only in the input for a later
+explicit Save; saving or leaving/reloading the page clears that input.
+
+A draft is bound to the saved revision and rechecked under admission guards.
+A concurrent save before admission rejects it; an admitted operation keeps its
+original immutable transport. Later saves do not cancel or redirect it, and its
+result does not validate newer settings or edits to the form.
+
+Check SMTP connects with the selected TLS/authentication settings, sends SMTP
+NOOP and closes; it never issues MAIL FROM, RCPT TO or DATA. Success confirms
+connection/configured authentication, not sender permission or inbox delivery.
+TLS errors and an explicit SMTP535 authentication rejection are
 reported when available; other connection/protocol/authentication failures remain
 a generic sanitized result, without invented stage progress or server text.
 
@@ -61,12 +74,13 @@ It exposes message bodies, configurations/private keys and temporary-link tokens
 on the SMTP transport. Use only a trusted local relay. SMTP AUTH is forbidden,
 including a nonempty username or retained password, even if sending is disabled.
 Uncheck authentication, empty the username and explicitly Clear the password;
-the panel never discards a saved secret for you. Every plaintext Save requires
+the panel never discards a saved secret for you. Every plaintext Save or test requires
 an explicit warning acknowledgment. Required STARTTLS remains the default and
 implicit TLS remains supported, both with normal certificate validation.
 Migration0013 preserves an existing profile/revision without changing its mode.
 
-Test email sends a fixed message with no VPN material using the saved revision.
+Test email sends a fixed message with no VPN material using the confirmed draft.
+The UI reports Sent - accepted by SMTP, failed, or unknown; it has no inbox-delivery badge.
 It shares one test-operation slot with Check SMTP and allows five admissions/hour, with a30-second SMTP deadline.
 Request IDs/outcomes are retained30days; there is no automatic retry. Interrupted
 attempts become unknown. After reload, **Check previous test status** is a read-only

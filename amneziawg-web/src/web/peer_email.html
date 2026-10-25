@@ -7,14 +7,14 @@
 <dialog id="email-send-dialog" class="email-dialog" aria-labelledby="email-send-title">
 <h2 id="email-send-title">Send configurations</h2><p class="meta">Configurations contain private keys. Check every recipient before confirming.</p>
 <div id="email-peer-context" class="email-buttons" hidden><a id="email-peer-return">Back to peer</a><a id="email-peer-edit" hidden>Edit this peer's email</a><a id="email-peer-recovery" href="{base}/admin/delivery/advanced" hidden>Review contact binding</a></div>
-<div id="email-setup" class="email-notice" hidden><strong>Set up email before sending</strong><p>Your selected peers will be kept while you configure Email settings.</p><a id="email-setup-link" href="{base}/admin/delivery">Go to Email settings</a></div>
+<div id="email-setup" class="email-notice" hidden><strong>Set up email before sending</strong><p>Your selected peers will be kept while you configure Settings.</p><a id="email-setup-link" href="{base}/admin/delivery">Go to Settings</a></div>
 <div id="email-options"><div class="email-fields">
 <label>Delivery method<select id="email-mode"><option value="direct">Direct attachments</option><option id="email-link-option" value="link">Expiring download link</option></select></label>
 <label id="email-ttl-label" hidden>Link lifetime (seconds)<input id="email-ttl" type="number" min="300" max="604800" value="86400"></label></div>
 <div class="email-formats"><label><input type="checkbox" data-email-format="conf" checked>.conf file</label><label><input type="checkbox" data-email-format="qr">QR image</label><label><input type="checkbox" data-email-format="vpn-uri">vpn:// text</label></div>
 <button id="email-review" type="button">Review recipients</button></div>
 <p id="email-send-status" role="status" aria-live="polite"></p><div id="email-recipients" class="email-recipients"></div><div id="email-skipped" class="email-skipped"></div>
-<p class="meta">Queued is not sent; SMTP acceptance is not delivery confirmation. Direct mail already being submitted cannot be recalled. Regeneration never sends email automatically.</p>
+<p class="meta">Queued mail is waiting for SMTP submission. Direct mail already being submitted cannot be recalled. Regeneration never sends email automatically.</p>
 <div class="email-buttons"><button id="email-cancel" type="button">Cancel</button><button id="email-confirm" type="button" disabled>Queue emails</button></div><button id="email-new-review" type="button" hidden>Start a separate review…</button></dialog>
 <dialog id="email-edit-dialog" class="email-dialog" aria-labelledby="email-edit-title"><form id="email-edit-form" class="edit-form"><h2 id="email-edit-title">Edit email</h2><label for="email-edit-address">Email (optional)</label><input id="email-edit-address" type="email" maxlength="254" autocomplete="off"><p class="meta">Changing or clearing this address revokes old links and queued mail. Saving never sends a message.</p><p id="email-edit-status" role="status"></p><div class="email-buttons"><button id="email-edit-cancel" type="button">Cancel</button><button id="email-edit-save" type="submit">Save email</button></div></form></dialog>
 <script src="{base}/static/email-common.js" defer></script><script src="{base}/static/peer-email.js" defer></script>

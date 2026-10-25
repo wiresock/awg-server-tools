@@ -249,6 +249,7 @@ table.facts td { background: transparent; }
   align-items: start;
 }
 .detail-layout .edit-form { margin-top: 0; }
+.peer-email-editor { margin-top: 1rem; padding-top: .25rem; border-top: 1px solid var(--border); }
 
 .status {
   display: inline-flex;
@@ -504,14 +505,27 @@ fieldset { margin: 0; padding: 0; border: 0; }
 #contacts button, #exports button { margin: .25rem; }
 #preview-result, #jobs, #settings { white-space: pre-wrap; overflow-wrap: anywhere; }
 .panel-tabs { display: flex; flex-wrap: wrap; max-width: 100%; gap: .35rem; grid-column: 1 / -1; width: fit-content; padding: .35rem; margin: .6rem 0 .3rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
-.panel-tabs a { display: inline-flex; flex: 0 0 auto; width: max-content; box-sizing: border-box; align-items: center; justify-content: center; min-height: 44px; min-width: 0; padding: .45rem .35rem; border: 1px solid transparent; border-radius: 7px; color: var(--text); font-weight: 700; text-decoration: none; }
+.panel-tabs a { display: inline-flex; flex: 0 0 auto; width: max-content; box-sizing: border-box; align-items: center; justify-content: center; min-height: 30px; min-width: 0; padding: 1px .35rem; line-height: 20px; border: 1px solid transparent; border-radius: 7px; color: var(--text); font-weight: 700; text-decoration: none; }
 .panel-tabs a:hover { background: var(--bg); border-color: var(--border); }
-.panel-tabs a[aria-current="page"] { background: var(--accent); color: #071c26; border-color: var(--accent); box-shadow: inset 0 -3px 0 rgba(0,0,0,.24); }
+.panel-tabs a[aria-current="page"] { background: var(--accent); color: #071c26; border-color: var(--accent); box-shadow: none; }
 .panel-tabs a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 @media (max-width: 600px) { .panel-tabs { gap: .25rem; } }
 .email-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(16rem, 1fr); gap: 1.25rem; align-items: start; }
 .email-card { border: 1px solid var(--border); border-radius: 8px; padding: 1.1rem; background: var(--surface); margin: 0 0 1rem; min-width: 0; }
 .email-card h2:first-child { margin-top: 0; }
+/* Keep settings typography quiet without changing peer forms or dialogs. */
+.email-page .page-head { margin-bottom: .75rem; }
+.email-page h1 { font-size: 1.125rem; font-weight: 600; }
+.email-page .eyebrow { font-weight: 400; letter-spacing: .04em; }
+.email-page .email-layout { gap: 1rem; }
+.email-page .email-card { max-width: none; padding: 1rem; }
+.email-page .email-card h2 { margin: 1.25rem 0 .5rem; font-size: .9375rem; font-weight: 600; }
+.email-page .email-card h2:first-child { margin-top: 0; }
+.email-page .email-card label { font-weight: 400; }
+.email-page .email-card input, .email-page .email-card select { font-size: 14px; font-weight: 400; }
+.email-page .email-fields { gap: .65rem 1rem; }
+.email-page .meta { margin-bottom: .6rem; }
+.email-page .email-notice { padding: .6rem .75rem; margin: .75rem 0; }
 .email-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem 1rem; align-items: end; }
 .email-fields label { margin: 0; }
 .email-wide { grid-column: 1 / -1; }

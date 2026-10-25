@@ -20,8 +20,8 @@ function page(kind,responder,storage=new Map(),search="") {
   };all.push(e);return e;}
   const get=id=>{if(!ids.has(id)) ids.set(id,element(id));return ids.get(id);};
   const selects=[7,8].map(id=>{const e=element();e.dataset.emailSelect=String(id);e.dataset.peerName=id===7?'Alice':'Bob';e.dataset.peerKey='key-'+id;e.closest=()=>({remove(){e.removed=true;}});return e;});
-  const sends=[7,8].map(id=>{const e=element();e.dataset.emailSend=String(id);return e;});
-  const edits=[7,8].map(id=>{const e=element();e.dataset.emailEdit=String(id);return e;});
+  const sends=(kind==='peers-no-actions'?[]:[7,8]).map(id=>{const e=element();e.dataset.emailSend=String(id);return e;});
+  const edits=(kind==='peers-no-actions'?[]:[7,8]).map(id=>{const e=element();e.dataset.emailEdit=String(id);return e;});
   const readiness=[7,8].map(id=>{const e=element();e.dataset.emailReadiness=String(id);return e;});
   const formats=['conf','qr','vpn-uri'].map(format=>{const e=element();e.dataset.emailFormat=format;e.checked=format==='conf';return e;});
   get('email-base').value='/private';get('email-csrf').value='csrf';get('email-mode').value='direct';get('email-ttl').value='86400';
@@ -70,19 +70,22 @@ test('duplicate Save is suppressed and uncertain Save requires reload',async()=>
   await p.get('email-settings-form').fire('submit');assert.equal(p.requests.filter(r=>r.body).length,1);
   assert.match(p.get('email-settings-status').textContent,/reload/i);
 });
-test('test mail requires separate confirmation and reuses request identity on uncertain response',async()=>{
-  let calls=0;const p=page('settings',responder({test:r=>{calls++;return calls===1?Promise.reject(new Error('offline')):ok({state:'accepted',settings_revision:1,settings_changed:false});}}));await tick();
+test('test mail requires confirmation and interrupted responses recover by GET without resubmission',async()=>{
+  const reply={state:'accepted',recipient:'admin@example.test',settings_revision:1,settings_changed:false};
+  const normal=responder({test:()=>Promise.reject(new Error('offline'))});
+  const p=page('settings',r=>r.url.includes('/settings/test/')?ok(reply):normal(r));await tick();
   await p.get('email-test-open').fire('click');assert.equal(p.requests.filter(r=>r.body).length,0);
   assert.equal(p.get('email-test-dialog').open,true);await p.get('email-test-confirm').fire('click');
   await p.get('email-test-confirm').fire('click');const sends=p.requests.filter(r=>r.body);
-  assert.equal(sends.length,2);assert.equal(sends[0].body.request_id,sends[1].body.request_id);
-  assert.match(p.get('email-test-status').textContent,/accepted.*delivery.*unconfirmed/i);
+  assert.equal(sends.length,1);assert.ok(p.requests.some(r=>r.url.endsWith('/test/'+sends[0].body.request_id)&&!r.body));
+  assert.match(p.get('email-test-status').textContent,/sent.*accepted by SMTP/i);
+  assert.doesNotMatch(p.get('email-test-status').textContent,/unconfirmed|unverified|inbox/i);
 });
-test('unsaved settings and unavailable private storage have actionable states',async()=>{
+test('unavailable private storage prevents Save but transient testing does not persist credentials',async()=>{
   const p=page('settings',responder({settings:()=>ok({...saved,storage_ready:false})}));await tick();
   assert.equal(p.get('email-save').disabled,true);assert.match(p.get('email-storage-notice').textContent,/private|permission/i);
   await p.get('email-settings-form').fire('input');await p.get('email-test-open').fire('click');
-  assert.equal(p.get('email-test-dialog').open,false);
+  assert.equal(p.get('email-test-dialog').open,true);assert.equal(p.requests.filter(r=>r.body).length,0);
 });
 test('main peer selection persists across navigation and restores only existing peer ids',async()=>{
   const p=page('peers',responder());await tick();p.selects[0].checked=true;await p.selects[0].fire('change');
@@ -225,17 +228,19 @@ test('bulk deletion timeout is unknown, releases controls and never dispatches t
 
 test('peer readiness preserves readable UTF-8 punctuation after UI edits',async()=>{
   const p=page('peers',responder());await tick();
-  assert.equal(p.get('email-readiness').textContent,'Email enabled \u00b7 choose Actions or select peers to send');
+  assert.equal(p.get('email-readiness').textContent,'Email enabled \u00b7 open a peer or select peers to send');
   assert.equal(p.readiness[0].textContent,'alice@example.test \u00b7 checked again before sending');
 });
 
 test('peer detail entry opens only recipient review and retains bulk selection on Cancel',async()=>{
   const storage=new Map([['awg-email-selected:/private','["8"]']]);
-  const p=page('peers',responder(),storage,'?send_peer=7');await tick();await tick();
+  const p=page('peers-no-actions',responder(),storage,'?send_peer=7');await tick();await tick();
   const preview=p.requests.find(r=>r.url.endsWith('/preview'));assert.deepEqual(preview.body.clients,['a']);
   assert.equal(p.get('email-peer-context').hidden,false);assert.equal(p.get('email-peer-return').href,'/private/peers/7');
   assert.equal(p.requests.filter(r=>r.url.endsWith('/send')).length,0);await p.get('email-cancel').fire('click');
   assert.equal(p.get('email-send-dialog').open,false);assert.equal(p.selects[1].checked,true);
+  assert.equal(p.document.activeElement,p.selects[0],'Cancel returns focus to the reviewed peer without selecting it');
+  assert.equal(p.selects[0].checked,false);
 });
 test('peer detail missing email and unbound states expose scoped recovery links without sending',async()=>{
   const p=page('peers',responder({preview:()=>ok({id:'empty',items:[],skipped:[{client_id:'b',reason:'email_missing'}]})}),new Map(),'?send_peer=8');await tick();await tick();
@@ -258,20 +263,47 @@ test('peer detail SMTP setup preserves its context and ineligible preview cannot
 });
 
 
-test('Check SMTP is explicit, saved-only and suppresses repeated clicks without submitting mail',async()=>{
+test('Check SMTP uses current draft and suppresses repeated clicks without submitting mail',async()=>{
  let release;const p=page('settings',responder({check:()=>new Promise(r=>release=r)}));await tick();
  assert.equal(p.requests.filter(r=>r.body).length,0);
  const first=p.get('email-smtp-check').fire('click');await tick();
  await p.get('email-smtp-check').fire('click');
  assert.equal(p.requests.filter(r=>r.body).length,1);
- assert.deepEqual(JSON.parse(JSON.stringify(p.requests.find(r=>r.body).body)),{revision:1});
+ assert.equal(p.requests.find(r=>r.body).body.draft.host,'smtp.example.test');
+ assert.equal(p.requests.find(r=>r.body).body.draft.password_action,'keep');
  assert.equal(p.get('email-smtp-check').disabled,true);
  release(ok({settings_revision:1,settings_changed:false,outcome:'connected',security:'starttls',authenticated:true}));await first;
  assert.match(p.get('email-smtp-result').textContent,/No message was sent/);
- assert.match(p.get('email-smtp-result').textContent,/does not prove/i);
+ assert.doesNotMatch(p.get('email-smtp-result').textContent,/unconfirmed|unverified|inbox/i);
  await p.get('email-settings-form').fire('input');
- assert.equal(p.get('email-smtp-check').disabled,true);
- await p.get('email-smtp-check').fire('click');assert.equal(p.requests.filter(r=>r.body).length,1);
+ assert.equal(p.get('email-smtp-check').disabled,false);
+});
+
+test('disabled saved profile can test an unsaved replacement without Save or browser persistence',async()=>{
+ const p=page('settings',responder({settings:()=>ok({...saved,enabled:false,operational:false}),check:()=>ok({outcome:'connected',settings_revision:1,settings_changed:false,security:'starttls',authenticated:true})}));await tick();
+ p.get('smtp-host').value='draft.example.test';p.get('smtp-password-action').value='replace';await p.get('smtp-password-action').fire('change');p.get('smtp-password').value='draft-secret';await p.get('email-settings-form').fire('input');
+ assert.equal(p.get('email-smtp-check').disabled,false);await p.get('email-smtp-check').fire('click');
+ const writes=p.requests.filter(r=>r.body);assert.equal(writes.length,1);assert.ok(writes[0].url.endsWith('/check'));
+ assert.equal(writes[0].body.draft.host,'draft.example.test');assert.equal(writes[0].body.draft.password,'draft-secret');assert.equal(writes[0].body.draft.enabled,false);
+ assert.equal(p.get('smtp-enabled').checked,false);assert.equal(p.get('smtp-host').value,'draft.example.test');assert.equal(p.get('smtp-password').value,'draft-secret');
+ assert.equal(p.storage.size,0);assert.doesNotMatch(p.get('email-smtp-result').textContent,/draft-secret/);
+});
+
+test('draft test email confirmation is invalidated by edits and Cancel has no write effect',async()=>{
+ const p=page('settings',responder({settings:()=>ok({...saved,enabled:false,operational:false}),test:()=>ok({state:'accepted',recipient:'admin@example.test',settings_revision:1})}));await tick();
+ p.get('smtp-password-action').value='clear';p.get('smtp-host').value='first.example.test';await p.get('email-settings-form').fire('input');await p.get('email-test-open').fire('click');
+ assert.equal(p.get('email-test-dialog').open,true);await p.get('email-test-cancel').fire('click');assert.equal(p.requests.filter(r=>r.body).length,0);
+ await p.get('email-test-open').fire('click');p.get('smtp-host').value='second.example.test';await p.get('email-settings-form').fire('input');await p.get('email-test-confirm').fire('click');assert.equal(p.requests.filter(r=>r.body).length,0);
+ await p.get('email-test-cancel').fire('click');await p.get('email-test-open').fire('click');await p.get('email-test-confirm').fire('click');
+ const writes=p.requests.filter(r=>r.body);assert.equal(writes.length,1);assert.equal(writes[0].body.draft.host,'second.example.test');assert.equal(writes[0].body.draft.password_action,'clear');
+ assert.ok(!('password' in writes[0].body.draft));assert.ok([...p.storage.values()].every(v=>!v.includes('example.test')));
+});
+
+test('plaintext draft testing requires acknowledgment and never silently clears retained password',async()=>{
+ const p=page('settings',responder({check:()=>ok({outcome:'connected',settings_revision:1,security:'none',authenticated:false})}));await tick();
+ p.get('smtp-tls').value='none';await p.get('email-settings-form').fire('change');await p.get('email-smtp-check').fire('click');assert.equal(p.requests.filter(r=>r.body).length,0);
+ p.get('smtp-allow-plaintext').checked=true;await p.get('email-smtp-check').fire('click');assert.equal(p.requests.filter(r=>r.body).length,0);assert.equal(p.get('smtp-password-action').value,'keep');
+ p.get('smtp-password-action').value='clear';p.get('smtp-authenticate').checked=false;p.get('smtp-username').value='';await p.get('email-smtp-check').fire('click');assert.equal(p.requests.find(r=>r.body).body.draft.password_action,'clear');
 });
 test('plaintext Save requires explicit acknowledgment and never clears a password implicitly',async()=>{
  const p=page('settings',responder());await tick();p.get('smtp-tls').value='none';await p.get('email-settings-form').fire('change');
@@ -303,4 +335,32 @@ test('unclassified SMTP failure includes security without inventing a failed sta
  const p=page('settings',responder({check:()=>ok({settings_revision:1,settings_changed:false,outcome:'unavailable'})}));await tick();await p.get('email-smtp-check').fire('click');
  assert.match(p.get('email-smtp-result').textContent,/connection, security or authentication/i);
  assert.doesNotMatch(p.get('email-smtp-result').textContent,/authentication completed|connection check passed/i);
+});
+
+test('draft Keep cannot test another server or identity without explicit replacement or clear',async()=>{
+ for(const [id,value] of [['smtp-host','other.example.test'],['smtp-port','465'],['smtp-tls','implicit'],['smtp-username','other-user']]){
+  const p=page('settings',responder());await tick();p.get(id).value=value;await p.get('email-settings-form').fire('input');
+  await p.get('email-smtp-check').fire('click');await p.get('email-test-open').fire('click');
+  assert.equal(p.requests.filter(r=>r.body).length,0,id);assert.equal(p.get('email-test-dialog').open,false);
+  assert.match(p.get('email-settings-status').textContent,/replace.*clear/i);
+  assert.equal(p.get('smtp-password-action').value,'keep');assert.equal(p.get('smtp-password').value,'');
+ }
+});
+
+test('unknown test result never becomes sent and repeated confirmation only reads its status',async()=>{
+ const result={state:'unknown',recipient:'admin@example.test',settings_revision:1,error_code:'acceptance_unknown'};
+ const normal=responder({test:()=>ok(result)});const p=page('settings',r=>r.url.includes('/settings/test/')?ok(result):normal(r));await tick();
+ await p.get('email-test-open').fire('click');await p.get('email-test-confirm').fire('click');await p.get('email-test-confirm').fire('click');await p.get('email-test-check').fire('click');
+ assert.equal(p.requests.filter(r=>r.body).length,1);assert.match(p.get('email-test-status').textContent,/unknown/i);
+ assert.doesNotMatch(p.get('email-test-status').textContent,/sent - accepted/i);assert.equal(p.get('email-test-open').disabled,true);
+});
+
+test('definite draft rejection permits a corrected explicit test without uncertain-send recovery',async()=>{
+ let calls=0;const p=page('settings',responder({test:()=>++calls===1?{ok:false,json:async()=>({error:'draft_password_scope_changed'})}:ok({state:'accepted',recipient:'admin@example.test',settings_revision:1})}));await tick();
+ await p.get('email-test-open').fire('click');await p.get('email-test-confirm').fire('click');
+ assert.equal(p.get('email-test-open').disabled,false);assert.equal(p.storage.size,0);assert.match(p.get('email-test-status').textContent,/no message was submitted/i);
+ assert.doesNotMatch(p.get('email-test-status').textContent,/may already|unknown/i);
+ await p.get('email-test-cancel').fire('click');p.get('smtp-password-action').value='replace';await p.get('smtp-password-action').fire('change');p.get('smtp-password').value='replacement';
+ await p.get('email-test-open').fire('click');await p.get('email-test-confirm').fire('click');
+ assert.equal(calls,2);assert.match(p.get('email-test-status').textContent,/sent.*accepted/i);
 });

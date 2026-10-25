@@ -30,7 +30,7 @@
       const c=contactFor(e.dataset.emailReadiness);
       e.textContent=!c?'No current contact binding':!c.email?'Add email address':c.email+' · checked again before sending';
     }
-    $('email-readiness').textContent=settings?.operational?'Email enabled · choose Actions or select peers to send':'Email is not ready. Open Email settings to configure it.';
+    $('email-readiness').textContent=settings?.operational?'Email enabled · open a peer or select peers to send':'Email is not ready. Open Settings to configure it.';
   }
   async function jobs() {
     const rows=await api('jobs');const list=$('email-activity');list.replaceChildren();
@@ -101,7 +101,7 @@
     for(const i of result.skipped||[]){const c=contacts.find(c=>c.id===i.client_id);skipped.append(node('p',(c?.managed_name || 'Selected peer')+' — '+errorText(i.reason)));}
     for(const id of sendIds.filter(id=>!contactFor(id))) {
       const name=checks.find(c=>c.dataset.emailSelect===id)?.dataset.peerName || 'Selected peer';
-      skipped.append(node('p',name+' — No current contact binding. Review contact recovery in Email settings.'));
+      skipped.append(node('p',name+' — No current contact binding. Review contact recovery in Settings.'));
     }
     if(!result.items.length)recipients.append(node('p','No eligible recipients. Add an email address or review the skipped peers.'));
   }
@@ -110,7 +110,7 @@
     invalidate();const current=generation;previewBusy=true;$('email-review').disabled=true;$('email-send-status').textContent='Checking current configurations and recipients…';
     try {
       const clients=sendIds.map(contactFor).filter(Boolean).map(c=>c.id);
-      if(!clients.length){listRecipients({items:[],skipped:[]});$('email-send-status').textContent='No current contact bindings. Edit email or review contact recovery in Email settings.';return;}
+      if(!clients.length){listRecipients({items:[],skipped:[]});$('email-send-status').textContent='No current contact bindings. Edit email or review contact recovery in Settings.';return;}
       const result=await api('preview',{clients,mode:$('email-mode').value,formats:formats.filter(e=>e.checked).map(e=>e.dataset.emailFormat),ttl_seconds:Number($('email-ttl').value)});
       if(current!==generation || !$('email-send-dialog').open)return;
       preview=result;listRecipients(result);$('email-confirm').disabled=!result.items.length;
@@ -159,7 +159,7 @@
     const id=pendingId || preview.id;if(!pendingId)pendingPreview=preview;
     rememberPending(id);sending=true;$('email-options').hidden=true;$('email-confirm').disabled=true;$('email-review').disabled=true;$('email-cancel').textContent='Close';
     $('email-send-status').textContent='Queuing the confirmed recipients…';
-    try {await api('send',{preview_id:id,request_id:id});rememberPending(null);pendingPreview=null;report('Queued. SMTP acceptance does not confirm delivery. Refresh activity to check progress.');close('email-send-dialog');try{await jobs();}catch(_){report('Request confirmed. Refresh activity when the connection is restored.');}}
+    try {await api('send',{preview_id:id,request_id:id});rememberPending(null);pendingPreview=null;report('Queued. Refresh activity to check progress.');close('email-send-dialog');try{await jobs();}catch(_){report('Request confirmed. Refresh activity when the connection is restored.');}}
     catch(e){$('email-send-status').textContent=errorText(e)+' Check this same request before starting another.';$('email-new-review').hidden=false;$('email-confirm').textContent='Check previous request';}
     finally {sending=false;$('email-confirm').disabled=!pendingId && !preview;$('email-review').disabled=!!pendingId;}
   });
@@ -169,7 +169,7 @@
     rememberPending(null);pendingPreview=null;await openSend(sendIds,$('email-pending-check'));
   });
   for(const b of document.querySelectorAll('[data-email-edit]'))b.addEventListener('click',()=>{
-    editing=contactFor(b.dataset.emailEdit);if(!editing){report('No current contact binding. Open Email settings → Contact recovery.');return;}
+    editing=contactFor(b.dataset.emailEdit);if(!editing){report('No current contact binding. Open Settings → Contact recovery.');return;}
     $('email-edit-title').textContent='Email for '+editing.managed_name;$('email-edit-address').value=editing.email || '';$('email-edit-status').textContent='';dialog('email-edit-dialog',b);
   });
   $('email-edit-cancel').addEventListener('click',()=>close('email-edit-dialog'));
@@ -186,6 +186,7 @@
   rememberPending(pendingId);selection();load().then(()=>{
     let intended=[];try{const stored=JSON.parse(sessionStorage.getItem(intentKey)||'[]');if(Array.isArray(stored))intended=stored.filter(id=>checks.some(c=>c.dataset.emailSelect===id)).slice(0,50);sessionStorage.removeItem(intentKey);}catch(_){}
     const id=new URLSearchParams(location.search).get('send_peer');
-    if(id && checks.some(c=>c.dataset.emailSelect===id))openSend([id]);else if(intended.length)openSend(intended);
+    const peerCheck=checks.find(c=>c.dataset.emailSelect===id);
+    if(id && peerCheck)openSend([id],peerCheck);else if(intended.length)openSend(intended);
   });
 })();
