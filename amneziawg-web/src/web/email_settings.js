@@ -24,7 +24,7 @@
   }
   function invalidateSmtpResult() {
     const node=$('email-smtp-result');
-    if(node.textContent && !smtpChecking)node.textContent='Settings were edited or reloaded. Run Check SMTP again for the current form.';
+    if(node.textContent && !smtpChecking){node.dataset.result='stale';node.textContent='Settings were edited or reloaded. Run Check SMTP again for the current form.';}
   }
   function fill(s) {
     generation++;
@@ -95,15 +95,17 @@
   $('email-smtp-check').addEventListener('click',async()=>{
     if(!settings || saving || testing || smtpChecking || uncertain || !validDraft(true))return;
     const revision=settings.revision, checkedGeneration=generation, body={revision,draft:draft()};smtpChecking=true;controls();
-    const resultNode=$('email-smtp-result');resultNode.textContent='Checking the current SMTP form. No settings are saved and no message is being sent.';
+    const resultNode=$('email-smtp-result');resultNode.dataset.result='pending';resultNode.textContent='Checking the current SMTP form. No settings are saved and no message is being sent.';
     try {
       const result=await api('settings/check',body);
       const details={connected:'Connection check passed.',tls_failed:'TLS negotiation or certificate validation failed.',authentication_rejected:'SMTP rejected authentication (535).',timeout:'Connection check timed out.',unavailable:'Connection, security or authentication check could not complete. Verify the host, port, security mode and credentials.'};
-      resultNode.textContent=details[result.outcome] || details.unavailable;
+      const known=Object.hasOwn(details,result.outcome);
+      resultNode.dataset.result=result.outcome==='connected'?'success':known?'failure':'unknown';
+      resultNode.textContent=known?details[result.outcome]:'Connection check result unavailable. Check again explicitly when ready.';
       if(result.outcome==='connected')resultNode.textContent+=' '+(result.security==='none'?'Plaintext connection; no TLS or authentication.':'Encrypted connection; '+(result.authenticated?'configured authentication completed.':'authentication was not configured.'));
       resultNode.textContent+=' No message was sent. Settings were not saved.';
-      if(result.settings_changed || settings.revision!==revision || generation!==checkedGeneration)resultNode.textContent+=' Settings have changed since this check began; this result does not validate the new settings.';
-    }catch(e){resultNode.textContent=errorText(e)+' No message was sent. Check again explicitly when ready.';}
+      if(result.settings_changed || settings.revision!==revision || generation!==checkedGeneration){resultNode.dataset.result='stale';resultNode.textContent+=' Settings have changed since this check began; this result does not validate the new settings.';}
+    }catch(e){const unknown=['connection_unknown','smtp_check_unknown'].includes(e.code);resultNode.dataset.result=unknown?'unknown':'failure';resultNode.textContent=(unknown?'Connection check result unknown. ':'')+errorText(e)+' No message was sent. Check again explicitly when ready.';}
     finally {delete body.draft.password;smtpChecking=false;controls();}
   });
   $('email-reload').addEventListener('click',()=>{if(!saving && !testing)return load();});

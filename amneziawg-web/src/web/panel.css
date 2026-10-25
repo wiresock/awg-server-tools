@@ -525,6 +525,10 @@ fieldset { margin: 0; padding: 0; border: 0; }
 .email-page .email-card input, .email-page .email-card select { font-size: 14px; font-weight: 400; }
 .email-page .email-fields { gap: .65rem 1rem; }
 .email-page .meta { margin-bottom: .6rem; }
+#email-smtp-result[data-result="success"] { color: var(--ok); }
+#email-smtp-result[data-result="failure"] { color: var(--danger); }
+#email-smtp-result[data-result="unknown"] { color: var(--warn); }
+#email-smtp-result[data-result="pending"], #email-smtp-result[data-result="stale"] { color: var(--text-dim); }
 .email-page .email-notice { padding: .6rem .75rem; margin: .75rem 0; }
 .email-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem 1rem; align-items: end; }
 .email-fields label { margin: 0; }

@@ -364,7 +364,7 @@ test('bulk deletion timeout is unknown, releases controls and never dispatches t
 test('peer readiness preserves readable UTF-8 punctuation after UI edits',async()=>{
   const p=page('peers',responder());await tick();
   assert.equal(p.get('email-readiness').textContent,'Email enabled \u00b7 open a peer or select peers to send');
-  assert.equal(p.readiness[0].textContent,'alice@example.test \u00b7 checked again before sending');
+  assert.equal(p.readiness[0].textContent,'alice@example.test');
 });
 
 test('peer detail entry opens only recipient review and retains bulk selection on Cancel',async()=>{
@@ -464,6 +464,35 @@ test('completed SMTP results are invalidated by subsequent edits and reload',asy
  await p.get('email-reload').fire('click');await p.get('email-smtp-check').fire('click');assert.match(p.get('email-smtp-result').textContent,/passed/);
  await p.get('email-reload').fire('click');assert.doesNotMatch(p.get('email-smtp-result').textContent,/passed/);
  assert.equal(p.requests.filter(r=>r.body).length,2);
+});
+
+test('SMTP result tones distinguish pending, successful and definite failed checks with words',async()=>{
+ let release;const p=page('settings',responder({check:()=>new Promise(r=>release=r)}));await tick();
+ const first=p.get('email-smtp-check').fire('click');await tick();
+ assert.equal(p.get('email-smtp-result').dataset.result,'pending');assert.match(p.get('email-smtp-result').textContent,/Checking/);
+ release(ok({settings_revision:1,settings_changed:false,outcome:'connected',security:'starttls',authenticated:true}));await first;
+ assert.equal(p.get('email-smtp-result').dataset.result,'success');assert.match(p.get('email-smtp-result').textContent,/passed/);
+ for(const outcome of ['tls_failed','authentication_rejected','timeout','unavailable']) {
+  const failed=page('settings',responder({check:()=>ok({settings_revision:1,settings_changed:false,outcome})}));await tick();await failed.get('email-smtp-check').fire('click');
+  assert.equal(failed.get('email-smtp-result').dataset.result,'failure',outcome);assert.match(failed.get('email-smtp-result').textContent,/failed|rejected|timed out|could not complete/i);
+ }
+});
+
+test('SMTP success color is cleared by edits, reload and late stale success',async()=>{
+ const p=page('settings',responder({check:()=>ok({settings_revision:1,settings_changed:false,outcome:'connected',security:'starttls',authenticated:true})}));await tick();
+ await p.get('email-smtp-check').fire('click');await p.get('email-settings-form').fire('input');assert.equal(p.get('email-smtp-result').dataset.result,'stale');
+ await p.get('email-smtp-check').fire('click');await p.get('email-reload').fire('click');assert.equal(p.get('email-smtp-result').dataset.result,'stale');
+ let release;const late=page('settings',responder({check:()=>new Promise(r=>release=r)}));await tick();const pending=late.get('email-smtp-check').fire('click');await tick();await late.get('email-settings-form').fire('input');
+ release(ok({settings_revision:1,settings_changed:true,outcome:'connected',security:'starttls',authenticated:true}));await pending;
+ assert.equal(late.get('email-smtp-result').dataset.result,'stale');assert.match(late.get('email-smtp-result').textContent,/does not validate the new settings/);
+});
+
+test('lost or unrecognized SMTP check results remain visibly uncertain rather than failed or successful',async()=>{
+ for(const check of [()=>Promise.reject(new Error('offline')),()=>({ok:false,json:async()=>({error:'smtp_check_unknown'})}),()=>ok({settings_revision:1,settings_changed:false,outcome:'unexpected'})]) {
+  const p=page('settings',responder({check}));await tick();await p.get('email-smtp-check').fire('click');
+  assert.equal(p.get('email-smtp-result').dataset.result,'unknown');assert.match(p.get('email-smtp-result').textContent,/unknown|unavailable/i);assert.doesNotMatch(p.get('email-smtp-result').textContent,/passed/);
+  assert.equal(p.get('email-smtp-check').disabled,false);assert.equal(p.requests.filter(r=>r.body).length,1);
+ }
 });
 
 test('unclassified SMTP failure includes security without inventing a failed stage',async()=>{

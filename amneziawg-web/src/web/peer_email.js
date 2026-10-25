@@ -38,7 +38,7 @@
   function ready() {
     for(const e of document.querySelectorAll('[data-email-readiness]')) {
       const c=contactFor(e.dataset.emailReadiness);
-      e.textContent=!c?'No current contact binding':!c.email?'Add email address':c.email+' · checked again before sending';
+      e.textContent=!c?'No current contact binding':!c.email?'Add email address':c.email;
     }
     $('email-readiness').textContent=settings?.operational?'Email enabled · open a peer or select peers to send':'Email is not ready. Open Settings to configure it.';
   }
