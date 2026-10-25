@@ -45,6 +45,7 @@ pub struct DeliveryContext {
     pub(crate) runtime: std::sync::RwLock<Arc<super::runtime::RuntimeConfiguration>>,
     pub(crate) transport_factory: Arc<dyn super::runtime::TransportFactory>,
     pub(crate) test_slot: Arc<tokio::sync::Semaphore>,
+    history_slot: tokio::sync::Semaphore,
     pub clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     previews: Mutex<HashMap<String, Preview>>,
     _worker_lock: Option<std::fs::File>,
@@ -68,6 +69,7 @@ impl DeliveryContext {
             })),
             transport_factory: Arc::new(super::runtime::SmtpFactory),
             test_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            history_slot: tokio::sync::Semaphore::new(1),
             clock: Arc::new(now),
             previews: Mutex::new(HashMap::new()),
             _worker_lock: worker_lock,
@@ -452,10 +454,26 @@ impl DeliveryContext {
     }
     pub async fn jobs(&self) -> Result<Vec<delivery::Job>> {
         Ok(
-            sqlx::query_as("SELECT * FROM email_jobs ORDER BY created_at DESC LIMIT 200")
+            sqlx::query_as("SELECT * FROM email_jobs WHERE activity_cleared_at IS NULL ORDER BY created_at DESC,id LIMIT 200")
                 .fetch_all(&self.source.db.pool)
                 .await?,
         )
+    }
+    /// Clear the shared activity view, not delivery state. SQLite serializes
+    /// this statement's snapshot with completion/invalidation writers; the
+    /// migration trigger makes later changed outcomes visible again.
+    pub async fn clear_history(&self) -> Result<u64> {
+        let _slot = self
+            .history_slot
+            .try_acquire()
+            .map_err(|_| DeliveryError("history_busy"))?;
+        tokio::time::timeout(self.admission_budget, async {
+            let mut tx = self.source.db.pool.begin().await?;
+            let count = sqlx::query("UPDATE email_jobs SET activity_cleared_at=? WHERE activity_cleared_at IS NULL AND state IN ('accepted','failed','unknown','cancelled','stale')")
+                .bind(self.time()).execute(&mut *tx).await?.rows_affected();
+            tx.commit().await?;
+            Ok(count)
+        }).await.map_err(|_| DeliveryError("history_clear_unknown"))?
     }
     pub async fn purge(&self) -> Result<()> {
         let mut tx = self.source.db.pool.begin().await?;

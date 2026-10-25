@@ -38,7 +38,7 @@ function page(kind,responder,storage=new Map(),search="",clock={now:Date.now()})
     const p=path.join(__dirname,'../amneziawg-web/src/web',file);
     if(fs.existsSync(p)) vm.runInContext(fs.readFileSync(p,'utf8'),context);
   }
-  return {get,selects,sends,edits,readiness,formats,requests,storage,document,window,all,timers};
+  return {get,selects,sends,edits,readiness,formats,requests,storage,document,window,all,timers,context};
 }
 const responder=(overrides={})=>async r=>{
   const key=r.url.split('/').pop();if(overrides[key])return overrides[key](r);
@@ -105,10 +105,19 @@ test('a response after navigation cannot overwrite the new page selection or rec
   await next.get('email-pending-check').fire('click');await next.get('email-confirm').fire('click');assert.equal(next.selects[0].checked,false);assert.equal(next.selects[1].checked,true);
 });
 const activity=(id,state,accepted_at=null,extra={})=>({id,client_id:'a',request_id:'request',actor:'admin',recipient:id+'@example.test',mode:'direct',link_ttl_seconds:86400,formats:'["conf"]',binding_version:2,state,attempts:1,next_attempt_at:1700000060,created_at:1699999000,accepted_at,error_code:null,invalidated_at:null,invalidation_code:null,...extra});
-test('Clear history hides only observed terminal results and preserves unresolved request recovery',async()=>{
+test('server history clear uses CSRF POST and does not hide rows on rejection',async()=>{
+  const p=page('peers',responder({jobs:()=>ok([activity('failed','failed')]),clear:()=>({ok:false,json:async()=>({error:'csrf_required'})})}));await tick();
+  await p.get('email-activity-clear').fire('click');
+  const request=p.requests.find(r=>r.url.endsWith('/history/clear'));
+  assert.ok(request,'clearing must persist on the server');
+  assert.equal(request.options.method,'POST');assert.equal(request.options.headers['X-CSRF-Token'],'csrf');
+  assert.match(text(p.get('email-activity')),/failed@example.test/);assert.equal(p.get('email-activity-clear').disabled,false);
+});
+test('Clear history persists across independent browsers and preserves unresolved request recovery',async()=>{
   let rows=['accepted','failed','unknown','cancelled','queued','sending'].map(s=>activity(s,s,s==='accepted'?1700000000:null));
   const storage=new Map([['awg-email-pending:/private','uncertain-request']]);
-  const p=page('peers',responder({jobs:()=>ok(rows)}),storage,'',{now:1700000010000});await tick();
+  const respond=responder({jobs:()=>ok(rows),clear:()=>{const n=rows.length;rows=rows.filter(j=>['queued','sending'].includes(j.state));return ok({cleared:n-rows.length});}});
+  const p=page('peers',respond,storage,'',{now:1700000010000});await tick();
   assert.equal(p.get('email-activity-clear').disabled,false);await p.get('email-activity-clear').fire('click');
   for(const s of ['accepted','failed','unknown','cancelled'])assert.doesNotMatch(text(p.get('email-activity')),new RegExp(s+'@example.test'));
   for(const s of ['queued','sending'])assert.match(text(p.get('email-activity')),new RegExp(s+'@example.test'));
@@ -116,21 +125,21 @@ test('Clear history hides only observed terminal results and preserves unresolve
   assert.equal(p.get('email-activity-clear').disabled,true);await p.get('email-refresh').fire('click');
   assert.doesNotMatch(text(p.get('email-activity')),/failed@example.test/);
   rows=[...rows,activity('new-result','failed')];await p.get('email-refresh').fire('click');assert.match(text(p.get('email-activity')),/new-result@example.test/);
-  const restored=page('peers',responder({jobs:()=>ok(rows)}),storage,'',{now:1700000010000});await tick();
+  const restored=page('peers',respond,new Map(),'',{now:1700000010000});await tick();
   assert.doesNotMatch(text(restored.get('email-activity')),/unknown@example.test/);assert.match(text(restored.get('email-activity')),/new-result@example.test/);
   assert.equal(restored.requests.filter(r=>r.body).length,0);assert.ok([...storage.values()].every(v=>!v.includes('@example.test')));
 });
 test('cleared results reappear on retry, changed resolution or revocation, never hiding active work',async()=>{
   let rows=[activity('retry','failed'),activity('resolve','unknown'),activity('revoke','accepted',1700000000)];
-  const p=page('peers',responder({jobs:()=>ok(rows)}),new Map(),'',{now:1700000010000});await tick();await p.get('email-activity-clear').fire('click');
-  assert.match(text(p.get('email-activity')),/No visible/);
+  const p=page('peers',responder({jobs:()=>ok(rows),clear:()=>{const n=rows.length;rows=[];return ok({cleared:n});}}),new Map(),'',{now:1700000010000});await tick();await p.get('email-activity-clear').fire('click');
+  assert.match(text(p.get('email-activity')),/No recent/);
   rows=[activity('retry','queued'),activity('resolve','accepted',1700000009),activity('revoke','accepted',1700000000,{invalidated_at:1700000009,invalidation_code:'changed'})];
   await p.get('email-refresh').fire('click');for(const id of ['retry','resolve','revoke'])assert.match(text(p.get('email-activity')),new RegExp(id+'@example.test'));
   rows=[activity('retry','failed',null,{attempts:2})];await p.get('email-refresh').fire('click');assert.match(text(p.get('email-activity')),/retry@example.test/);
-  await p.get('email-activity-clear').fire('click');await p.get('email-activity-show').fire('click');assert.match(text(p.get('email-activity')),/retry@example.test/);
+  await p.get('email-activity-clear').fire('click');await p.get('email-activity-show').fire('click');assert.doesNotMatch(text(p.get('email-activity')),/retry@example.test/);
 });
 test('Back Forward restores newer selections, pending recovery and cleared history without writes',async()=>{
-  const rows=[activity('old','failed')],respond=responder({jobs:()=>ok(rows)});
+  let rows=[activity('old','failed')];const respond=responder({jobs:()=>ok(rows),clear:()=>{rows=[];return ok({cleared:1});}});
   const p=page('peers',respond);await tick();p.selects[0].checked=true;await p.selects[0].fire('change');
   for(const fn of p.window.listeners.pagehide)fn({});
   const newer=page('peers',respond,p.storage);await tick();await newer.get('email-clear-selection').fire('click');newer.selects[1].checked=true;await newer.selects[1].fire('change');await newer.get('email-activity-clear').fire('click');
@@ -158,14 +167,60 @@ test('activity uses server acceptance time and expires only successful rows at t
   const next=page('peers',responder({jobs:()=>ok(rows)}),p.storage,'',clock);await tick();assert.doesNotMatch(text(next.get('email-activity')),/success@example.test/);
   assert.equal(p.requests.filter(r=>r.body).length,0);
 });
-test('successful activity can be dismissed and shown without hiding uncertain rows or deleting history',async()=>{
-  const clock={now:1700000010000};const rows=[activity('success','accepted',1700000000),activity('unknown','unknown')];
+test('Show older successes reveals only automatic expiry, never server-cleared rows',async()=>{
+  const clock={now:1700000600000};const rows=[activity('success','accepted',1700000000),activity('unknown','unknown')];
   const p=page('peers',responder({jobs:()=>ok(rows)}),new Map(),'',clock);await tick();
-  const dismiss=p.all.find(e=>e.id==='button' && /Dismiss/.test(e.textContent));assert.ok(dismiss);await dismiss.fire('click');
   assert.doesNotMatch(text(p.get('email-activity')),/success@example.test/);assert.match(text(p.get('email-activity')),/unknown@example.test/);
   await p.get('email-activity-show').fire('click');assert.match(text(p.get('email-activity')),/success@example.test/);
   const next=page('peers',responder({jobs:()=>ok(rows)}),p.storage,'',clock);await tick();assert.doesNotMatch(text(next.get('email-activity')),/success@example.test/);
   assert.equal(p.requests.filter(r=>r.body).length,0);
+});
+
+test('history clear Cancel and duplicate clicks do not cause unintended writes',async()=>{
+  let release,rows=[activity('failed','failed')];const p=page('peers',responder({jobs:()=>ok(rows),clear:()=>new Promise(r=>release=r)}));await tick();
+  p.context.confirm=()=>false;await p.get('email-activity-clear').fire('click');assert.equal(p.requests.filter(r=>r.body).length,0);
+  p.context.confirm=()=>true;const pending=p.get('email-activity-clear').fire('click');await tick();await p.get('email-activity-clear').fire('click');
+  assert.equal(p.requests.filter(r=>r.body).length,1);assert.equal(p.get('email-activity-clear').disabled,true);
+  rows=[];release(ok({cleared:1}));await pending;assert.equal(p.get('email-activity-clear').disabled,true);assert.equal(p.get('email-activity-show').hidden,true);
+});
+
+test('old polling cannot resurrect cleared history or swallow a newly completed job',async()=>{
+  let release,reads=0;let rows=[activity('old','failed')];const stale=rows.slice();
+  const p=page('peers',responder({jobs:()=>++reads===2?new Promise(r=>release=r):ok(rows),clear:()=>{rows=[activity('new','unknown')];return ok({cleared:1});}}));await tick();
+  const oldRead=p.get('email-refresh').fire('click');await tick();await p.get('email-activity-clear').fire('click');release(ok(stale));await oldRead;
+  assert.doesNotMatch(text(p.get('email-activity')),/old@example.test/);assert.match(text(p.get('email-activity')),/new@example.test/);
+});
+
+test('uncertain history clear times out without retry and preserves operational recovery',async()=>{
+  const storage=new Map([['awg-email-pending:/private','do-not-resend']]);const p=page('peers',responder({jobs:()=>ok([activity('unknown','unknown')]),clear:()=>new Promise(()=>{})}),storage);await tick();
+  const work=p.get('email-activity-clear').fire('click');await tick();const timer=[...p.timers.values()].find(t=>t.ms===10000);assert.ok(timer);timer.fn();await work;
+  assert.equal(p.requests.filter(r=>r.body).length,1);assert.match(p.get('email-activity-notice').textContent,/could not be confirmed/i);
+  assert.match(text(p.get('email-activity')),/unknown@example.test/);assert.equal(p.get('email-activity-clear').disabled,false);assert.equal(storage.get('awg-email-pending:/private'),'do-not-resend');
+});
+
+test('late clear response after Back Forward cannot erase new activity',async()=>{
+  let release,rows=[activity('old','failed')];const p=page('peers',responder({jobs:()=>ok(rows),clear:()=>new Promise(r=>release=r)}));await tick();
+  const work=p.get('email-activity-clear').fire('click');await tick();for(const fn of p.window.listeners.pagehide)fn({});
+  rows=[activity('new','sending')];for(const fn of p.window.listeners.pageshow)fn({persisted:true});await tick();release(ok({cleared:1}));await work;
+  assert.match(text(p.get('email-activity')),/new@example.test/);assert.doesNotMatch(text(p.get('email-activity')),/old@example.test/);assert.equal(p.requests.filter(r=>r.body).length,1);
+});
+
+test('successful clear retains known active jobs when its refresh fails',async()=>{
+  let reads=0;const rows=[activity('done','failed'),activity('active','sending')];
+  const p=page('peers',responder({jobs:()=>++reads===1?ok(rows):Promise.reject(new Error('offline')),clear:()=>ok({cleared:1})}));await tick();
+  await p.get('email-activity-clear').fire('click');
+  assert.match(text(p.get('email-activity')),/active@example.test/);assert.doesNotMatch(text(p.get('email-activity')),/done@example.test/);
+  assert.match(p.get('email-activity-notice').textContent,/refresh/i);
+});
+
+test('obsolete clear refresh failure cannot replace a newer uncertainty notice',async()=>{
+  let rejectOld,reads=0,clears=0;
+  const p=page('peers',responder({jobs:()=>++reads===2?new Promise((_,reject)=>rejectOld=reject):ok([activity(reads===1?'old':'new','failed')]),clear:()=>++clears===1?ok({cleared:1}):Promise.reject(new Error('offline'))}));await tick();
+  const old=p.get('email-activity-clear').fire('click');await tick();
+  for(const fn of p.window.listeners.pagehide)fn({});for(const fn of p.window.listeners.pageshow)fn({persisted:true});await tick();
+  await p.get('email-activity-clear').fire('click');assert.match(p.get('email-activity-notice').textContent,/could not be confirmed/);
+  rejectOld(new Error('old connection'));await old;
+  assert.match(p.get('email-activity-notice').textContent,/could not be confirmed/);assert.match(text(p.get('email-activity')),/new@example.test/);
 });
 test('activity never truncates a pending or unknown item behind twelve successes',async()=>{
   const rows=[...Array.from({length:12},(_,i)=>activity('ok'+i,'accepted',1700000000)),activity('older-pending','sending'),activity('older-unknown','unknown')];

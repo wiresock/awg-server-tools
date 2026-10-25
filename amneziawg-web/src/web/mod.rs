@@ -4622,7 +4622,7 @@ fn panel_stylesheet_href(base: &str, css: &str) -> String {
 fn html_head(title: &str, base: &str) -> String {
     format!(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n<link rel=\"stylesheet\" href=\"{stylesheet}\">\n</head>\n<body>\n",
-        title = esc(title),
+        title = esc(&format!("{title} | WireSock Server Tools")),
         stylesheet = panel_stylesheet_href(base, PANEL_CSS),
     )
 }
@@ -4640,7 +4640,7 @@ fn nav_bar_section(base: &str, csrf_token: &str, email: bool) -> String {
     format!(
         r#"<nav class="nav">
   <div class="nav-brand">
-    <a class="nav-title" href="{base}/">AmneziaWG Server Tools</a>
+    <a class="nav-title" href="{base}/">WireSock Server Tools</a>
     <span class="nav-byline">by <a href="https://www.wiresock.net/" target="_blank" rel="noopener noreferrer" aria-label="WireSock website (opens in a new tab)">WireSock <span aria-hidden="true">↗</span></a></span>
   </div>
   <form class="nav-logout" method="POST" action="{base}/logout">
@@ -4695,11 +4695,12 @@ fn render_login_page_with_msg(base: &str, msg: &str, csrf_token: &str) -> String
 }
 
 fn render_login_page_inner(base: &str, error_html: &str, csrf_token: &str) -> String {
-    let mut buf = html_head("AWG Server Web Panel Login", base);
+    let mut buf = html_head("Login", base);
     buf.push_str(&format!(
         r#"<main class="login-screen">
 <div class="login-card edit-form">
-<h2>AWG Server Web Panel Login</h2>
+<h2>WireSock Server Tools</h2>
+<p>Log in to the panel</p>
 <form method="POST" action="{base}/login">
   <input type="hidden" name="csrf_token" value="{csrf}">
   <label for="username">Username</label>
@@ -4930,7 +4931,7 @@ fn render_peer_list_inner(
     monitoring_only: Option<&str>,
     base: &str,
 ) -> String {
-    let mut buf = html_head("AmneziaWG – Peers", base);
+    let mut buf = html_head("Peers", base);
     let now = Utc::now();
     let online = peers
         .iter()
@@ -5362,7 +5363,7 @@ fn render_peer_detail_inner(
         }
     } else {
         format!(
-            r#"  <label for="expiration_days">Change lifetime in days</label>
+            r#"  <div class="peer-edit-field"><label for="expiration_days">Change lifetime in days</label>
   <input type="number" id="expiration_days" name="expiration_days"
          min="0" max="36500" step="1" list="edit_expiration_lifetime_presets"
          placeholder="Leave unchanged">
@@ -5378,6 +5379,7 @@ fn render_peer_detail_inner(
   <label class="choice">
     <input type="checkbox" name="disabled" value="1"{disabled_checked}> Disabled
   </label>
+  </div>
 "#,
             expiration_status = esc(&dto.expiration_status),
             disabled_checked = if dto.disabled { " checked" } else { "" },
@@ -5388,14 +5390,17 @@ fn render_peer_detail_inner(
 <h2>Edit peer</h2>
 <form method="POST" action="{base}/peers/{id}" aria-label="Peer details">
   <input type="hidden" name="csrf_token" value="{csrf}">
-  <label for="display_name">Display name</label>
+  <div class="peer-edit-field"><label for="display_name">Display name</label>
   <input type="text" id="display_name" name="display_name"
          value="{dn}" maxlength="128" placeholder="e.g. Ivan iPhone">
-  <label for="comment">Comment</label>
+  </div>
+  <div class="peer-edit-field"><label for="comment">Comment</label>
   <textarea id="comment" name="comment" maxlength="512"
             placeholder="Optional note about this peer">{cm}</textarea>
-{lifecycle_controls}  <button type="submit">Save</button>
+  </div>
+{lifecycle_controls}  <div class="peer-edit-actions"><button type="submit">Save</button>
   <button type="reset" aria-label="Cancel peer changes">Cancel</button>
+  </div>
 </form>
 <!-- peer-email-editor -->
 <!-- peer-editor-end -->

@@ -27,6 +27,7 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/api/admin/delivery/settings/test/:id", get(test_status))
         .route("/api/admin/delivery/contacts", get(contacts))
         .route("/api/admin/delivery/jobs", get(jobs))
+        .route("/api/admin/delivery/history/clear", post(clear_history))
         .route("/api/admin/delivery/contact", post(contact))
         .route("/admin/delivery/contact-form", post(contact_form))
         .route("/api/admin/delivery/contact-delete", post(contact_delete))
@@ -154,7 +155,7 @@ pub(super) fn peer_panel(
 <form method="POST" action="{base}/admin/delivery/contact-form" aria-label="Peer email">
 <input type="hidden" name="client_id" value="{id}"><input type="hidden" name="version" value="{version}"><input type="hidden" name="csrf_token" value="{csrf}">
 <label for="peer-delivery-email">Email (optional)</label><input id="peer-delivery-email" type="email" name="email" maxlength="254" value="{email}">
-<p class="meta">Email is saved separately. Save any peer details above first; saving email reloads this page.</p>
+<p class="meta">Email is saved separately. Save other peer details first; saving email reloads this page.</p>
 <button type="submit">Save email</button> <button type="reset" aria-label="Cancel email changes">Cancel</button></form>
 <p class="meta">Clearing or changing email revokes existing links and queued sends. Saving never sends automatically.</p>
 </div>"#,
@@ -205,7 +206,7 @@ async fn page(
 ) -> Result<Html<String>, DeliveryError> {
     authorize(&state, &headers, false)?;
     let csrf = session_csrf_from_headers(&state, &headers);
-    let mut html = html_head("AmneziaWG - Settings", &state.base_path);
+    let mut html = html_head("Settings", &state.base_path);
     // This secret-bearing page retains the strict no-inline-script CSP. The
     // shared email script updates versions through the same read-only endpoint.
     let nav = nav_bar_section(&state.base_path, &csrf, true);
@@ -330,6 +331,13 @@ async fn contacts(
 ) -> Result<Json<Vec<crate::db::delivery::Client>>, DeliveryError> {
     authorize(&state, &headers, false)?;
     Ok(Json(ctx(&state)?.contacts().await?))
+}
+async fn clear_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, DeliveryError> {
+    authorize(&state, &headers, true)?;
+    Ok(Json(json!({"cleared":ctx(&state)?.clear_history().await?})))
 }
 async fn jobs(
     State(state): State<AppState>,
@@ -501,12 +509,142 @@ mod tests {
     };
     use tower::ServiceExt;
 
+    #[tokio::test]
+    async fn history_clear_persists_for_other_sessions_without_deleting_jobs() {
+        let f = Fixture::new().await;
+        let id = f.queue(Mode::Direct).await;
+        let admitted = f.ctx.admit(&id).await.unwrap();
+        f.ctx
+            .complete(&admitted, crate::delivery::smtp::Submission::Accepted)
+            .await
+            .unwrap();
+        let state = panel_state(&f);
+        let other_session = generate_session_id();
+        add_session(&state.sessions, other_session.clone());
+        let app = super::super::build_router_state(state);
+        let response = app
+            .clone()
+            .oneshot(panel_request(
+                "/api/admin/delivery/history/clear",
+                json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        assert_eq!(body["cleared"], 1);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/admin/delivery/jobs")
+                    .header("cookie", format!("awg_session={other_session}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        assert_eq!(body, json!([]));
+        assert_eq!(
+            crate::db::delivery::job(&f.ctx.source.db.pool, &id)
+                .await
+                .unwrap()
+                .state,
+            "accepted"
+        );
+    }
+
     fn panel_body() -> serde_json::Value {
         json!({"revision":0,"enabled":true,"host":"new.example.test","port":587,
           "tls":"starttls","authenticate":true,"username":"fixture-user",
           "password_action":"replace","password":"panel-api-secret-canary",
           "from":"sender@example.test","reply_to":"support@example.test",
           "public_base":"https://download.example.test/share","ttl_seconds":3600})
+    }
+
+    #[tokio::test]
+    async fn history_clear_requires_auth_csrf_and_post_and_is_repeatable() {
+        let f = Fixture::new().await;
+        let id = f.queue(Mode::Direct).await;
+        sqlx::query("UPDATE email_jobs SET state='unknown' WHERE id=?")
+            .bind(&id)
+            .execute(&f.ctx.source.db.pool)
+            .await
+            .unwrap();
+        let state = panel_state(&f);
+        let session = generate_session_id();
+        let csrf = add_session(&state.sessions, session.clone());
+        let app = super::super::build_router_state(state);
+        let path = "/api/admin/delivery/history/clear";
+        for (cookie, token, bearer) in [
+            (false, None, None),
+            (true, None, None),
+            (true, Some("wrong"), None),
+            (true, Some(csrf.as_str()), Some("Bearer wrong")),
+        ] {
+            let mut req = Request::builder().method("POST").uri(path);
+            if cookie {
+                req = req.header("cookie", format!("awg_session={session}"));
+            }
+            if let Some(token) = token {
+                req = req.header("x-csrf-token", token);
+            }
+            if let Some(bearer) = bearer {
+                req = req.header("authorization", bearer);
+            }
+            let response = app
+                .clone()
+                .oneshot(req.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_ne!(response.status(), StatusCode::OK);
+            assert_eq!(f.ctx.jobs().await.unwrap().len(), 1);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("authorization", "Bearer fixture")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        for expected in [1, 0] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("cookie", format!("awg_session={session}"))
+                        .header("x-csrf-token", &csrf)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["cache-control"],
+                "no-store, no-cache, max-age=0"
+            );
+            let result: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap())
+                    .unwrap();
+            assert_eq!(result["cleared"], expected);
+        }
+        assert_eq!(
+            crate::db::delivery::job(&f.ctx.source.db.pool, &id)
+                .await
+                .unwrap()
+                .state,
+            "unknown"
+        );
     }
     fn panel_state(f: &Fixture) -> AppState {
         let mut auth = crate::auth::AuthConfig::disabled();

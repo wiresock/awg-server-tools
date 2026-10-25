@@ -76,6 +76,45 @@ mod tests {
     use sqlx::Row;
 
     #[tokio::test]
+    async fn history_clear_migration_rolls_back_and_preserves_legacy_data() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let all = sqlx::migrate!("./migrations");
+        let old = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                all.iter().filter(|m| m.version <= 14).cloned().collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        old.run(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO delivery_clients(id,interface,managed_name,last_public_key) VALUES('legacy','fixture','client','fixture-key')").execute(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO email_jobs(id,client_id,request_id,actor,recipient,mode,formats,binding_version,export_digest,state,next_attempt_at,created_at) VALUES('old','legacy','request','admin','fixture@example.test','direct','[]',1,X'01','unknown',123,100)").execute(&db.pool).await.unwrap();
+        let mut tx = db.pool.begin().await.unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0015_email_activity_clear.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM pragma_table_info('email_jobs') WHERE name='activity_cleared_at'").fetch_one(&db.pool).await.unwrap(),0);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('email_activity_outcome_changed','email_jobs_visible_activity')").fetch_one(&db.pool).await.unwrap(),0);
+        db.migrate().await.unwrap();
+        let row = sqlx::query("SELECT state,activity_cleared_at FROM email_jobs WHERE id='old'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<String, _>("state"), "unknown");
+        assert_eq!(row.get::<Option<i64>, _>("activity_cleared_at"), None);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM email_jobs")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn activity_timestamp_upgrade_preserves_legacy_history_without_backfill() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         let all = sqlx::migrate!("./migrations");

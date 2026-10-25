@@ -213,6 +213,9 @@ table { border-collapse: collapse; width: 100%; }
 .peer-table td,
 .proxy-session-table td { overflow-wrap: anywhere; }
 .peer-table .status { max-width: 100%; white-space: normal; overflow-wrap: normal; }
+@media (min-width: 961px) {
+  .peer-table th:nth-child(2), .peer-table td[data-label="Name"] { width: 18%; min-width: 13rem; }
+}
 th, td {
   padding: .55rem .7rem;
   border-bottom: 1px solid var(--border);
@@ -244,12 +247,24 @@ table.facts td { background: transparent; }
 
 .detail-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 400px);
+  grid-template-columns: minmax(0, 1fr);
   gap: 1.25rem;
   align-items: start;
 }
 .detail-layout .edit-form { margin-top: 0; }
-.peer-email-editor { margin-top: 1rem; padding-top: .25rem; border-top: 1px solid var(--border); }
+#peer-editor { max-width: none; display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 1fr); gap: 0 1.25rem; }
+#peer-editor h2 { grid-column: 1 / -1; }
+#peer-editor > form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 1rem; align-content: start; }
+.peer-edit-field, .peer-email-editor { min-width: 0; }
+.peer-edit-actions { grid-column: 1 / -1; }
+.peer-email-editor { padding-left: 1.25rem; border-left: 1px solid var(--border); }
+@media (max-width: 960px) {
+  #peer-editor { grid-template-columns: minmax(0, 1fr); }
+  .peer-email-editor { margin-top: 1rem; padding: .25rem 0 0; border-left: 0; border-top: 1px solid var(--border); }
+}
+@media (max-width: 600px) {
+  #peer-editor > form { grid-template-columns: minmax(0, 1fr); }
+}
 
 .status {
   display: inline-flex;
@@ -542,6 +557,7 @@ fieldset { margin: 0; padding: 0; border: 0; }
 .email-buttons, .email-formats { margin-top: 1rem; }
 .email-notice { border: 1px solid var(--border-strong); border-radius: 7px; padding: .75rem; margin: 1rem 0; overflow-wrap: anywhere; }
 .email-notice:empty { display: none; }
+.email-save-warning { color: var(--danger); }
 .email-card button, .email-toolbar button, .email-dialog button, .email-actions button { border: 1px solid var(--border-strong); border-radius: 6px; padding: .5rem .8rem; background: var(--surface-2); color: var(--text); font: inherit; cursor: pointer; }
 .email-card button:disabled, .email-toolbar button:disabled, .email-dialog button:disabled { opacity: .55; cursor: not-allowed; }
 .email-buttons button:last-child:not(:first-child), #email-save { background: var(--accent-strong); color: #fff; }

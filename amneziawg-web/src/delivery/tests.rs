@@ -30,6 +30,196 @@ impl Ownership for FixtureOwnership {
 struct Accept;
 
 #[tokio::test]
+async fn history_clear_only_terminal_outcomes_and_preserves_unknown_recovery() {
+    let f = Fixture::new().await;
+    let id = f.queue(Mode::Direct).await;
+    let before = delivery::job(&f.ctx.source.db.pool, &id).await.unwrap();
+    for state in [
+        "queued",
+        "sending",
+        "accepted",
+        "failed",
+        "unknown",
+        "cancelled",
+        "stale",
+    ] {
+        sqlx::query("UPDATE email_jobs SET state=? WHERE id=?")
+            .bind(state)
+            .bind(&id)
+            .execute(&f.ctx.source.db.pool)
+            .await
+            .unwrap();
+        let active = matches!(state, "queued" | "sending");
+        assert_eq!(f.ctx.clear_history().await.unwrap(), u64::from(!active));
+        assert_eq!(f.ctx.clear_history().await.unwrap(), 0);
+        assert_eq!(f.ctx.jobs().await.unwrap().len(), usize::from(active));
+        assert_eq!(
+            delivery::job(&f.ctx.source.db.pool, &id)
+                .await
+                .unwrap()
+                .state,
+            state
+        );
+        assert_eq!(
+            f.ctx
+                .enqueue("session-one", &before.request_id, &before.request_id)
+                .await
+                .unwrap(),
+            vec![id.clone()]
+        );
+        if state == "unknown" {
+            assert!(f.ctx.admit(&id).await.is_err());
+        }
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM email_jobs")
+            .fetch_one(&f.ctx.source.db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn history_clear_preserves_live_links_sessions_and_budgets() {
+    let f = Fixture::new().await;
+    let id = f.queue(Mode::Link).await;
+    let admitted = f.ctx.admit(&id).await.unwrap();
+    f.ctx
+        .complete(&admitted, Submission::Accepted)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO email_test_attempts(id,settings_revision,recipient,state,created_at) VALUES('retained',0,'test@example.test','unknown',1)").execute(&f.ctx.source.db.pool).await.unwrap();
+    sqlx::query("INSERT INTO smtp_connection_checks(created_at) VALUES(1)")
+        .execute(&f.ctx.source.db.pool)
+        .await
+        .unwrap();
+    let budget: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM delivery_send_budget")
+        .fetch_one(&f.ctx.source.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(f.ctx.clear_history().await.unwrap(), 1);
+    let token = admitted
+        .mail
+        .body
+        .split('#')
+        .nth(1)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap();
+    let session = f.ctx.redeem(token).await.unwrap();
+    assert!(!f
+        .ctx
+        .export(&session.cookie, Format::Conf)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.ctx.clear_history().await.unwrap(), 0);
+    assert!(!f
+        .ctx
+        .export(&session.cookie, Format::Qr)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM delivery_grants")
+            .fetch_one(&f.ctx.source.db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM delivery_sessions")
+            .fetch_one(&f.ctx.source.db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM email_test_attempts WHERE state='unknown'"
+        )
+        .fetch_one(&f.ctx.source.db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM smtp_connection_checks")
+            .fetch_one(&f.ctx.source.db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM delivery_send_budget")
+            .fetch_one(&f.ctx.source.db.pool)
+            .await
+            .unwrap(),
+        budget
+    );
+    assert!(f.ctx.jobs().await.unwrap().is_empty());
+    f.ctx.revoke(&f.client).await.unwrap();
+    assert_eq!(
+        f.ctx.jobs().await.unwrap().len(),
+        1,
+        "revocation is a new visible outcome"
+    );
+}
+
+#[tokio::test]
+async fn history_clear_serializes_with_completion_and_preserves_future_work() {
+    let f = Fixture::new().await;
+    let id = f.queue(Mode::Direct).await;
+    let admitted = f.ctx.admit(&id).await.unwrap();
+    assert_eq!(f.ctx.clear_history().await.unwrap(), 0);
+    f.ctx
+        .complete(&admitted, Submission::Accepted)
+        .await
+        .unwrap();
+    assert_eq!(f.ctx.jobs().await.unwrap().len(), 1);
+    for _ in 0..8 {
+        sqlx::query("UPDATE email_jobs SET state='sending',accepted_at=NULL WHERE id=?")
+            .bind(&id)
+            .execute(&f.ctx.source.db.pool)
+            .await
+            .unwrap();
+        let (cleared, completed) = tokio::join!(
+            f.ctx.clear_history(),
+            f.ctx.complete(&admitted, Submission::Accepted)
+        );
+        completed.unwrap();
+        assert_eq!(
+            f.ctx.jobs().await.unwrap().len(),
+            1 - cleared.unwrap() as usize
+        );
+    }
+    f.ctx.clear_history().await.unwrap();
+    let new_id = f.queue(Mode::Direct).await;
+    assert_eq!(f.ctx.jobs().await.unwrap()[0].id, new_id);
+    // Clearing never needs the VPN lifecycle guards or waits for remote SMTP.
+    let _guards = f.ctx.guards().await.unwrap();
+    assert_eq!(f.ctx.clear_history().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn history_clear_covers_more_than_the_display_limit_and_noop_updates_stay_hidden() {
+    let f = Fixture::new().await;
+    sqlx::query("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<205) INSERT INTO email_jobs(id,client_id,request_id,actor,recipient,mode,formats,binding_version,export_digest,state,next_attempt_at,created_at) SELECT 'history-'||x,?,'history-'||x,'admin','fixture@example.test','direct','[]',1,X'00','failed',0,0 FROM n").bind(&f.client).execute(&f.ctx.source.db.pool).await.unwrap();
+    assert_eq!(f.ctx.jobs().await.unwrap().len(), 200);
+    assert_eq!(f.ctx.clear_history().await.unwrap(), 205);
+    assert!(f.ctx.jobs().await.unwrap().is_empty());
+    sqlx::query("UPDATE email_jobs SET state=state,attempts=attempts,accepted_at=accepted_at,error_code=error_code,invalidated_at=invalidated_at,invalidation_code=invalidation_code").execute(&f.ctx.source.db.pool).await.unwrap();
+    assert!(f.ctx.jobs().await.unwrap().is_empty());
+    sqlx::query("UPDATE email_jobs SET attempts=attempts+1 WHERE id='history-1'")
+        .execute(&f.ctx.source.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(f.ctx.jobs().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn delivery_acceptance_timestamp_is_durable_and_not_invented_for_other_outcomes() {
     for outcome in [
         Submission::Accepted,

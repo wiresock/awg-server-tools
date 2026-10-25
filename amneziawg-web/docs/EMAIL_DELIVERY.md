@@ -291,14 +291,34 @@ nullable `accepted_at`, recorded in the transaction that stores SMTP acceptance.
 It is not an inbox-delivery timestamp. No completion time is backfilled for older
 records. Successful, non-invalidated entries hide ten minutes after acceptance;
 pending, failed, unknown and invalidated entries do not automatically expire.
-Legacy successes without a completion time remain until dismissed.
+Legacy successes without a completion time remain until explicitly cleared.
 
-**Clear history** hides the currently loaded completed entries, including failed
-and terminal unknown results, in this browser tab. Active queued/sending work
-remains visible. Clearing never deletes database history, changes links or tokens,
-retries a send, or clears unresolved-request recovery. A changed result, retry or
-revocation reappears; new operations are never covered by an earlier clear.
-**Show hidden history** reveals cleared or expired entries again. These display
-preferences survive reload and Back/Forward in the same tab (up to 500 saved
-dismissals); the existing latest 200-job API window remains unchanged. Activity
-refreshes at most once a minute while visible, with local hiding at expiry.
+**Clear history** clears completed activity for all administrators and devices,
+including failed and terminal unknown outcomes. After confirmation, authenticated
+`POST /api/admin/delivery/history/clear` marks every currently terminal, uncleared
+job, including entries outside the latest 200-row display window. Cookie requests
+require CSRF. A single SQLite write defines the clear snapshot: completion before
+that write is eligible; work still queued/sending at the write remains visible
+when it finishes. New jobs and changed outcomes are not covered by an earlier clear.
+
+Migration 0015 adds a per-job `activity_cleared_at` marker and resets it on an
+actual outcome change, including retry or revocation. It is not a timestamp cutoff.
+The operation has a two-second database budget, holds no lifecycle/SMTP lock,
+and never deletes jobs, links or tokens, retries a send, or resets unresolved
+request recovery or sending limits. Unknown remains unknown even when dismissed.
+Operational records retain the existing retention policy: terminal jobs older
+than 30 days are purged by the enabled delivery worker; clearing is not secure
+erasure. Existing migrations are unchanged. Rollback after applying 0015 requires
+the operator's consistent pre-migration database backup, not checksum edits.
+
+**Show older successes** reveals only automatic ten-minute hiding; server-cleared
+results cannot be restored through that control. The API returns the latest 200
+uncleared jobs. Other open pages see a clear on refresh or the next visible poll
+(at most once per minute); reload and Back/Forward fetch the shared state. The
+browser stops waiting after ten seconds and never automatically repeats a clear
+whose result is uncertain: use Refresh status before deciding to clear again.
+Old tab-only dismissal preferences are no longer used.
+
+This operation covers Recent email activity and the same jobs list in contact
+recovery. It does not clear the last SMTP-check/test result in Settings, test-mail
+recovery IDs, connection-check rate limits, VPN traffic history or audit records.

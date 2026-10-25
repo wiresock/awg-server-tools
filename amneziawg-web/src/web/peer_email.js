@@ -42,33 +42,19 @@
     }
     $('email-readiness').textContent=settings?.operational?'Email enabled · open a peer or select peers to send':'Email is not ready. Open Settings to configure it.';
   }
-  let activityRows=[],activityGeneration=0,activityTimer=null,pageHidden=false,pageEpoch=0,showHidden=false;
-  const dismissed=new Map(),dismissedKey='awg-email-dismissed:'+base,successLifetime=10*60*1000;
-  function restoreDismissed() {
-    dismissed.clear();
-    try {const entries=JSON.parse(sessionStorage.getItem(dismissedKey)||'[]');if(Array.isArray(entries))for(const entry of entries.slice(-500)){
-      if(typeof entry==='string')dismissed.set(entry,'legacy-success');
-      else if(Array.isArray(entry) && entry.length===2 && entry.every(x=>typeof x==='string'))dismissed.set(entry[0],entry[1]);
-    }}catch(_){}
-  }
-  function saveDismissed() {
-    while(dismissed.size>500)dismissed.delete(dismissed.keys().next().value);
-    try{sessionStorage.setItem(dismissedKey,JSON.stringify([...dismissed]));}catch(_){}
-  }
-  restoreDismissed();
-  const terminal=j=>['accepted','failed','unknown','cancelled'].includes(j.state);
-  const activityVersion=j=>JSON.stringify([j.state,j.attempts,j.accepted_at,j.invalidated_at,j.invalidation_code,j.error_code,j.settings_changed]);
-  const isDismissed=j=>terminal(j) && (dismissed.get(j.id)===activityVersion(j) || (successful(j) && dismissed.get(j.id)==='legacy-success'));
+  let activityRows=[],activityGeneration=0,activityTimer=null,pageHidden=false,pageEpoch=0,showHidden=false,clearingHistory=false,clearGeneration=0;
+  const successLifetime=10*60*1000;
+  const terminal=j=>['accepted','failed','unknown','cancelled','stale'].includes(j.state);
   const successful=j=>j.state==='accepted' && j.invalidated_at==null && !j.invalidation_code && !j.settings_changed;
   const acceptedTime=j=>j.state==='accepted' && Number.isSafeInteger(j.accepted_at) && j.accepted_at>=0 && Number.isFinite(new Date(j.accepted_at*1000).getTime())?j.accepted_at*1000:null;
-  const hiddenActivity=j=>isDismissed(j) || (successful(j) && acceptedTime(j)!==null && Date.now()-acceptedTime(j)>=successLifetime);
+  const hiddenActivity=j=>successful(j) && acceptedTime(j)!==null && Date.now()-acceptedTime(j)>=successLifetime;
   function renderActivity() {
     const list=$('email-activity');list.replaceChildren();
     const hidden=activityRows.filter(hiddenActivity).length;
-    $('email-activity-show').hidden=!hidden && !showHidden;$('email-activity-show').textContent=showHidden?'Hide older / cleared entries':'Show hidden history ('+hidden+')';
-    $('email-activity-clear').disabled=!activityRows.some(j=>terminal(j) && !isDismissed(j));
+    $('email-activity-show').hidden=!hidden && !showHidden;$('email-activity-show').textContent=showHidden?'Hide older entries':'Show older successes ('+hidden+')';
+    $('email-activity-clear').disabled=clearingHistory || !activityRows.some(terminal);
     const visible=activityRows.filter(j=>showHidden || !hiddenActivity(j));
-    if(!visible.length)list.append(node('p',activityRows.length?'No visible recent activity. Completed entries may be cleared or hidden after 10 minutes.':'No email submissions yet.'));
+    if(!visible.length)list.append(node('p',activityRows.length?'Older successful entries are hidden after 10 minutes.':'No recent email activity. Completed entries may have been cleared.'));
     for(const j of visible) {
       const item=node('article');item.className='email-activity-item';const p=node('p');const c=contacts.find(c=>c.id===j.client_id);
       p.append(node('strong',c?.managed_name || 'Client'),node('span',' · '+j.recipient+' — '+statusText(j)));item.append(p);
@@ -78,26 +64,44 @@
       else when.textContent='Timestamp unavailable.';
       if(j.state==='accepted' && at===null)when.append(node('span',' · Acceptance time unavailable for this older record.'));
       item.append(when);
-      if(successful(j) && !isDismissed(j)){const button=node('button','Dismiss');button.type='button';button.setAttribute('aria-label','Dismiss successful email for '+(c?.managed_name || 'client'));button.addEventListener('click',()=>{dismissed.set(j.id,activityVersion(j));saveDismissed();renderActivity();scheduleActivity();});item.append(button);}
       list.append(item);
     }
   }
   function scheduleActivity() {
-    clearTimeout(activityTimer);if(pageHidden)return;
+    clearTimeout(activityTimer);if(pageHidden || clearingHistory)return;
     let delay=60000;
-    if(!showHidden)for(const j of activityRows)if(successful(j) && !isDismissed(j) && acceptedTime(j)!==null){const left=acceptedTime(j)+successLifetime-Date.now();if(left>0)delay=Math.min(delay,left);}
+    if(!showHidden)for(const j of activityRows)if(successful(j) && acceptedTime(j)!==null){const left=acceptedTime(j)+successLifetime-Date.now();if(left>0)delay=Math.min(delay,left);}
     activityTimer=setTimeout(async()=>{renderActivity();if(document.hidden){scheduleActivity();return;}try{await jobs();}catch(_){report('Activity refresh failed. Use Refresh status to try again.');}},Math.max(100,delay));
   }
   async function jobs() {
+    if(clearingHistory)return;
     const current=++activityGeneration;
     try {const rows=await api('jobs');if(current!==activityGeneration || pageHidden)return;activityRows=rows;renderActivity();}
     finally {if(current===activityGeneration)scheduleActivity();}
   }
   $('email-activity-show').addEventListener('click',()=>{showHidden=!showHidden;renderActivity();scheduleActivity();});
-  $('email-activity-clear').addEventListener('click',()=>{
-    for(const j of activityRows)if(terminal(j))dismissed.set(j.id,activityVersion(j));
-    saveDismissed();showHidden=false;renderActivity();scheduleActivity();
-    $('email-activity-notice').textContent='Completed entries hidden on this browser tab. Active sends remain. History and links are unchanged; unknown results must still be reviewed before sending again.';
+  $('email-activity-clear').addEventListener('click',async()=>{
+    if(clearingHistory || !activityRows.some(terminal) || !confirm('Clear completed email activity for all administrators? Active sends and valid links remain. Unknown results stay uncertain; clearing never permits an automatic resend.'))return;
+    const epoch=pageEpoch,operation=++clearGeneration,current=()=>!pageHidden && epoch===pageEpoch && operation===clearGeneration;
+    clearingHistory=true;activityGeneration++;clearTimeout(activityTimer);renderActivity();
+    $('email-activity-notice').textContent='Clearing completed activity on the server…';
+    let confirmed=false,deadline;
+    try {
+      const result=await Promise.race([api('history/clear',{}),new Promise((_,reject)=>{deadline=setTimeout(()=>reject(new Error('timeout')),10000);})]);
+      if(!Number.isSafeInteger(result.cleared) || result.cleared<0)throw new Error();
+      if(!current())return;
+      confirmed=true;showHidden=false;activityRows=activityRows.filter(j=>!terminal(j));
+      $('email-activity-notice').textContent='Cleared '+result.cleared+' completed entries for all administrators. Active sends and valid links remain; unknown outcomes are not permission to resend.';
+    } catch(_) {
+      if(current())$('email-activity-notice').textContent='Clearing could not be confirmed. Refresh status before trying again; no email was sent.';
+    } finally {
+      clearTimeout(deadline);
+      if(current()){
+        clearingHistory=false;activityGeneration++;renderActivity();
+        if(confirmed)try{await jobs();}catch(_){if(current())$('email-activity-notice').textContent='History cleared. Activity refresh failed; displayed active statuses may be outdated. Use Refresh status.';}
+        if(current())scheduleActivity();
+      }
+    }
   });
   async function load() {
     const current=++loading;
@@ -250,7 +254,7 @@
     try {const v=JSON.parse(sessionStorage.getItem(versionsKey)||'null');if(v && Number.isSafeInteger(v.serial) && v.serial>=0 && Array.isArray(v.entries)){selectionSerial=v.serial;for(const [id,n] of v.entries)if(Number.isSafeInteger(n) && n>=0 && n<=selectionSerial)selectionVersions.set(String(id),n);}}catch(_){}
     try {const ids=JSON.parse(sessionStorage.getItem(storageKey)||'[]');if(Array.isArray(ids))for(const id of ids)if(liveChecks().some(c=>c.dataset.emailSelect===String(id)))selected.add(String(id));}catch(_){}
     try {const id=sessionStorage.getItem(pendingKey);if(id && id.length<=128)pendingId=id;const s=JSON.parse(sessionStorage.getItem(pendingKey+':selection')||'null');if(s?.id===pendingId && Array.isArray(s.entries))pendingSelection=s.entries.filter(e=>Array.isArray(e) && typeof e[0]==='string' && Number.isSafeInteger(e[1])).slice(0,50);}catch(_){}
-    $('email-pending-check').hidden=!pendingId;restoreDismissed();showHidden=false;pageHidden=false;invalidate();load();
+    $('email-pending-check').hidden=!pendingId;showHidden=false;pageHidden=false;clearingHistory=false;activityRows=[];$('email-activity').replaceChildren(node('p','Loading email activity…'));invalidate();load();
   }});
   rememberPending(pendingId);selection();load().then(()=>{
     let intended=[],intendedSelection=[];try{const stored=JSON.parse(sessionStorage.getItem(intentKey)||'[]');const ids=Array.isArray(stored)?stored:stored.ids;if(Array.isArray(ids))intended=ids.filter(id=>checks.some(c=>c.dataset.emailSelect===id)).slice(0,50);if(Array.isArray(stored.selection))intendedSelection=stored.selection.filter(e=>Array.isArray(e) && intended.includes(e[0]) && Number.isSafeInteger(e[1])).slice(0,50);sessionStorage.removeItem(intentKey);}catch(_){}
