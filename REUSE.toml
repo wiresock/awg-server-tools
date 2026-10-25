@@ -58,12 +58,26 @@ precedence = "closest"
 SPDX-FileCopyrightText = "2026 Vadim Smirnov (doing business as WireSock)"
 SPDX-License-Identifier = "MIT"
 
-# BoringTun packaging inputs. required-notices quotes the copyright lines of
-# third-party crates as data for a check; they are not notices of this file,
-# so this annotation overrides what `reuse` would otherwise read from it. The
-# third-party licenses themselves ship in each archive's THIRD-PARTY-LICENSES.
+# BoringTun packaging inputs. The third-party licenses themselves ship in each
+# archive's THIRD-PARTY-LICENSES.
 [[annotations]]
 path = "packaging/boringtun/**"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Vadim Smirnov (doing business as WireSock)"
+SPDX-License-Identifier = "MIT"
+
+# Files that quote other parties' copyright notices, or example SPDX tags, as
+# data or documentation. Those quotes are not notices of the files themselves,
+# so this annotation overrides what `reuse` would otherwise read from them. It
+# comes last so that it wins over the globs above.
+[[annotations]]
+path = [
+    "packaging/boringtun/required-notices",
+    "NOTICE.md",
+    "CONTRIBUTING.md",
+    "docs/LICENSING.md",
+    "docs/LICENSING_INVENTORY.md",
+]
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Vadim Smirnov (doing business as WireSock)"
 SPDX-License-Identifier = "MIT"

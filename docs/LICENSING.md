@@ -141,18 +141,25 @@ The **Licensing** workflow (`.github/workflows/licensing.yml`) runs
 `scripts/check-licensing.sh` on every pull request and push to `main`. It
 checks that:
 
-- `reuse lint` passes: every file has a valid SPDX license and copyright, and
-  every license used has its text in `LICENSES/`;
+- `reuse lint` passes, with no tag it cannot parse: every file has a valid SPDX
+  license and copyright, and every license used has its text in `LICENSES/`;
+- every copyright that `reuse spdx` resolves reads `<year> <holder>`, so a
+  notice quoted in a document is never taken for the document's own;
+- the Rust sources and the installed shell scripts carry their own SPDX
+  header;
 - `LICENSES/` contains only the licenses the repository is meant to use (MIT),
   so adding a license is a deliberate change;
-- `LICENSE` and the component `LICENSE` files carry the MIT terms of
-  `LICENSES/MIT.txt` and a copyright notice, and `LICENSE` and the installer
-  keep the upstream notices;
+- `LICENSES/MIT.txt` is the unmodified SPDX text; `LICENSE` and the component
+  `LICENSE` files carry its MIT terms and a copyright notice; and `LICENSE` and
+  the installer keep the upstream notices, the installer also its named
+  contributor;
 - each crate's `Cargo.toml` declares the license that its `LICENSE` file and
   SPDX headers state;
 - every `LICENSE` file names the maintainer as `Vadim Smirnov (doing business
   as WireSock)`; no copyright tag or notice names the trade name WireSock on
-  its own; and each crate's SPDX years for the maintainer match its `LICENSE`;
+  its own; and each crate's SPDX years for the maintainer lie within the years
+  of its `LICENSE` (a file from a later year needs that `LICENSE` to give a
+  range such as `2026-2027`);
 - the BoringTun cargo-about and cargo-deny configurations accept the same
   licenses;
 - every Rust dependency of the web panel and the proxy is under a license

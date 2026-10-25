@@ -9,12 +9,10 @@
 # the existing workflows so that this check depends on no live database.
 
 [graph]
-# The Linux targets the installer builds for. Dev-dependencies are only used by
-# the test suite and are never part of a built binary.
-targets = [
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-]
+# No target filter: the install scripts build natively on whatever architecture
+# the server has, so every platform's dependencies are checked.
+# Dev-dependencies are only used by the test suite and are never part of a
+# built binary.
 exclude-dev = true
 
 [licenses]

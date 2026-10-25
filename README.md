@@ -17,7 +17,7 @@ for updating Git remotes and verifying older releases.
 
 ## 📖 Background
 
-This project started as a fork of [RomikB/amneziawg-install](https://github.com/RomikB/amneziawg-install). I needed a reliable way to stand up **AmneziaWG 2.0** servers for testing [WireSock Secure Connect](https://www.wiresock.net/), and the upstream script predated the 2.0 release — so I took it and extended it to generate and manage the new 2.0 obfuscation parameters (S3/S4 padding and the H1–H4 header ranges). It now also supports an explicit, capability-checked migration to **AmneziaWG 3.1**, while retaining AWG 2.0 defaults and preserving the mode of existing installations.
+This project started from the [RomikB/amneziawg-install](https://github.com/RomikB/amneziawg-install) installer (see [Credits](#credits) for its full lineage). I needed a reliable way to stand up **AmneziaWG 2.0** servers for testing [WireSock Secure Connect](https://www.wiresock.net/), and the upstream script predated the 2.0 release — so I took it and extended it to generate and manage the new 2.0 obfuscation parameters (S3/S4 padding and the H1–H4 header ranges). It now also supports an explicit, capability-checked migration to **AmneziaWG 3.1**, while retaining AWG 2.0 defaults and preserving the mode of existing installations.
 
 Once the installer was solid, it was hard to stop:
 

@@ -68,7 +68,10 @@ CI runs `reuse lint`.
   own `SPDX-FileCopyrightText` line to it, below the existing ones.
 - The globs in `REUSE.toml` attribute files without an inline header to the
   maintainer. If you add such a file, give it your own header, which takes
-  precedence.
+  precedence. Where a header would change the file or cannot be added (HTML
+  and CSS templates, sqlx migrations, JSON or hex fixtures, images), add a
+  `<file>.license` file next to it with the two SPDX lines instead, or ask for
+  an entry in `REUSE.toml` in your pull request.
 - Never remove or change someone else's copyright line.
 
 `bash scripts/check-licensing.sh` runs all licensing checks locally; it needs

@@ -9,15 +9,20 @@
 # Checks that:
 #   - the repository is REUSE compliant (`reuse lint`): every file has an SPDX
 #     license and copyright, and every license used has its text in LICENSES/;
+#     and every copyright that `reuse spdx` resolves reads "<year> <holder>",
+#     so a quoted notice or heading is never taken for a file's own;
+#   - the Rust sources and the installed shell scripts carry their own SPDX
+#     copyright and license header;
 #   - LICENSES/ holds only the licenses this repository is meant to use, so a
 #     new license is a reviewed decision and not a side effect;
-#   - LICENSE, each component LICENSE and LICENSES/MIT.txt carry the same MIT
-#     terms, and LICENSE and the installer keep the inherited upstream notices;
+#   - LICENSES/MIT.txt is the unmodified SPDX text, LICENSE and each component
+#     LICENSE carry the same MIT terms, and LICENSE and the installer keep the
+#     inherited upstream notices and the installer its named contributor;
 #   - the Cargo manifests declare the license their LICENSE files and SPDX
 #     headers state, and each crate has its own LICENSE file;
 #   - the maintainer is named as the individual behind the WireSock trade name
 #     (MAINTAINER below) in every LICENSE file and copyright tag that mentions
-#     WireSock, and each crate's SPDX years for him match its LICENSE;
+#     WireSock, and each crate's SPDX years for him lie within its LICENSE's;
 #   - the BoringTun cargo-about and cargo-deny policies accept the same
 #     licenses, as packaging/boringtun/about.toml requires;
 #   - the Rust dependencies of the web panel and the proxy are all under
@@ -56,8 +61,11 @@ LICENSE_TAG="SPDX-License""-Identifier:"
 COPYRIGHT_TAG="SPDX-File""CopyrightText:"
 NOTICE_PREFIX="Copy""right (c)"
 NOTICE_PREFIX_RE="Copy""right \\(c\\)"
+CONTRIBUTOR_TAG="SPDX-File""Contributor:"
+# sha256 of the SPDX MIT text as downloaded by `reuse download MIT`.
+MIT_TEXT_SHA256="b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5"
 # WireSock is a trade name of Vadim Smirnov, not a separate legal entity, so a
-# copyright line never names WireSock alone (NOTICE.md).
+# notice never names WireSock alone (NOTICE.md).
 MAINTAINER="Vadim Smirnov (doing business as WireSock)"
 MAINTAINER_RE="${MAINTAINER//(/\\(}"
 MAINTAINER_RE="${MAINTAINER_RE//)/\\)}"
@@ -91,6 +99,41 @@ check_reuse() {
     else
         printf '%s\n' "${output}" >&2
         fail "reuse lint reported problems (see above)"
+        return
+    fi
+    # Under precedence = "closest", reuse prefers anything in a file that looks
+    # like a copyright notice over REUSE.toml. A document that quotes notices
+    # or shows a heading would then be credited to the wrong holder while lint
+    # still passes. Every resolved copyright must read "<year(s)> <holder>".
+    local odd
+    odd="$(reuse spdx 2>/dev/null | awk '
+        /^FileName: / { name = $2 }
+        /^FileCopyrightText: <text>/ { t = 1; sub(/^FileCopyrightText: <text>/, "") }
+        t { line = $0; done = sub(/<\/text>.*/, "", line); if (line != "") print name " :: " line; if (done) t = 0 }' |
+        grep -vE "^[^ ]+ :: (${COPYRIGHT_TAG} )?((${NOTICE_PREFIX_RE}|©) )?[0-9]{4}(-[0-9]{4})?,? [^|\`]*[^|\`.[:space:]]\$" || true)"
+    if [[ -n "${odd}" ]]; then
+        fail "reuse resolves copyright text that is not '<year> <holder>' (add the file to the override annotation in REUSE.toml, or fix its header):"$'\n'"${odd}"
+    else
+        pass "every copyright reuse resolves reads '<year> <holder>'"
+    fi
+}
+
+# Files that are installed or copied on their own carry their notice inline
+# (REUSE.toml): the Rust sources and the shell scripts outside the tests, CI
+# and the BoringTun release pipeline.
+check_inline_headers() {
+    local file missing=""
+    while IFS= read -r file; do
+        if ! head -n 20 -- "${file}" | grep -q "${COPYRIGHT_TAG} " ||
+            ! head -n 20 -- "${file}" | grep -q "${LICENSE_TAG} "; then
+            missing+="${file}"$'\n'
+        fi
+    done < <(git ls-files -- '*.rs' '*.sh' amneziawg-web/scripts/amneziawg-web-privileged |
+        grep -vE '^(tests/|\.github/|scripts/boringtun-)')
+    if [[ -n "${missing}" ]]; then
+        fail "these files need an inline ${COPYRIGHT_TAG} and ${LICENSE_TAG} header:"$'\n'"${missing%$'\n'}"
+    else
+        pass "Rust sources and installed shell scripts carry SPDX headers"
     fi
 }
 
@@ -106,6 +149,9 @@ check_license_dir() {
 
 check_license_files() {
     local reference file notice lost=0
+    if [[ "$(sha256sum LICENSES/MIT.txt | cut -d' ' -f1)" != "${MIT_TEXT_SHA256}" ]]; then
+        fail "LICENSES/MIT.txt is not the unmodified SPDX MIT text"
+    fi
     reference="$(mit_terms LICENSES/MIT.txt)"
     [[ -n "${reference}" ]] || { fail "LICENSES/MIT.txt has no MIT terms"; return; }
     for file in LICENSE amneziawg-web/LICENSE amneziawg-proxy/LICENSE; do
@@ -138,8 +184,12 @@ check_license_files() {
 2024 Roman Zakharchuk
 2024 Markus Varckin
 EOF
+    if ! grep -qxF "# ${CONTRIBUTOR_TAG} Denis Glotov" amneziawg-install.sh; then
+        fail "amneziawg-install.sh lost its contributor line for Denis Glotov"
+        lost=1
+    fi
     if [[ "${lost}" -eq 0 ]]; then
-        pass "LICENSE and amneziawg-install.sh keep the upstream notices"
+        pass "LICENSE and amneziawg-install.sh keep the upstream notices and contributor"
     fi
 }
 
@@ -169,7 +219,7 @@ check_crates() {
 }
 
 check_holders() {
-    local file entry dir bare license_years tag_years bad=0
+    local file entry dir bare license_years bad=0
     for file in LICENSE amneziawg-web/LICENSE amneziawg-proxy/LICENSE; do
         if ! grep -qxE "${NOTICE_PREFIX_RE} [0-9]{4}(-[0-9]{4})? ${MAINTAINER_RE}" "${file}"; then
             fail "${file} has no '${NOTICE_PREFIX} <year> ${MAINTAINER}' notice"
@@ -178,25 +228,41 @@ check_holders() {
     done
     # Copyright tags (inline or in REUSE.toml) and LICENSE notices that name
     # WireSock without the individual behind it.
-    bare="$(git ls-files -z | xargs -0 grep -I -n -E \
-        "(${COPYRIGHT_TAG}|SPDX-FileCopyrightText *=|^${NOTICE_PREFIX_RE}).*WireSock" 2>/dev/null |
+    # Case-insensitive, after any comment prefix, with or without "(c)" or ©.
+    bare="$(git ls-files -z | xargs -0 grep -I -n -i -E \
+        "(SPDX-FileCopyrightText[[:space:]]*[:=]|^[[:space:]#/*;!-]*copyright[[:space:]]).*wiresock" 2>/dev/null |
         grep -vF "${MAINTAINER}" || true)"
     if [[ -n "${bare}" ]]; then
         fail "copyright lines name WireSock without '${MAINTAINER}':"$'\n'"${bare}"
         bad=1
     fi
+    # A file's years for the maintainer must lie within the years its crate's
+    # LICENSE gives him: a 2027 file needs LICENSE to say 2026-2027, after which
+    # the 2026 files stay valid.
+    local first last years from to outside
     for entry in ${CRATES}; do
         dir="${entry%%:*}"
-        license_years="$(sed -E -n "s/^${NOTICE_PREFIX_RE} ([0-9-]+) ${MAINTAINER_RE}\$/\1/p" "${dir}/LICENSE")"
-        tag_years="$(git ls-files -z -- "${dir}" | xargs -0 grep -I -h -o -E "${COPYRIGHT_TAG} .* ${MAINTAINER_RE}\$" 2>/dev/null |
-            sed -E "s/^${COPYRIGHT_TAG} ([0-9-]+) .*/\1/" | LC_ALL=C sort -u | grep -vxF "${license_years}" || true)"
+        license_years="$(sed -E -n "s/^${NOTICE_PREFIX_RE} ([0-9]{4}(-[0-9]{4})?) ${MAINTAINER_RE}\$/\1/p" "${dir}/LICENSE")"
         if [[ -z "${license_years}" ]]; then
             fail "${dir}/LICENSE has no notice for ${MAINTAINER}"
             bad=1
             continue
         fi
-        if [[ -n "${tag_years}" ]]; then
-            fail "${dir}: SPDX headers give the year(s) ${tag_years//$'\n'/, } for ${MAINTAINER}, but ${dir}/LICENSE gives '${license_years}'"
+        first="${license_years%%-*}"
+        last="${license_years##*-}"
+        outside=""
+        while IFS= read -r years; do
+            [[ -n "${years}" ]] || continue
+            from="${years%%-*}"
+            to="${years##*-}"
+            if (( from < first || to > last || from > to )); then
+                outside+="${years} "
+            fi
+        done < <(git ls-files -z -- "${dir}" |
+            xargs -0 grep -I -h -o -E "${COPYRIGHT_TAG} (© )?[0-9]{4}(-[0-9]{4})? ${MAINTAINER_RE}\$" 2>/dev/null |
+            sed -E "s/^${COPYRIGHT_TAG} (© )?([0-9-]+) .*/\2/" | LC_ALL=C sort -u)
+        if [[ -n "${outside}" ]]; then
+            fail "${dir}: SPDX headers give the year(s) ${outside% } for ${MAINTAINER}, outside the '${license_years}' of ${dir}/LICENSE"
             bad=1
         fi
     done
@@ -239,6 +305,7 @@ check_dependencies() {
 }
 
 check_reuse
+check_inline_headers
 check_license_dir
 check_license_files
 check_crates
