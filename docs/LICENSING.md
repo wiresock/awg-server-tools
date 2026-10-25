@@ -111,6 +111,18 @@ example with `cargo about generate` and a configuration modelled on
 `packaging/boringtun/about.toml`. The binary also contains the Rust standard
 library, and statically linked builds contain their C library.
 
+The email feature adds two reviewed, version-specific allowances for Lettre's
+dependencies. `quoted_printable` 0.5.2 uses [0BSD](https://spdx.org/licenses/0BSD.html);
+its `LICENSE` names Kartikaya Gupta (2019). That license permits use and
+redistribution without a notice-retention condition. `webpki-roots` 1.0.11
+uses [CDLA-Permissive-2.0](https://cdla.dev/permissive-2-0/) for its bundled
+trust-anchor data. Section 2.1 requires the agreement text to accompany shared
+data: include that crate's complete `LICENSE` when distributing a binary
+containing those roots, for example in its third-party notices. These findings
+were checked against the exact crates' `LICENSE` files. No dependency source or
+root data is vendored here; these allowances do not change the repository's MIT
+license or the separate BoringTun policy.
+
 ## Known gaps
 
 These are known and not yet fixed. They do not change the license of anything
@@ -167,8 +179,11 @@ checks that:
   allowed by `.github/licensing/deny.toml`. That policy allows Apache-2.0,
   BSD-3-Clause, ISC, MIT, Unicode-3.0 and Zlib, and only those licenses the
   current graphs need; a dual-licensed crate passes when one of its options is
-  allowed. A crate under any other license, or with no license metadata, fails
-  the check until it is reviewed.
+  allowed. Package-specific exceptions additionally permit 0BSD for
+  `quoted_printable` exactly 0.5.2 and CDLA-Permissive-2.0 for `webpki-roots`
+  exactly 1.0.11, with the redistribution requirements described above. Other
+  versions need review. A crate under any other license, or with no license
+  metadata, fails the check until it is reviewed.
 
 The BoringTun license gate keeps running in the BoringTun Artifacts workflow
 with its own policy.
