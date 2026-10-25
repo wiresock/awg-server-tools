@@ -143,8 +143,9 @@ checks that:
 
 - `reuse lint` passes, with no tag it cannot parse: every file has a valid SPDX
   license and copyright, and every license used has its text in `LICENSES/`;
-- every copyright that `reuse spdx` resolves reads `<year> <holder>`, so a
-  notice quoted in a document is never taken for the document's own;
+- every copyright that `reuse spdx` resolves looks like a notice (no table
+  bar or backtick, and a year or contact address), so a table row or heading
+  quoted in a document is never taken for the document's own;
 - the Rust sources and the installed shell scripts carry their own SPDX
   header;
 - `LICENSES/` contains only the licenses the repository is meant to use (MIT),

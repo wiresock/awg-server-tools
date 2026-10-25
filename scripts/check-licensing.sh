@@ -9,8 +9,8 @@
 # Checks that:
 #   - the repository is REUSE compliant (`reuse lint`): every file has an SPDX
 #     license and copyright, and every license used has its text in LICENSES/;
-#     and every copyright that `reuse spdx` resolves reads "<year> <holder>",
-#     so a quoted notice or heading is never taken for a file's own;
+#     and every copyright that `reuse spdx` resolves looks like a notice, so a
+#     quoted table row or heading is never taken for a file's own;
 #   - the Rust sources and the installed shell scripts carry their own SPDX
 #     copyright and license header;
 #   - LICENSES/ holds only the licenses this repository is meant to use, so a
@@ -103,18 +103,30 @@ check_reuse() {
     fi
     # Under precedence = "closest", reuse prefers anything in a file that looks
     # like a copyright notice over REUSE.toml. A document that quotes notices
-    # or shows a heading would then be credited to the wrong holder while lint
-    # still passes. Every resolved copyright must read "<year(s)> <holder>".
-    local odd
-    odd="$(reuse spdx 2>/dev/null | awk '
+    # in a table or shows a heading would then be credited to the wrong holder
+    # while lint still passes. A resolved copyright is taken for such a
+    # fragment when it contains a table bar or backtick, or names neither a
+    # year nor an e-mail address. Real notices, including verbatim third-party
+    # ones such as "2019 Cloudflare, Inc. All rights reserved.", pass.
+    local spdx odd rc=0
+    spdx="$(reuse spdx 2>/dev/null)" || rc=$?
+    if [[ "${rc}" -ne 0 || -z "${spdx}" ]]; then
+        fail "reuse spdx failed (exit ${rc})"
+        return
+    fi
+    odd="$(awk '
         /^FileName: / { name = $2 }
         /^FileCopyrightText: <text>/ { t = 1; sub(/^FileCopyrightText: <text>/, "") }
-        t { line = $0; done = sub(/<\/text>.*/, "", line); if (line != "") print name " :: " line; if (done) t = 0 }' |
-        grep -vE "^[^ ]+ :: (${COPYRIGHT_TAG} )?((${NOTICE_PREFIX_RE}|©) )?[0-9]{4}(-[0-9]{4})?,? [^|\`]*[^|\`.[:space:]]\$" || true)"
+        t {
+            line = $0; done = sub(/<\/text>.*/, "", line)
+            if (line != "" && (line ~ /[|`]/ || (line !~ /[0-9][0-9][0-9][0-9]/ && line !~ /<[^>]+@[^>]+>/)))
+                print name " :: " line
+            if (done) t = 0
+        }' <<<"${spdx}")"
     if [[ -n "${odd}" ]]; then
-        fail "reuse resolves copyright text that is not '<year> <holder>' (add the file to the override annotation in REUSE.toml, or fix its header):"$'\n'"${odd}"
+        fail "reuse resolves text that does not look like a copyright notice. If the file quotes notices or shows example tags as documentation or data, add it to the override annotation at the end of REUSE.toml; if it is a real notice, it needs a year or a contact address. Never use the override for a file whose own notice belongs to someone else:"$'\n'"${odd}"
     else
-        pass "every copyright reuse resolves reads '<year> <holder>'"
+        pass "every copyright reuse resolves looks like a notice"
     fi
 }
 
@@ -122,10 +134,10 @@ check_reuse() {
 # (REUSE.toml): the Rust sources and the shell scripts outside the tests, CI
 # and the BoringTun release pipeline.
 check_inline_headers() {
-    local file missing=""
+    local file header missing=""
     while IFS= read -r file; do
-        if ! head -n 20 -- "${file}" | grep -q "${COPYRIGHT_TAG} " ||
-            ! head -n 20 -- "${file}" | grep -q "${LICENSE_TAG} "; then
+        header="$(sed -n '1,40p' -- "${file}")"
+        if ! grep -q "${COPYRIGHT_TAG} " <<<"${header}" || ! grep -q "${LICENSE_TAG} " <<<"${header}"; then
             missing+="${file}"$'\n'
         fi
     done < <(git ls-files -- '*.rs' '*.sh' amneziawg-web/scripts/amneziawg-web-privileged |
@@ -239,7 +251,7 @@ check_holders() {
     # A file's years for the maintainer must lie within the years its crate's
     # LICENSE gives him: a 2027 file needs LICENSE to say 2026-2027, after which
     # the 2026 files stay valid.
-    local first last years from to outside
+    local first last years from to outside malformed
     for entry in ${CRATES}; do
         dir="${entry%%:*}"
         license_years="$(sed -E -n "s/^${NOTICE_PREFIX_RE} ([0-9]{4}(-[0-9]{4})?) ${MAINTAINER_RE}\$/\1/p" "${dir}/LICENSE")"
@@ -247,6 +259,13 @@ check_holders() {
             fail "${dir}/LICENSE has no notice for ${MAINTAINER}"
             bad=1
             continue
+        fi
+        # Tags naming the maintainer must have the form the years are read from.
+        malformed="$(git ls-files -z -- "${dir}" | xargs -0 grep -I -h -o -E "${COPYRIGHT_TAG} .*${MAINTAINER_RE}.*" 2>/dev/null |
+            grep -vxE "${COPYRIGHT_TAG} (© )?[0-9]{4}(-[0-9]{4})? ${MAINTAINER_RE}" || true)"
+        if [[ -n "${malformed}" ]]; then
+            fail "${dir}: write the maintainer's tags as '${COPYRIGHT_TAG} <year>[-<year>] ${MAINTAINER}':"$'\n'"${malformed}"
+            bad=1
         fi
         first="${license_years%%-*}"
         last="${license_years##*-}"
