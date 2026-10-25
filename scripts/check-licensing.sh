@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: 2026 WireSock
+# SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
 # SPDX-License-Identifier: MIT
 #
 # Licensing checks for this repository. See docs/LICENSING.md.
@@ -15,6 +15,9 @@
 #     terms, and LICENSE and the installer keep the inherited upstream notices;
 #   - the Cargo manifests declare the license their LICENSE files and SPDX
 #     headers state, and each crate has its own LICENSE file;
+#   - the maintainer is named as the individual behind the WireSock trade name
+#     (MAINTAINER below) in every LICENSE file and copyright tag that mentions
+#     WireSock, and each crate's SPDX years for him match its LICENSE;
 #   - the BoringTun cargo-about and cargo-deny policies accept the same
 #     licenses, as packaging/boringtun/about.toml requires;
 #   - the Rust dependencies of the web panel and the proxy are all under
@@ -52,6 +55,12 @@ CRATES="amneziawg-web:MIT amneziawg-proxy:MIT"
 LICENSE_TAG="SPDX-License""-Identifier:"
 COPYRIGHT_TAG="SPDX-File""CopyrightText:"
 NOTICE_PREFIX="Copy""right (c)"
+NOTICE_PREFIX_RE="Copy""right \\(c\\)"
+# WireSock is a trade name of Vadim Smirnov, not a separate legal entity, so a
+# copyright line never names WireSock alone (NOTICE.md).
+MAINTAINER="Vadim Smirnov (doing business as WireSock)"
+MAINTAINER_RE="${MAINTAINER//(/\\(}"
+MAINTAINER_RE="${MAINTAINER_RE//)/\\)}"
 
 FAILED=0
 fail() {
@@ -73,10 +82,14 @@ check_reuse() {
         fail "reuse is not installed (pip install reuse; see docs/LICENSING.md)"
         return
     fi
-    if reuse lint >/dev/null 2>&1; then
+    local output rc=0
+    output="$(reuse lint 2>&1)" || rc=$?
+    # reuse logs a tag it cannot parse as an ERROR and skips that file's own
+    # header, which can still leave the summary compliant: treat it as failure.
+    if [[ "${rc}" -eq 0 ]] && ! grep -q ' - ERROR - ' <<<"${output}"; then
         pass "reuse lint: the repository is REUSE compliant"
     else
-        reuse lint >&2 || true
+        printf '%s\n' "${output}" >&2
         fail "reuse lint reported problems (see above)"
     fi
 }
@@ -155,6 +168,43 @@ check_crates() {
     done
 }
 
+check_holders() {
+    local file entry dir bare license_years tag_years bad=0
+    for file in LICENSE amneziawg-web/LICENSE amneziawg-proxy/LICENSE; do
+        if ! grep -qxE "${NOTICE_PREFIX_RE} [0-9]{4}(-[0-9]{4})? ${MAINTAINER_RE}" "${file}"; then
+            fail "${file} has no '${NOTICE_PREFIX} <year> ${MAINTAINER}' notice"
+            bad=1
+        fi
+    done
+    # Copyright tags (inline or in REUSE.toml) and LICENSE notices that name
+    # WireSock without the individual behind it.
+    bare="$(git ls-files -z | xargs -0 grep -I -n -E \
+        "(${COPYRIGHT_TAG}|SPDX-FileCopyrightText *=|^${NOTICE_PREFIX_RE}).*WireSock" 2>/dev/null |
+        grep -vF "${MAINTAINER}" || true)"
+    if [[ -n "${bare}" ]]; then
+        fail "copyright lines name WireSock without '${MAINTAINER}':"$'\n'"${bare}"
+        bad=1
+    fi
+    for entry in ${CRATES}; do
+        dir="${entry%%:*}"
+        license_years="$(sed -E -n "s/^${NOTICE_PREFIX_RE} ([0-9-]+) ${MAINTAINER_RE}\$/\1/p" "${dir}/LICENSE")"
+        tag_years="$(git ls-files -z -- "${dir}" | xargs -0 grep -I -h -o -E "${COPYRIGHT_TAG} .* ${MAINTAINER_RE}\$" 2>/dev/null |
+            sed -E "s/^${COPYRIGHT_TAG} ([0-9-]+) .*/\1/" | LC_ALL=C sort -u | grep -vxF "${license_years}" || true)"
+        if [[ -z "${license_years}" ]]; then
+            fail "${dir}/LICENSE has no notice for ${MAINTAINER}"
+            bad=1
+            continue
+        fi
+        if [[ -n "${tag_years}" ]]; then
+            fail "${dir}: SPDX headers give the year(s) ${tag_years//$'\n'/, } for ${MAINTAINER}, but ${dir}/LICENSE gives '${license_years}'"
+            bad=1
+        fi
+    done
+    if [[ "${bad}" -eq 0 ]]; then
+        pass "LICENSE files and copyright tags name ${MAINTAINER} consistently"
+    fi
+}
+
 # packaging/boringtun/about.toml: "deny.toml gates the same graph plus build
 # dependencies; both must accept the same licenses."
 check_boringtun_policies() {
@@ -192,6 +242,7 @@ check_reuse
 check_license_dir
 check_license_files
 check_crates
+check_holders
 check_boringtun_policies
 check_dependencies
 

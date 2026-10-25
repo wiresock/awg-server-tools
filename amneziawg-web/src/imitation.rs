@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
 // SPDX-License-Identifier: MIT
 
 //! BoringTun's native packet imitation settings. No proxy is involved.

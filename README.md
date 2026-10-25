@@ -1032,8 +1032,9 @@ permission notices are kept. It comes without warranty.
 - **Original authors keep their rights.** The installer is derived from the
   projects listed under [Credits](#credits); the notices of angristan, Roman
   Zakharchuk and Markus Varckin are kept in [`LICENSE`](LICENSE) and in the
-  script itself, next to WireSock's. Every contributor keeps the copyright in
-  their contribution.
+  script itself, next to that of Vadim Smirnov, who develops the project under
+  the trade name WireSock. Every contributor keeps the copyright in their
+  contribution.
 - **Third-party software keeps its own license.** BoringTun (BSD-3-Clause), the
   Rust crates the components use, and AmneziaWG's kernel module and tools
   (GPL-2.0, installed by the system package manager and not distributed here)

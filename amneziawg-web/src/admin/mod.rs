@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 WireSock
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
 // SPDX-License-Identifier: MIT
 
 //! Admin action helpers (disable/enable peer, config download, user lifecycle).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: 2026 WireSock
+# SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
 # SPDX-License-Identifier: MIT
 #
 # amneziawg-proxy-uninstall.sh

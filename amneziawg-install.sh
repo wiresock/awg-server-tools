@@ -6,7 +6,7 @@
 # SPDX-FileCopyrightText: 2019 angristan
 # SPDX-FileCopyrightText: 2024 Roman Zakharchuk
 # SPDX-FileCopyrightText: 2024 Markus Varckin
-# SPDX-FileCopyrightText: 2026 WireSock
+# SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
 # SPDX-FileContributor: Denis Glotov
 # SPDX-License-Identifier: MIT
 #

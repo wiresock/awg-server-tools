@@ -23,8 +23,17 @@ and [`NOTICE.md`](NOTICE.md)). By submitting a contribution you agree that:
 
 You keep the copyright in your contribution. There is no copyright assignment
 and no Contributor License Agreement. Contributions are accepted only under the
-terms above; they do not grant the maintainers any additional right, such as a
+terms above; they do not grant the maintainer any additional right, such as a
 right to relicense them under other terms.
+
+### The maintainer and other contributors
+
+The project is maintained by Vadim Smirnov, who does business as WireSock.
+WireSock is a trade name, not a separate legal entity, and holds no rights of
+its own. Notices that read `Vadim Smirnov (doing business as WireSock)` refer to
+his own work. Accepting your contribution into the repository does not make it
+his: the notices for his work do not cover it, and your contribution stays
+yours, licensed under MIT.
 
 Do not submit code, text or images copied from elsewhere unless their license
 allows it and you say where they come from in the pull request. Code under a
@@ -44,14 +53,22 @@ above.
 The repository follows the [REUSE](https://reuse.software) specification, and
 CI runs `reuse lint`.
 
-- When you add a new file, give it the same license header as its neighbours
-  (the Rust sources and shell scripts start with `SPDX-FileCopyrightText` and
-  `SPDX-License-Identifier` lines), or make sure `REUSE.toml` covers it.
-- When you contribute a substantial new file, or a substantial part of one, you
-  may add your own `SPDX-FileCopyrightText: <year> <your name>` line to it.
-  Files you add that are not covered by an inline header are attributed to
-  WireSock by `REUSE.toml`; if that does not describe your contribution, add
-  your own header, which takes precedence.
+- When you add a new file, start it with your own copyright line and the
+  license of its neighbours. For a Rust file:
+
+  <!-- REUSE-IgnoreStart -->
+  ```rust
+  // SPDX-FileCopyrightText: <year> <your name>
+  // SPDX-License-Identifier: MIT
+  ```
+  <!-- REUSE-IgnoreEnd -->
+
+  Do not copy the maintainer's copyright line onto your own work.
+- When you contribute a substantial part of an existing file, you may add your
+  own `SPDX-FileCopyrightText` line to it, below the existing ones.
+- The globs in `REUSE.toml` attribute files without an inline header to the
+  maintainer. If you add such a file, give it your own header, which takes
+  precedence.
 - Never remove or change someone else's copyright line.
 
 `bash scripts/check-licensing.sh` runs all licensing checks locally; it needs

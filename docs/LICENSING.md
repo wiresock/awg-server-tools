@@ -16,6 +16,9 @@ not legal advice, and where it summarises a license, the license text governs.
   [`NOTICE.md`](../NOTICE.md) for the full origin.
 - Third-party software that the project downloads, builds against or
   distributes keeps its own license. The project does not relicense it.
+- The current development is by Vadim Smirnov, who does business as
+  WireSock. WireSock is a trade name, not a separate legal entity, so his
+  notices read `Copyright (c) 2026 Vadim Smirnov (doing business as WireSock)`.
 - There is no Contributor License Agreement and no copyright assignment.
   Contributors keep their copyright and license their contributions under MIT
   ([`CONTRIBUTING.md`](../CONTRIBUTING.md)).
@@ -68,7 +71,7 @@ program that runs it.
 
 | Component | License | How the project uses it | Obligations for the project |
 | --- | --- | --- | --- |
-| WireSock BoringTun `boringtun-cli` | BSD-3-Clause (Cloudflare, Inc.; WireSock) | Built in CI and **distributed** as release archives of this repository; the installer downloads and runs it as a separate program. | Binary redistribution must reproduce BoringTun's notices and those of everything linked into it: each archive ships `LICENSE` and `THIRD-PARTY-LICENSES` (see below). BSD-3-Clause does not require source to be provided; the archive `MANIFEST` names the public source repository and commit anyway. |
+| WireSock BoringTun `boringtun-cli` | BSD-3-Clause (Cloudflare, Inc.; fork additions by Vadim Smirnov, doing business as WireSock) | Built in CI and **distributed** as release archives of this repository; the installer downloads and runs it as a separate program. | Binary redistribution must reproduce BoringTun's notices and those of everything linked into it: each archive ships `LICENSE` and `THIRD-PARTY-LICENSES` (see below). BSD-3-Clause does not require source to be provided; the archive `MANIFEST` names the public source repository and commit anyway. |
 | Rust crates linked into `boringtun-cli` | Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0 (gated by `packaging/boringtun/deny.toml`) | Statically linked into the distributed binary. | Reproduced in `THIRD-PARTY-LICENSES`. No crate in the graph may ship an Apache-2.0 `NOTICE` file: the build fails if one does, because that file would have to be reproduced too. |
 | musl libc and the Rust standard library | MIT (musl); MIT OR Apache-2.0 (Rust) | Statically linked into `boringtun-cli`. | Their notices are not yet in `THIRD-PARTY-LICENSES`; see [Known gaps](#known-gaps). |
 | Rust crates of `amneziawg-web` and `amneziawg-proxy` | Permissive, gated by `.github/licensing/deny.toml` | Downloaded from crates.io and built **on the server** by the install scripts. | None for the project, which distributes only its own source. Whoever distributes a built binary must include the crates' notices (see below). |
@@ -120,13 +123,14 @@ in this repository.
    Apache-2.0 WITH LLVM-exception). `THIRD-PARTY-LICENSES` lists only the crates of the
    BoringTun dependency graph, so their notices are missing. In addition, the
    archive `LICENSE` reproduces only Cloudflare's notice, while the files
-   WireSock added to its fork carry "Copyright (c) 2024-2026 WireSock" under
-   the same BSD-3-Clause terms. The fix is to add these notices to the
-   archives in the next release build (a new build number of the pin, as
-   `packaging/boringtun/release.env` requires for any change of the archive
-   bytes); it is not made here because it changes published release contents.
-2. **`amneziawg-web/LICENSE` gives 2024 as its year**, before the component's
-   first commit in 2026. It is kept until the maintainers confirm or correct it.
+   added by the fork carry "Copyright (c) 2024-2026 WireSock" under the same
+   BSD-3-Clause terms, which should name Vadim Smirnov (doing business as
+   WireSock). The fix ships in new, reproducible and attested release builds
+   (a new build number or pin, as `packaging/boringtun/release.env` requires
+   for any change of the archive bytes); published archives are never
+   modified. It is tracked in
+   [issue #175](https://github.com/wiresock/awg-server-tools/issues/175) and
+   should be done before `boringtun-cli` is distributed in any other product.
 
 The open legal questions found in the audit are listed in
 [`LICENSING_INVENTORY.md`](LICENSING_INVENTORY.md#unresolved-questions).
@@ -146,6 +150,9 @@ checks that:
   keep the upstream notices;
 - each crate's `Cargo.toml` declares the license that its `LICENSE` file and
   SPDX headers state;
+- every `LICENSE` file names the maintainer as `Vadim Smirnov (doing business
+  as WireSock)`; no copyright tag or notice names the trade name WireSock on
+  its own; and each crate's SPDX years for the maintainer match its `LICENSE`;
 - the BoringTun cargo-about and cargo-deny configurations accept the same
   licenses;
 - every Rust dependency of the web panel and the proxy is under a license
@@ -170,15 +177,18 @@ bash scripts/check-licensing.sh --offline  # without the dependency check
 
 ### Adding files and licenses
 
-- A new Rust source or installed shell script should start with the same two
-  SPDX lines as its neighbours. Other files are covered by the globs in
-  `REUSE.toml`; a file outside them makes `reuse lint` fail until it is
-  annotated.
+- A new Rust source or installed shell script starts with an
+  `SPDX-FileCopyrightText` line naming its author and the
+  `SPDX-License-Identifier` of its neighbours. Other files are covered by the
+  globs in `REUSE.toml`, which attribute them to the maintainer; a file outside
+  them makes `reuse lint` fail until it is annotated. A contributor's file
+  carries the contributor's own copyright line (see `CONTRIBUTING.md`).
 - Code copied from elsewhere keeps its original notice and license. Add its
   license text with `reuse download <SPDX-ID>`, give the file its original
   `SPDX-FileCopyrightText` and `SPDX-License-Identifier`, extend
   `EXPECTED_LICENSES` in `scripts/check-licensing.sh` and describe it in
-  `NOTICE.md`. Never mark third-party code as WireSock's or as MIT unless it is.
+  `NOTICE.md`. Never attribute third-party code to the maintainer, or mark it
+  as MIT, unless it is.
 - A new Rust dependency under a license not yet allowed fails the check. Add
   the license to `.github/licensing/deny.toml` only after confirming that it is
   permissive and that its notice requirements are understood.

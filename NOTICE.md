@@ -35,9 +35,16 @@ adaptation and hold the copyright in their own contributions; the upstream
 project publishes them under its single notice, which is reproduced here as it
 stands.
 
-## WireSock's development
+## Copyright holder of the current development
 
-Since January 2026 the project has been developed by WireSock in
+WireSock is a trade name ("doing business as") used by **Vadim Smirnov**, an
+individual. It is not a company or other separate legal entity and holds no
+rights of its own. Wherever this repository names WireSock as a copyright
+holder, the holder is Vadim Smirnov, and the notices say so:
+`Copyright (c) 2026 Vadim Smirnov (doing business as WireSock)`.
+
+Since January 2026 the project has been developed by Vadim Smirnov, operating
+as WireSock, in
 [wiresock/awg-server-tools](https://github.com/wiresock/awg-server-tools)
 (formerly `wiresock/amneziawg-install`). That work extended the installer
 (AmneziaWG 2.0, 3.0 and 3.1 support, the BoringTun backend, non-interactive
@@ -49,22 +56,26 @@ operation and many fixes) and added everything else in the repository:
   release scripts in `scripts/`, the BoringTun packaging in
   `packaging/boringtun/`, the tests, the CI workflows and the documentation.
 
-These files are attributed to WireSock (`SPDX-FileCopyrightText: 2026
-WireSock`). The attribution rests on the project's own existing notices
-(`amneziawg-web/LICENSE`, and the WireSock BoringTun sources) and on the git
-history, in which these files were written by the WireSock maintainer or by
-automated coding agents working on WireSock's repository, with version-bump
-commits from GitHub Actions. Commit authorship is evidence of who wrote a
-change, not proof of who owns it; the questions this leaves open are listed in
+These files carry `SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business
+as WireSock)`. The attribution rests on the git history, in which these files
+were written by Vadim Smirnov or by automated coding agents that he directed on
+his repository, with version-bump commits from GitHub Actions. Commit
+authorship is evidence of who wrote a change, not proof of who owns it. The
+questions this leaves open, including the status of agent-written code and any
+agreement that could give someone else rights in this work, are listed in
 [`docs/LICENSING_INVENTORY.md`](docs/LICENSING_INVENTORY.md#unresolved-questions).
+
+If these rights are later transferred to another owner, the notices can name
+that owner from then on. A transfer would not withdraw the MIT License already
+granted for the published code, and nothing here anticipates one.
 
 ### Other contributors
 
 - Denis Glotov contributed a one-line fix to `amneziawg-install.sh` (pull
   request #108, commit `f9af954`). He is named as a contributor in that file's
-  header (`SPDX-FileContributor`). WireSock claims no copyright in that change;
-  whatever rights exist in it remain his, and it is distributed under the MIT
-  License like the rest of the file.
+  header (`SPDX-FileContributor`). Vadim Smirnov claims no copyright in that
+  change; whatever rights exist in it remain Denis Glotov's, and it is
+  distributed under the MIT License like the rest of the file.
 
 A contributor keeps the copyright in their contribution; see
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
@@ -73,15 +84,15 @@ A contributor keeps the copyright in their contribution; see
 
 | Path | License | Copyright |
 | --- | --- | --- |
-| `amneziawg-install.sh` | MIT | 2019 angristan; 2024 Roman Zakharchuk; 2024 Markus Varckin; 2026 WireSock; contributor Denis Glotov |
-| `amneziawg-web/` | MIT (`amneziawg-web/LICENSE`) | WireSock |
-| `amneziawg-proxy/` | MIT (`amneziawg-proxy/LICENSE`) | WireSock |
-| everything else | MIT (`LICENSE`) | WireSock |
+| `amneziawg-install.sh` | MIT | 2019 angristan; 2024 Roman Zakharchuk; 2024 Markus Varckin; 2026 Vadim Smirnov (doing business as WireSock); contributor Denis Glotov |
+| `amneziawg-web/` | MIT (`amneziawg-web/LICENSE`) | 2026 Vadim Smirnov (doing business as WireSock) |
+| `amneziawg-proxy/` | MIT (`amneziawg-proxy/LICENSE`) | 2026 Vadim Smirnov (doing business as WireSock) |
+| everything else | MIT (`LICENSE`) | 2026 Vadim Smirnov (doing business as WireSock) |
 
-`amneziawg-web/LICENSE` gives the year as 2024, which predates the component's
-first commit in this repository (2026-03-25). It is kept unchanged until the
-maintainers confirm the year; the SPDX metadata records the year the git
-history supports.
+`amneziawg-web/LICENSE` previously gave the year as 2024. The component first
+appears in this repository on 2026-03-25, as a single commit that already
+contains that `LICENSE`, and no earlier development of it is known, so the year
+is now 2026.
 
 ## Third-party software
 
@@ -99,7 +110,9 @@ the commit pinned in `packaging/boringtun/pin.env`. Its archives are published
 as releases of this repository and downloaded by the installer.
 
 - License: BSD-3-Clause. Upstream notice: Copyright (c) 2019 Cloudflare, Inc.
-  Files added by the fork carry: Copyright (c) 2024-2026 WireSock.
+  Files added by the fork carry "Copyright (c) 2024-2026 WireSock", the
+  trade name of Vadim Smirnov; correcting that notice is tracked in
+  [issue #175](https://github.com/wiresock/awg-server-tools/issues/175).
 - Each archive contains `LICENSE` (BoringTun's license) and
   `THIRD-PARTY-LICENSES` (the licenses of every Rust crate linked into the
   binary, generated by cargo-about and gated by cargo-deny), and its `MANIFEST`
@@ -107,7 +120,7 @@ as releases of this repository and downloaded by the installer.
   next to the binary in `/usr/local/lib/amneziawg-install/boringtun/`.
 - The binary also links statically the musl C library and the Rust standard
   library, whose notices `THIRD-PARTY-LICENSES` does not yet include; see
-  [`docs/LICENSING.md`](docs/LICENSING.md#known-gaps).
+  [`docs/LICENSING.md`](docs/LICENSING.md#known-gaps) and [issue #175](https://github.com/wiresock/awg-server-tools/issues/175).
 
 ### Built from source on the server: Rust crates of the web panel and proxy
 
