@@ -7,7 +7,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 const ok = value => ({ok:true,json:async()=>value});
 const saved = {revision:1,source:'panel',enabled:true,operational:true,storage_ready:true,host:'smtp.example.test',port:587,tls:'starttls',authenticate:true,username:'mailer',credentials_present:true,from:'vpn@example.test',reply_to:null,public_base:'https://download.example.test',link_enabled:true,ttl_seconds:86400};
 const contacts=[{id:'a',peer_id:7,managed_name:'Alice <phone>',email:'alice@example.test',binding_version:2,retired_at:null},{id:'b',peer_id:8,managed_name:'Bob',email:null,binding_version:1,retired_at:null}];
-function page(kind,responder,storage=new Map(),search="") {
+function page(kind,responder,storage=new Map(),search="",clock={now:Date.now()}) {
   const ids=new Map(),requests=[],all=[],timers=new Map();let timerId=0;
   const document={activeElement:null};
   function element(id='') {const e={id,value:'',textContent:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},children:[],listeners:{},
@@ -30,7 +30,7 @@ function page(kind,responder,storage=new Map(),search="") {
   document.createElement=element;
   document.querySelectorAll=selector=>selector.includes('email-select')?selects:selector.includes('email-send')?sends:selector.includes('email-edit')?edits:selector.includes('email-readiness')?readiness:selector.includes('email-format')?(selector.includes(':checked')?formats.filter(e=>e.checked):formats):[];
   const window={listeners:{},addEventListener(k,fn){(this.listeners[k] ||= []).push(fn);}};
-  const context=vm.createContext({document,window,Set,Map,URLSearchParams,AbortController,setTimeout:(fn,ms)=>{timers.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timers.delete(id),location:{search,pathname:'/private/'},
+  const context=vm.createContext({document,window,Set,Map,Date:class extends Date {constructor(...args){super(...(args.length?args:[clock.now]));}static now(){return clock.now;}},URLSearchParams,AbortController,setTimeout:(fn,ms)=>{timers.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timers.delete(id),location:{search,pathname:'/private/'},
     sessionStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
     confirm:()=>true,crypto:{getRandomValues:a=>{a.fill(13);return a;}},Uint8Array,btoa:s=>Buffer.from(s,'binary').toString('base64'),
     fetch:async(url,options)=>{const request={url,options,body:options.body?JSON.parse(options.body):null};requests.push(request);return responder(request);}});
@@ -43,10 +43,145 @@ function page(kind,responder,storage=new Map(),search="") {
 const responder=(overrides={})=>async r=>{
   const key=r.url.split('/').pop();if(overrides[key])return overrides[key](r);
   if(key==='settings')return ok(saved);if(key==='contacts')return ok(contacts);if(key==='jobs')return ok([]);
+  if(key==='send')return ok(['job']);
   if(key==='preview')return ok({id:'preview-one',settings_revision:1,mode:'direct',formats:['conf'],ttl_seconds:86400,items:[{client_id:'a',name:contacts[0].managed_name,recipient:contacts[0].email}],skipped:[{client_id:'b',reason:'email_missing'}]});
   return ok({});
 };
 const text=e=>[e.textContent,...e.children.map(text)].join(' ');
+
+test('accepted bulk send clears eligible selections but keeps skipped peers and header consistent',async()=>{
+  const p=page('peers',responder({send:()=>ok(['job-a'])}));await tick();
+  for(const c of p.selects){c.checked=true;await c.fire('change');}
+  await p.get('email-bulk-send').fire('click');await p.get('email-confirm').fire('click');
+  assert.equal(p.selects[0].checked,false);assert.equal(p.selects[1].checked,true);
+  assert.equal(p.get('email-select-all').checked,false);assert.equal(p.get('email-select-all').indeterminate,true);
+  assert.equal(p.get('email-selection-count').textContent,'1 selected');assert.match(p.get('email-peer-status').textContent,/skipped.*kept/i);
+});
+test('completed bulk send clears counts and disables empty-selection actions',async()=>{
+  const p=page('peers',responder({send:()=>ok(['job-a'])}));await tick();
+  p.selects[0].checked=true;await p.selects[0].fire('change');await p.get('email-bulk-send').fire('click');await p.get('email-confirm').fire('click');
+  assert.equal(p.get('email-selection-count').textContent,'0 selected');assert.equal(p.get('email-bulk-send').disabled,true);assert.equal(p.get('peer-bulk-delete').disabled,true);
+  assert.equal(p.get('email-select-all').checked,false);assert.equal(p.get('email-select-all').indeterminate,false);
+});
+test('rejected and interrupted bulk submissions keep all selections',async()=>{
+  for(const fail of [()=>({ok:false,json:async()=>({error:'changed'})}),()=>Promise.reject(new Error('offline'))]) {
+    const p=page('peers',responder({send:fail}));await tick();p.selects[0].checked=true;await p.selects[0].fire('change');
+    await p.get('email-bulk-send').fire('click');await p.get('email-confirm').fire('click');assert.equal(p.selects[0].checked,true);
+  }
+});
+test('late bulk response clears original selection but not a new or reselected peer',async()=>{
+  for(const reselect of [false,true]) {
+    let release;const p=page('peers',responder({send:()=>new Promise(r=>release=r)}));await tick();
+    p.selects[0].checked=true;await p.selects[0].fire('change');await p.get('email-bulk-send').fire('click');const work=p.get('email-confirm').fire('click');await tick();await p.get('email-cancel').fire('click');
+    if(reselect){p.selects[0].checked=false;await p.selects[0].fire('change');p.selects[0].checked=true;await p.selects[0].fire('change');}
+    p.selects[1].checked=true;await p.selects[1].fire('change');release(ok(['job-a']));await work;
+    assert.equal(p.selects[0].checked,reselect);assert.equal(p.selects[1].checked,true);
+  }
+});
+test('recovered bulk confirmation after reload clears only its unchanged original selection',async()=>{
+  const p=page('peers',responder({send:()=>Promise.reject(new Error('offline'))}));await tick();
+  p.selects[0].checked=true;await p.selects[0].fire('change');await p.get('email-bulk-send').fire('click');await p.get('email-confirm').fire('click');
+  const next=page('peers',responder({send:()=>ok(['job-a'])}),p.storage);await tick();next.selects[1].checked=true;await next.selects[1].fire('change');
+  await next.get('email-pending-check').fire('click');await next.get('email-confirm').fire('click');
+  assert.equal(next.selects[0].checked,false);assert.equal(next.selects[1].checked,true);
+});
+test('single peer email success does not clear a separately selected bulk peer',async()=>{
+  const p=page('peers',responder({send:()=>ok(['job-a'])}));await tick();p.selects[0].checked=true;await p.selects[0].fire('change');
+  await p.sends[0].fire('click');await p.get('email-confirm').fire('click');assert.equal(p.selects[0].checked,true);
+});
+test('explicit separate bulk review after uncertainty clears its newly confirmed selection',async()=>{
+  let attempts=0;const p=page('peers',responder({send:()=>++attempts===1?Promise.reject(new Error('offline')):ok(['job-new'])}));await tick();
+  p.selects[0].checked=true;await p.selects[0].fire('change');await p.get('email-bulk-send').fire('click');await p.get('email-confirm').fire('click');
+  await p.get('email-new-review').fire('click');await p.get('email-confirm').fire('click');
+  assert.equal(p.get('email-selection-count').textContent,'0 selected');assert.equal(p.get('email-bulk-send').disabled,true);
+});
+test('a response after navigation cannot overwrite the new page selection or recovery intent',async()=>{
+  let release;const p=page('peers',responder({send:()=>new Promise(r=>release=r)}));await tick();
+  p.selects[0].checked=true;await p.selects[0].fire('change');await p.get('email-bulk-send').fire('click');const work=p.get('email-confirm').fire('click');await tick();
+  for(const fn of p.window.listeners.pagehide)fn({});
+  const next=page('peers',responder(),p.storage);await tick();next.selects[1].checked=true;await next.selects[1].fire('change');
+  release(ok(['job-a']));await work;assert.deepEqual(JSON.parse(p.storage.get('awg-email-selected:/private')),['7','8']);
+  assert.equal(p.storage.get('awg-email-pending:/private'),'preview-one');
+  await next.get('email-pending-check').fire('click');await next.get('email-confirm').fire('click');assert.equal(next.selects[0].checked,false);assert.equal(next.selects[1].checked,true);
+});
+const activity=(id,state,accepted_at=null,extra={})=>({id,client_id:'a',request_id:'request',actor:'admin',recipient:id+'@example.test',mode:'direct',link_ttl_seconds:86400,formats:'["conf"]',binding_version:2,state,attempts:1,next_attempt_at:1700000060,created_at:1699999000,accepted_at,error_code:null,invalidated_at:null,invalidation_code:null,...extra});
+test('Clear history hides only observed terminal results and preserves unresolved request recovery',async()=>{
+  let rows=['accepted','failed','unknown','cancelled','queued','sending'].map(s=>activity(s,s,s==='accepted'?1700000000:null));
+  const storage=new Map([['awg-email-pending:/private','uncertain-request']]);
+  const p=page('peers',responder({jobs:()=>ok(rows)}),storage,'',{now:1700000010000});await tick();
+  assert.equal(p.get('email-activity-clear').disabled,false);await p.get('email-activity-clear').fire('click');
+  for(const s of ['accepted','failed','unknown','cancelled'])assert.doesNotMatch(text(p.get('email-activity')),new RegExp(s+'@example.test'));
+  for(const s of ['queued','sending'])assert.match(text(p.get('email-activity')),new RegExp(s+'@example.test'));
+  assert.equal(storage.get('awg-email-pending:/private'),'uncertain-request');assert.equal(p.get('email-pending-check').hidden,false);
+  assert.equal(p.get('email-activity-clear').disabled,true);await p.get('email-refresh').fire('click');
+  assert.doesNotMatch(text(p.get('email-activity')),/failed@example.test/);
+  rows=[...rows,activity('new-result','failed')];await p.get('email-refresh').fire('click');assert.match(text(p.get('email-activity')),/new-result@example.test/);
+  const restored=page('peers',responder({jobs:()=>ok(rows)}),storage,'',{now:1700000010000});await tick();
+  assert.doesNotMatch(text(restored.get('email-activity')),/unknown@example.test/);assert.match(text(restored.get('email-activity')),/new-result@example.test/);
+  assert.equal(restored.requests.filter(r=>r.body).length,0);assert.ok([...storage.values()].every(v=>!v.includes('@example.test')));
+});
+test('cleared results reappear on retry, changed resolution or revocation, never hiding active work',async()=>{
+  let rows=[activity('retry','failed'),activity('resolve','unknown'),activity('revoke','accepted',1700000000)];
+  const p=page('peers',responder({jobs:()=>ok(rows)}),new Map(),'',{now:1700000010000});await tick();await p.get('email-activity-clear').fire('click');
+  assert.match(text(p.get('email-activity')),/No visible/);
+  rows=[activity('retry','queued'),activity('resolve','accepted',1700000009),activity('revoke','accepted',1700000000,{invalidated_at:1700000009,invalidation_code:'changed'})];
+  await p.get('email-refresh').fire('click');for(const id of ['retry','resolve','revoke'])assert.match(text(p.get('email-activity')),new RegExp(id+'@example.test'));
+  rows=[activity('retry','failed',null,{attempts:2})];await p.get('email-refresh').fire('click');assert.match(text(p.get('email-activity')),/retry@example.test/);
+  await p.get('email-activity-clear').fire('click');await p.get('email-activity-show').fire('click');assert.match(text(p.get('email-activity')),/retry@example.test/);
+});
+test('Back Forward restores newer selections, pending recovery and cleared history without writes',async()=>{
+  const rows=[activity('old','failed')],respond=responder({jobs:()=>ok(rows)});
+  const p=page('peers',respond);await tick();p.selects[0].checked=true;await p.selects[0].fire('change');
+  for(const fn of p.window.listeners.pagehide)fn({});
+  const newer=page('peers',respond,p.storage);await tick();await newer.get('email-clear-selection').fire('click');newer.selects[1].checked=true;await newer.selects[1].fire('change');await newer.get('email-activity-clear').fire('click');
+  p.storage.set('awg-email-pending:/private','newer-request');
+  for(const fn of p.window.listeners.pageshow)fn({persisted:true});await tick();
+  assert.equal(p.selects[0].checked,false);assert.equal(p.selects[1].checked,true);assert.equal(p.get('email-pending-check').hidden,false);
+  assert.equal(p.storage.get('awg-email-pending:/private'),'newer-request');assert.doesNotMatch(text(p.get('email-activity')),/old@example.test/);
+  assert.equal(p.requests.filter(r=>r.body).length,0);
+});
+test('old send response after BFCache return cannot clear a newer pending request',async()=>{
+  let release;const p=page('peers',responder({send:()=>new Promise(r=>release=r)}));await tick();p.selects[0].checked=true;await p.selects[0].fire('change');await p.get('email-bulk-send').fire('click');const work=p.get('email-confirm').fire('click');await tick();
+  for(const fn of p.window.listeners.pagehide)fn({});
+  p.storage.set('awg-email-pending:/private','newer-request');
+  for(const fn of p.window.listeners.pageshow)fn({persisted:true});await tick();release(ok(['job-a']));await work;
+  assert.equal(p.storage.get('awg-email-pending:/private'),'newer-request');assert.equal(p.selects[0].checked,true);
+});
+test('activity uses server acceptance time and expires only successful rows at ten minutes',async()=>{
+  const clock={now:1700000599000};const rows=[activity('success','accepted',1700000000),activity('unknown','unknown'),activity('failed','failed'),activity('queued','queued'),activity('legacy','accepted'),activity('revoked','accepted',1700000000,{invalidated_at:1700000010})];
+  const p=page('peers',responder({jobs:()=>ok(rows)}),new Map(),'',clock);await tick();
+  assert.match(text(p.get('email-activity')),/success@example.test/);
+  const time=p.all.find(e=>e.id==='time' && e.dateTime==='2023-11-14T22:13:20.000Z');assert.ok(time);assert.ok(time.textContent);
+  clock.now+=1000;const timer=[...p.timers.values()].find(t=>t.ms===1000);assert.ok(timer);await timer.fn();await tick();
+  assert.doesNotMatch(text(p.get('email-activity')),/success@example.test/);
+  for(const id of ['unknown','failed','queued','legacy','revoked'])assert.match(text(p.get('email-activity')),new RegExp(id+'@example.test'));
+  const next=page('peers',responder({jobs:()=>ok(rows)}),p.storage,'',clock);await tick();assert.doesNotMatch(text(next.get('email-activity')),/success@example.test/);
+  assert.equal(p.requests.filter(r=>r.body).length,0);
+});
+test('successful activity can be dismissed and shown without hiding uncertain rows or deleting history',async()=>{
+  const clock={now:1700000010000};const rows=[activity('success','accepted',1700000000),activity('unknown','unknown')];
+  const p=page('peers',responder({jobs:()=>ok(rows)}),new Map(),'',clock);await tick();
+  const dismiss=p.all.find(e=>e.id==='button' && /Dismiss/.test(e.textContent));assert.ok(dismiss);await dismiss.fire('click');
+  assert.doesNotMatch(text(p.get('email-activity')),/success@example.test/);assert.match(text(p.get('email-activity')),/unknown@example.test/);
+  await p.get('email-activity-show').fire('click');assert.match(text(p.get('email-activity')),/success@example.test/);
+  const next=page('peers',responder({jobs:()=>ok(rows)}),p.storage,'',clock);await tick();assert.doesNotMatch(text(next.get('email-activity')),/success@example.test/);
+  assert.equal(p.requests.filter(r=>r.body).length,0);
+});
+test('activity never truncates a pending or unknown item behind twelve successes',async()=>{
+  const rows=[...Array.from({length:12},(_,i)=>activity('ok'+i,'accepted',1700000000)),activity('older-pending','sending'),activity('older-unknown','unknown')];
+  const p=page('peers',responder({jobs:()=>ok(rows)}),new Map(),'',{now:1700000010000});await tick();
+  assert.match(text(p.get('email-activity')),/older-pending@example.test/);assert.match(text(p.get('email-activity')),/older-unknown@example.test/);
+});
+test('older activity response cannot replace newer status and pagehide stops polling',async()=>{
+  let release,calls=0;const p=page('peers',responder({jobs:()=>++calls===1?new Promise(r=>release=r):ok([activity('latest','unknown')])}));await tick();
+  await p.get('email-refresh').fire('click');release(ok([activity('stale','accepted',1700000000)]));await tick();
+  assert.match(text(p.get('email-activity')),/latest@example.test/);assert.doesNotMatch(text(p.get('email-activity')),/stale@example.test/);
+  for(const fn of p.window.listeners.pagehide)fn({});assert.equal(p.timers.size,0);
+});
+test('an uncertain result with a retained timestamp never claims SMTP acceptance or expires',async()=>{
+  const p=page('peers',responder({jobs:()=>ok([activity('uncertain','unknown',1700000000)])}),new Map(),'',{now:1700000600000});await tick();
+  assert.match(text(p.get('email-activity')),/uncertain@example.test/);assert.doesNotMatch(text(p.get('email-activity')),/SMTP accepted:/);
+});
 
 test('native settings load a redacted profile and Save never invokes Test',async()=>{
   const p=page('settings',responder());await tick();
@@ -221,7 +356,7 @@ test('bulk deletion stops undispatched clients on explicit Stop without claiming
 test('bulk deletion timeout is unknown, releases controls and never dispatches the remainder',async()=>{
   const p=page('peers',async r=>r.url.endsWith('/remove')?new Promise(()=>{}):responder()(r));await tick();
   for(const c of p.selects){c.checked=true;await c.fire('change');}await p.get('peer-bulk-delete').fire('click');p.get('peer-delete-ack').checked=true;const work=p.get('peer-delete-confirm').fire('click');await tick();
-  assert.equal(p.timers.size,1);const timer=[...p.timers.values()][0];assert.equal(timer.ms,30000);timer.fn();await work;
+  const timer=[...p.timers.values()].find(t=>t.ms===30000);assert.ok(timer);timer.fn();await work;
   assert.equal(p.get('peer-delete-cancel').disabled,false);assert.match(text(p.get('peer-delete-list')),/unknown/i);assert.equal(p.requests.filter(r=>r.url.endsWith('/remove')).length,1);
   assert.ok(p.requests.find(r=>r.url.endsWith('/remove')).options.signal.aborted);assert.equal(p.get('email-selection-count').textContent,'2 selected');
 });

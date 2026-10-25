@@ -278,3 +278,27 @@ recipient must be explicitly verified in that channel, not inferred from an emai
 display name or phone number. Each channel needs recipient preview, explicit
 confirmation, honest acceptance/retry semantics and credential protection. No
 messenger framework, bot, account, API key or external call is implemented here.
+
+### Bulk selection and recent activity
+
+After a confirmed bulk send is queued, only its eligible, unchanged selections
+are cleared. Skipped peers, failed or uncertain requests, and peers selected again
+after confirmation remain selected. Cancel preserves the selection. Bulk deletion
+keeps its existing per-client outcome behavior described above.
+
+Recent email activity displays local-device timestamps. Migration 0014 adds a
+nullable `accepted_at`, recorded in the transaction that stores SMTP acceptance.
+It is not an inbox-delivery timestamp. No completion time is backfilled for older
+records. Successful, non-invalidated entries hide ten minutes after acceptance;
+pending, failed, unknown and invalidated entries do not automatically expire.
+Legacy successes without a completion time remain until dismissed.
+
+**Clear history** hides the currently loaded completed entries, including failed
+and terminal unknown results, in this browser tab. Active queued/sending work
+remains visible. Clearing never deletes database history, changes links or tokens,
+retries a send, or clears unresolved-request recovery. A changed result, retry or
+revocation reappears; new operations are never covered by an earlier clear.
+**Show hidden history** reveals cleared or expired entries again. These display
+preferences survive reload and Back/Forward in the same tab (up to 500 saved
+dismissals); the existing latest 200-job API window remains unchanged. Activity
+refreshes at most once a minute while visible, with local hiding at expiry.

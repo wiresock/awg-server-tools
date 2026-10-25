@@ -4996,7 +4996,7 @@ fn render_peer_list_inner(
     buf.push_str(&format!(r#"<section id="peer-email-tools">
 <input type="hidden" id="email-base" value="{base}"><input type="hidden" id="email-csrf" value="{csrf}">
 <p id="email-readiness" class="meta">Loading email readiness…</p><a href="{base}/admin/delivery">Settings</a>
-<div class="email-toolbar"><label><input id="email-select-all" type="checkbox">Select all (up to 50)</label><span id="email-selection-count">0 selected</span><details class="email-actions"><summary>Bulk actions</summary><button id="email-bulk-send" type="button" disabled>Send configs by email</button><button id="peer-bulk-delete" type="button" class="btn-danger" disabled>Delete selected peers</button><button id="email-clear-selection" type="button">Clear selection</button></details></div>
+<div class="email-toolbar"><label><input id="email-select-all" type="checkbox">Select all (up to 50)</label><span id="email-selection-count">0 selected</span><details class="email-actions email-bulk-actions"><summary>Bulk actions</summary><div class="email-bulk-buttons"><div class="email-bulk-primary"><button id="email-bulk-send" type="button" disabled>Send configs by email</button><button id="email-clear-selection" type="button">Clear selection</button></div><div class="email-bulk-danger"><button id="peer-bulk-delete" type="button" class="btn-danger" disabled>Delete selected peers</button></div></div></details></div>
 <p id="email-peer-status" role="status" aria-live="polite"></p><button id="email-pending-check" type="button" hidden>Check previous email request</button></section>"#,base=esc(base),csrf=esc(csrf_token)));
     if peers.is_empty() {
         buf.push_str("<p class=\"empty\">No peers found. The poller may not have run yet.</p>\n");

@@ -155,8 +155,12 @@ impl DeliveryContext {
             .execute(&mut *tx)
             .await?;
         }
-        sqlx::query("UPDATE email_jobs SET state=?,error_code=?,next_attempt_at=? WHERE id=? AND state='sending'")
-            .bind(state).bind(code).bind(self.time()+if current.attempts==1 {60}else{300}).bind(&current.id).execute(&mut *tx).await?;
+        // Persist the observed acceptance time with the result. Repeated completion
+        // and later reads cannot reset the UI's display expiry; other outcomes do
+        // not acquire a success timestamp.
+        let accepted_at = (outcome == Submission::Accepted).then(|| self.time());
+        sqlx::query("UPDATE email_jobs SET state=?,error_code=?,next_attempt_at=?,accepted_at=COALESCE(accepted_at,?) WHERE id=? AND state='sending'")
+            .bind(state).bind(code).bind(self.time()+if current.attempts==1 {60}else{300}).bind(accepted_at).bind(&current.id).execute(&mut *tx).await?;
         tx.commit().await?;
         tracing::info!(job_id=%current.id,status=state,"email submission finished");
         Ok(())

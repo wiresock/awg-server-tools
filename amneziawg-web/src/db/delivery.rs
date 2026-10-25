@@ -51,6 +51,7 @@ pub struct Job {
     pub attempts: i64,
     pub next_attempt_at: i64,
     pub created_at: i64,
+    pub accepted_at: Option<i64>,
     pub error_code: Option<String>,
     pub invalidated_at: Option<i64>,
     pub invalidation_code: Option<String>,
@@ -73,6 +74,33 @@ pub fn matches(job: &Job, snapshot: &crate::delivery::exports::ExportSnapshot) -
 mod tests {
     use crate::db::Database;
     use sqlx::Row;
+
+    #[tokio::test]
+    async fn activity_timestamp_upgrade_preserves_legacy_history_without_backfill() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let all = sqlx::migrate!("./migrations");
+        let old = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                all.iter().filter(|m| m.version <= 13).cloned().collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        old.run(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO delivery_clients(id,interface,managed_name,last_public_key) VALUES('legacy','fixture','client','fixture-key')").execute(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO email_jobs(id,client_id,request_id,actor,recipient,mode,formats,binding_version,export_digest,state,next_attempt_at,created_at) VALUES('old','legacy','request','admin','fixture@example.test','direct','[]',1,X'01','accepted',123,100)").execute(&db.pool).await.unwrap();
+        db.migrate().await.unwrap();
+        let job = super::job(&db.pool, "old").await.unwrap();
+        assert_eq!(job.state, "accepted");
+        assert_eq!(job.created_at, 100);
+        assert_eq!(job.accepted_at, None);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM email_jobs")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap(),
+            1
+        );
+    }
 
     #[tokio::test]
     async fn panel_settings_upgrade_does_not_import_credentials() {

@@ -28,6 +28,43 @@ impl Ownership for FixtureOwnership {
     }
 }
 struct Accept;
+
+#[tokio::test]
+async fn delivery_acceptance_timestamp_is_durable_and_not_invented_for_other_outcomes() {
+    for outcome in [
+        Submission::Accepted,
+        Submission::DefinitePermanent,
+        Submission::Unknown,
+    ] {
+        let f = Fixture::new().await;
+        let id = f.queue(Mode::Direct).await;
+        let admitted = f.ctx.admit(&id).await.unwrap();
+        let before = f.ctx.time();
+        f.ctx.complete(&admitted, outcome).await.unwrap();
+        let value =
+            serde_json::to_value(delivery::job(&f.ctx.source.db.pool, &id).await.unwrap()).unwrap();
+        if outcome == Submission::Accepted {
+            let at = value["accepted_at"]
+                .as_i64()
+                .expect("SMTP acceptance time must be persisted and exposed");
+            assert!(at >= before && at <= f.ctx.time());
+            f.ctx
+                .complete(&admitted, Submission::Accepted)
+                .await
+                .unwrap();
+            let reread = serde_json::to_value(f.ctx.jobs().await.unwrap().pop().unwrap()).unwrap();
+            assert_eq!(
+                reread["accepted_at"], at,
+                "a later read/completion must not reset display expiry"
+            );
+        } else {
+            assert!(
+                value["accepted_at"].is_null(),
+                "failure/unknown must not acquire a success time"
+            );
+        }
+    }
+}
 pub(crate) fn runtime_mut(
     ctx: &mut Arc<DeliveryContext>,
 ) -> &mut super::runtime::RuntimeConfiguration {
