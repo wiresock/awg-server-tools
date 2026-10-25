@@ -203,6 +203,9 @@ impl DeliveryContext {
         Ok(())
     }
     pub async fn run(self: Arc<Self>) {
+        if self.startup_ready().is_err() {
+            return;
+        }
         let mut purge_at = 0;
         loop {
             if self.enabled().is_err() {

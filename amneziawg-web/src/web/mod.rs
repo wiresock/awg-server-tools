@@ -1445,6 +1445,7 @@ fn build_router_state(state: AppState) -> Router {
         .delivery
         .as_ref()
         .filter(|_| state.auth.enabled && delivery_base_path(&base_path, true).is_ok())
+        .filter(|ctx| ctx.startup_ready().is_ok())
         .map(|ctx| delivery_public::router(ctx.clone()));
 
     // Protected routes – all require a valid session.
@@ -2707,6 +2708,7 @@ async fn page_peer_list(
         show_archived,
         monitoring_only.as_deref(),
         &state.base_path,
+        state.auth.enabled,
     ))
     .into_response())
 }
@@ -2739,6 +2741,7 @@ async fn page_peer_detail(
                 &events,
                 monitoring_only.as_deref(),
                 &state.base_path,
+                state.auth.enabled,
             );
             if state.auth.enabled {
                 if let Some(delivery) = &state.delivery {
@@ -2951,6 +2954,7 @@ async fn post_peer_edit(
                     &message,
                     Some(&reason),
                     &state.base_path,
+                    state.auth.enabled,
                 )),
             )
                 .into_response());
@@ -3699,6 +3703,7 @@ async fn post_add_user_form(
             &message,
             None,
             &state.base_path,
+            state.auth.enabled,
         ))
         .into_response());
     }
@@ -3726,6 +3731,7 @@ async fn post_add_user_form(
             &reason,
             Some(&reason),
             &state.base_path,
+            state.auth.enabled,
         ))
         .into_response());
     }
@@ -3753,6 +3759,7 @@ async fn post_add_user_form(
                 &message,
                 None,
                 &state.base_path,
+                state.auth.enabled,
             ))
             .into_response());
         }
@@ -3771,6 +3778,7 @@ async fn post_add_user_form(
                 &message,
                 None,
                 &state.base_path,
+                state.auth.enabled,
             ))
             .into_response());
         }
@@ -3820,6 +3828,7 @@ async fn post_add_user_form(
                 &msg,
                 None,
                 &state.base_path,
+                state.auth.enabled,
             ))
             .into_response())
         }
@@ -3835,6 +3844,7 @@ async fn post_add_user_form(
                 msg,
                 None,
                 &state.base_path,
+                state.auth.enabled,
             ))
             .into_response())
         }
@@ -3851,6 +3861,7 @@ async fn post_add_user_form(
                 &message,
                 None,
                 &state.base_path,
+                state.auth.enabled,
             ))
             .into_response())
         }
@@ -3868,6 +3879,7 @@ async fn post_add_user_form(
                 message,
                 None,
                 &state.base_path,
+                state.auth.enabled,
             ))
             .into_response())
         }
@@ -3885,6 +3897,7 @@ async fn post_add_user_form(
                 &message,
                 None,
                 &state.base_path,
+                state.auth.enabled,
             ))
             .into_response())
         }
@@ -3949,6 +3962,7 @@ async fn post_remove_user_form(
                 &message,
                 Some(&reason),
                 &state.base_path,
+                state.auth.enabled,
             )),
         )
             .into_response());
@@ -3969,6 +3983,7 @@ async fn post_remove_user_form(
             &message,
             None,
             &state.base_path,
+            state.auth.enabled,
         ))
         .into_response());
     }
@@ -4018,6 +4033,7 @@ async fn post_remove_user_form(
                 message,
                 None,
                 &state.base_path,
+                state.auth.enabled,
             ))
             .into_response())
         }
@@ -4782,6 +4798,7 @@ fn render_peer_list(
     show_archived: bool,
     monitoring_only: Option<&str>,
     base: &str,
+    email_available: bool,
 ) -> String {
     render_peer_list_inner(
         peers,
@@ -4793,6 +4810,7 @@ fn render_peer_list(
         show_archived,
         monitoring_only,
         base,
+        email_available,
     )
 }
 
@@ -4803,6 +4821,7 @@ fn render_peer_list_with_error(
     error: &str,
     monitoring_only: Option<&str>,
     base: &str,
+    email_available: bool,
 ) -> String {
     render_peer_list_inner(
         peers,
@@ -4814,6 +4833,7 @@ fn render_peer_list_with_error(
         false,
         monitoring_only,
         base,
+        email_available,
     )
 }
 
@@ -4930,6 +4950,7 @@ fn render_peer_list_inner(
     show_archived: bool,
     monitoring_only: Option<&str>,
     base: &str,
+    email_available: bool,
 ) -> String {
     let mut buf = html_head("Peers", base);
     let now = Utc::now();
@@ -4951,7 +4972,7 @@ fn render_peer_list_inner(
     let add_user = if monitoring_only.is_some() {
         String::new()
     } else {
-        render_add_user_panel(base, csrf_token, error)
+        render_add_user_panel(base, csrf_token, error, email_available)
     };
     buf.push_str(&format!(
         r#"<header class="page-head">
@@ -4994,11 +5015,29 @@ fn render_peer_list_inner(
     buf.push_str("<div class=\"workspace\">\n");
     buf.push_str(&server_tools);
     buf.push_str("<div class=\"workspace-main\">\n");
-    buf.push_str(&format!(r#"<section id="peer-email-tools">
+    let email_readiness = if email_available {
+        format!(
+            r#"<p id="email-readiness" class="meta">Loading email readiness…</p><a href="{}/admin/delivery">Settings</a>"#,
+            esc(base)
+        )
+    } else {
+        String::new()
+    };
+    let email_send = if email_available {
+        r#"<button id="email-bulk-send" type="button" disabled>Send configs by email</button>"#
+    } else {
+        ""
+    };
+    let email_pending = if email_available {
+        r#"<button id="email-pending-check" type="button" hidden>Check previous email request</button>"#
+    } else {
+        ""
+    };
+    buf.push_str(&format!(r#"<section id="peer-email-tools" data-email-available="{email_available}">
 <input type="hidden" id="email-base" value="{base}"><input type="hidden" id="email-csrf" value="{csrf}">
-<p id="email-readiness" class="meta">Loading email readiness…</p><a href="{base}/admin/delivery">Settings</a>
-<div class="email-toolbar"><label><input id="email-select-all" type="checkbox">Select all (up to 50)</label><span id="email-selection-count">0 selected</span><details class="email-actions email-bulk-actions"><summary>Bulk actions</summary><div class="email-bulk-buttons"><div class="email-bulk-primary"><button id="email-bulk-send" type="button" disabled>Send configs by email</button><button id="email-clear-selection" type="button">Clear selection</button></div><div class="email-bulk-danger"><button id="peer-bulk-delete" type="button" class="btn-danger" disabled>Delete selected peers</button></div></div></details></div>
-<p id="email-peer-status" role="status" aria-live="polite"></p><button id="email-pending-check" type="button" hidden>Check previous email request</button></section>"#,base=esc(base),csrf=esc(csrf_token)));
+{email_readiness}
+<div class="email-toolbar"><label><input id="email-select-all" type="checkbox">Select all (up to 50)</label><span id="email-selection-count">0 selected</span><details class="email-actions email-bulk-actions"><summary>Bulk actions</summary><div class="email-bulk-buttons"><div class="email-bulk-primary">{email_send}<button id="email-clear-selection" type="button">Clear selection</button></div><div class="email-bulk-danger"><button id="peer-bulk-delete" type="button" class="btn-danger" disabled>Delete selected peers</button></div></div></details></div>
+<p id="email-peer-status" role="status" aria-live="polite"></p>{email_pending}</section>"#,base=esc(base),csrf=esc(csrf_token)));
     if peers.is_empty() {
         buf.push_str("<p class=\"empty\">No peers found. The poller may not have run yet.</p>\n");
     } else {
@@ -5042,7 +5081,7 @@ fn render_peer_list_inner(
                 ""
             };
             buf.push_str(&format!(
-                "<tr{row_class}><td data-label=\"Select\"><input type=\"checkbox\" data-email-select=\"{peer_id}\" data-peer-key=\"{peer_key}\" data-peer-name=\"{peer_name}\" aria-label=\"Select {peer_name}\"></td><td data-label=\"Name\">{name_link}<span class=\"email-readiness\" data-email-readiness=\"{peer_id}\"></span></td>\
+                "<tr{row_class}><td data-label=\"Select\"><input type=\"checkbox\" data-email-select=\"{peer_id}\" data-peer-key=\"{peer_key}\" data-peer-name=\"{peer_name}\" aria-label=\"Select {peer_name}\"></td><td data-label=\"Name\">{name_link}{email_status}</td>\
                  <td data-label=\"Connection\">{conn}</td><td data-label=\"Identity\">{ident}</td>\
                  <td data-label=\"Endpoint\">{endpoint}</td>\
                  <td class=\"comment-cell\" data-label=\"Comment\">{comment}</td>\
@@ -5050,6 +5089,7 @@ fn render_peer_list_inner(
                  <td data-label=\"Last handshake\">{handshake}</td>\
                  <td class=\"num\" data-label=\"RX\">{rx}</td>\
                  <td class=\"num\" data-label=\"TX\">{tx}</td></tr>\n",
+                email_status=if email_available {format!(r#"<span class="email-readiness" data-email-readiness="{}"></span>"#, p.id)} else {String::new()},
                 peer_id=p.id,
                 peer_name=esc(&p.name),
                 peer_key=peer_identity_digest(&p.public_key),
@@ -5067,12 +5107,36 @@ fn render_peer_list_inner(
     }
     buf.push_str("</div>\n");
     buf.push_str("</div>\n");
-    buf.push_str(&format!(include_str!("peer_email.html"), base = esc(base)));
+    let peer_tools = format!(include_str!("peer_email.html"), base = esc(base));
+    if email_available {
+        buf.push_str(&peer_tools);
+    } else {
+        buf.push_str(
+            peer_tools
+                .split("<!-- email-only -->")
+                .next()
+                .expect("bulk delete template"),
+        );
+        buf.push_str(&format!(r#"<script src="{base}/static/email-common.js" defer></script><script src="{base}/static/peer-email.js" defer></script>"#, base=esc(base)));
+    }
     buf.push_str("</body></html>");
     buf
 }
 
-fn render_add_user_panel(base: &str, csrf_token: &str, error: Option<&str>) -> String {
+fn render_add_user_panel(
+    base: &str,
+    csrf_token: &str,
+    error: Option<&str>,
+    email_available: bool,
+) -> String {
+    let email_field = if email_available {
+        r#"  <label for="add_user_email">Email <span class="meta">(optional; requires panel authentication)</span></label>
+  <input type="email" id="add_user_email" name="email" maxlength="254" autocomplete="off">
+  <p class="meta">Saved as contact metadata. Sending always requires a separate recipient preview and confirmation.</p>
+"#
+    } else {
+        ""
+    };
     let add_user_open = if error.is_some() { " open" } else { "" };
     let add_user_error = error
         .map(|err| format!("<p class=\"error\">Add user failed: {}</p>\n", esc(err)))
@@ -5099,9 +5163,7 @@ fn render_add_user_panel(base: &str, csrf_token: &str, error: Option<&str>) -> S
   <label for="add_user_comment">Comment <span class="meta">(optional)</span></label>
   <textarea id="add_user_comment" name="comment" maxlength="512"
             placeholder="e.g. Primary phone"></textarea>
-  <label for="add_user_email">Email <span class="meta">(optional; requires panel authentication)</span></label>
-  <input type="email" id="add_user_email" name="email" maxlength="254" autocomplete="off">
-  <p class="meta">Saved as contact metadata. Sending always requires a separate recipient preview and confirmation.</p>
+{email_field}
   <label for="add_user_expiration_days">Lifetime in days</label>
   <input type="number" id="add_user_expiration_days" name="expiration_days"
          value="0" min="0" max="36500" step="1" list="expiration_lifetime_presets">
@@ -5233,8 +5295,17 @@ fn render_peer_detail(
     events: &[crate::db::events::EventRow],
     monitoring_only: Option<&str>,
     base: &str,
+    email_available: bool,
 ) -> String {
-    render_peer_detail_inner(dto, csrf_token, events, None, monitoring_only, base)
+    render_peer_detail_inner(
+        dto,
+        csrf_token,
+        events,
+        None,
+        monitoring_only,
+        base,
+        email_available,
+    )
 }
 
 fn render_peer_detail_with_error(
@@ -5244,8 +5315,17 @@ fn render_peer_detail_with_error(
     error: &str,
     monitoring_only: Option<&str>,
     base: &str,
+    email_available: bool,
 ) -> String {
-    render_peer_detail_inner(dto, csrf_token, events, Some(error), monitoring_only, base)
+    render_peer_detail_inner(
+        dto,
+        csrf_token,
+        events,
+        Some(error),
+        monitoring_only,
+        base,
+        email_available,
+    )
 }
 
 fn render_peer_detail_inner(
@@ -5255,6 +5335,7 @@ fn render_peer_detail_inner(
     error: Option<&str>,
     monitoring_only: Option<&str>,
     base: &str,
+    email_available: bool,
 ) -> String {
     let mut buf = html_head(&format!("Peer – {}", dto.name), base);
     let now = Utc::now();
@@ -5286,11 +5367,12 @@ fn render_peer_detail_inner(
         buf.push_str(&with_js_base(include_str!("vpn_uri.html"), base));
     }
 
-    buf.push_str(&format!(
+    if email_available {
+        buf.push_str(&format!(
         "<div class=\"actions\"><a class=\"btn peer-send-email\" href=\"{base}/?send_peer={id}\">Send config by email</a></div>\n",
         id = dto.id,
     ));
-
+    }
     buf.push_str("<div class=\"detail-layout\">\n<table class=\"facts\">\n");
     buf.push_str(&format!(
         "<tr><th>Public key</th><td><code>{}</code></td></tr>\n",
@@ -11348,7 +11430,7 @@ mod tests {
         // Create a temp config file inside the config directory.
         let dir = tempfile::tempdir().unwrap();
         let conf_path = dir.path().join("test-qr.conf");
-        let config = "# Raw QR payload: cafÃ©\r\n[Interface]\r\nAddress = 10.8.0.2/32\r\nMTU = 1380\r\n\r\n[Peer]\r\nPublicKey = SERVER_KEY=\r\nAllowedIPs = 0.0.0.0/0, ::/0";
+        let config = "# Raw QR payload: café\r\n[Interface]\r\nAddress = 10.8.0.2/32\r\nMTU = 1380\r\n\r\n[Peer]\r\nPublicKey = SERVER_KEY=\r\nAllowedIPs = 0.0.0.0/0, ::/0";
         std::fs::write(&conf_path, config).unwrap();
 
         crate::db::peers::apply_config_mapping(
@@ -11909,7 +11991,7 @@ mod tests {
             "/panel#secret",
             "/panel secret",
             "/%2Fpanel",
-            "/Ð¿Ð°Ð½ÐµÐ»ÑŒ",
+            "/панель",
             &format!("/{}", "a".repeat(MAX_BASE_PATH_LEN)),
         ] {
             assert!(normalize_base_path(raw).is_err(), "{raw}");

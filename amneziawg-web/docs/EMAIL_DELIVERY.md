@@ -21,7 +21,10 @@ delivered. No bounce tracking or delivery receipts are provided.
 The **Settings** tab edits host, port, explicit transport security, authentication,
 username, From, optional Reply-to, public HTTPS base and link lifetime. Save and
 Check SMTP and Test email are separate actions. Password starts blank: **Keep** preserves its
-current value, **Replace** requires a new value, and **Clear** removes it. An empty
+current value only for the same SMTP host (case-insensitive), port, TLS mode,
+username and authentication mode. Changing any of those requires **Replace** or
+**Clear** for Save as well as testing, even for a disabled profile. **Replace**
+requires a new value, and **Clear** removes it. An empty
 replacement never silently resets the secret. No saved password is returned to
 the browser or included in API/config exports. Stale saves are rejected by revision;
 an uncertain save requires reloading the durable profile before editing again.
@@ -40,6 +43,21 @@ fails closed rather than treating POSIX mode bits as ACL protection. Legacy env-
 installations keep working before first Save. Backups and old WAL/pages are also
 secret-bearing: Clear removes the active value, not historical copies. Protect and
 retire those copies under the operator's backup policy.
+
+If a saved profile fails the private-storage guard at startup, the peer panel
+continues with email quarantined. No saved secret is read, environment SMTP fallback
+used, transport constructed, worker started or public retrieval route exposed.
+Settings shows a redacted diagnostic and disables Save/Check/Test. The operator must
+repair the storage prerequisite and restart the panel; a page reload or ordinary
+runtime recovery cannot lift this startup block. The application never changes
+permissions automatically. Genuine database, migration and lifecycle-path failures
+remain startup errors. Existing queued state and bindings are left untouched while
+quarantined; a successful restart performs the usual recovery before admission.
+
+With panel authentication disabled, email profiles are not loaded and email actions,
+contact inputs and activity are omitted. Settings explains this prerequisite without
+exposing SMTP data; email APIs still require authentication. Ordinary peer management
+and Bulk Delete remain available under their existing access rules.
 
 **Check SMTP** and **Test email** use the current form without saving it or
 enabling the saved profile. Keep resolves the stored password on the server;

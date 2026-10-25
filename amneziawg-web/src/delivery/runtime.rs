@@ -52,6 +52,7 @@ pub struct SettingsView {
     pub link_enabled: bool,
     pub ttl_seconds: i64,
     pub storage_ready: bool,
+    pub blocked_reason: Option<&'static str>,
 }
 
 impl DeliveryContext {
@@ -77,19 +78,7 @@ impl DeliveryContext {
         // Enable only this transient transport, regardless of the form's
         // persisted sending toggle. The caller has already required admin auth.
         input.enabled = true;
-        let candidate = input.resolve(&before.settings, true)?;
-        // A draft must not turn Keep into credential forwarding. Only explicit
-        // replacement/clearing may test a different server or login identity.
-        if matches!(input.password_action, settings::PasswordAction::Keep)
-            && !before.settings.password.is_empty()
-            && (!candidate.host.eq_ignore_ascii_case(&before.settings.host)
-                || candidate.port != before.settings.port
-                || candidate.tls != before.settings.tls
-                || candidate.username != before.settings.username
-                || candidate.authenticate != before.settings.authenticate)
-        {
-            return Err(DeliveryError("draft_password_scope_changed"));
-        }
+        let candidate = input.resolve_change(&before.settings, true)?;
         let transport = self.transport_factory.build(&candidate)?;
         Ok(Arc::new(RuntimeConfiguration {
             revision,
@@ -100,6 +89,7 @@ impl DeliveryContext {
 
     /// Repeat under admission guards after resolving Keep against a snapshot.
     pub(crate) fn validate_test_revision(&self, revision: i64) -> Result<()> {
+        self.startup_ready()?;
         if self.quarantined.load(Ordering::Acquire) {
             return Err(DeliveryError("delivery_recovery_required"));
         }
@@ -116,14 +106,19 @@ impl DeliveryContext {
         let runtime = self.runtime();
         let s = &runtime.settings;
         SettingsView {
+            blocked_reason: self.startup_blocked,
             revision: runtime.revision,
-            source: if runtime.revision == 0 {
+            source: if self.startup_blocked.is_some() {
+                "unavailable"
+            } else if runtime.revision == 0 {
                 "environment"
             } else {
                 "panel"
             },
             enabled: s.enabled,
-            operational: s.enabled && !self.quarantined.load(Ordering::Acquire),
+            operational: s.enabled
+                && self.startup_ready().is_ok()
+                && !self.quarantined.load(Ordering::Acquire),
             host: s.host.clone(),
             port: s.port,
             tls: s.tls,
@@ -135,13 +130,15 @@ impl DeliveryContext {
             public_base: s.public_base.as_ref().map(|u| u.as_str().to_owned()),
             link_enabled: s.public_base.is_some(),
             ttl_seconds: s.ttl,
-            storage_ready: settings::verify_private_database(&self.source.db.pool).is_ok(),
+            storage_ready: self.startup_ready().is_ok()
+                && settings::verify_private_database(&self.source.db.pool).is_ok(),
         }
     }
 
     // Only called with admission guards held. It does not perform crash recovery
     // on live sending jobs. Missing previously-saved state is not an env fallback.
     async fn reload_configuration(&self, auth_enabled: bool) -> Result<()> {
+        self.startup_ready()?;
         let restored =
             if let Some(saved) = settings::load_saved(&self.source.db.pool, auth_enabled).await? {
                 let transport = self.transport_factory.build(&saved.settings)?;
@@ -187,11 +184,12 @@ impl DeliveryContext {
         auth_enabled: bool,
         admin_base: &str,
     ) -> Result<SettingsView> {
+        self.startup_ready()?;
         let before = self.runtime();
         if before.revision != body.revision {
             return Err(DeliveryError("settings_changed"));
         }
-        let candidate = body.resolve(&before.settings, auth_enabled)?;
+        let candidate = body.resolve_change(&before.settings, auth_enabled)?;
         crate::web::delivery_base_path(
             admin_base,
             candidate.enabled && candidate.public_base.is_some(),

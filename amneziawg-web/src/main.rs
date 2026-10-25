@@ -279,23 +279,9 @@ async fn main() -> anyhow::Result<()> {
     }
     info!(path = %lifecycle_lock_dir.display(), "lifecycle lock directory validated");
 
-    // Recovery and settings invalidation happen before poller/router/worker.
-    let (settings, revision) = match delivery::settings::load_saved(&db.pool, auth.enabled).await? {
-        Some(saved) => (saved.settings, saved.revision),
-        None => (delivery::config::Settings::from_env(auth.enabled)?, 0),
-    };
-    web::delivery_base_path(
-        &base_path,
-        settings.enabled && settings.public_base.is_some(),
-    )
-    .map_err(anyhow::Error::msg)?;
-    let owner = delivery::service::worker_lock(&lifecycle_lock_dir)?;
-    let transport: std::sync::Arc<dyn delivery::smtp::Transport> = if settings.enabled {
-        std::sync::Arc::new(delivery::smtp::Smtp::new(&settings)?)
-    } else {
-        std::sync::Arc::new(delivery::smtp::Disabled)
-    };
-    let delivery = std::sync::Arc::new(delivery::service::DeliveryContext::new(
+    // Core DB/migration/lifecycle failures above remain fatal. Only email's
+    // private-storage refusal is quarantined before any secret/transport load.
+    let delivery = delivery::bootstrap::initialize(
         delivery::exports::ExportSource {
             db: db.clone(),
             directory: config.config_dir.clone(),
@@ -304,13 +290,17 @@ async fn main() -> anyhow::Result<()> {
                 override_name: interface.override_name().map(str::to_owned),
             }),
         },
-        settings,
-        transport,
-        Some(owner),
-        revision,
-    ));
-    delivery.recover().await?;
-    tokio::spawn(delivery.clone().run());
+        auth.enabled,
+        &base_path,
+        || delivery::config::Settings::from_env(auth.enabled),
+        std::sync::Arc::new(delivery::runtime::SmtpFactory),
+    )
+    .await?;
+    if let Some(reason) = delivery.startup_blocked {
+        tracing::warn!(reason, "Email unavailable; repair its prerequisites and restart the panel. Peer management remains available.");
+    } else {
+        tokio::spawn(delivery.clone().run());
+    }
 
     // --- Background poller --------------------------------------------------
     let config_dir = config.config_dir.clone();

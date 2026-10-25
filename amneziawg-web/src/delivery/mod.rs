@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 //! Explicit delivery of immutable, freshly admitted exports. No SMTP under guards.
+pub mod bootstrap;
 pub mod config;
 pub mod exports;
 #[cfg(test)]

@@ -7,20 +7,21 @@
   try {const id=sessionStorage.getItem(testKey);if(id && id.length<=128)pendingTest=id;}catch(_){}
   function rememberTest(id) {pendingTest=id;try{id?sessionStorage.setItem(testKey,id):sessionStorage.removeItem(testKey);}catch(_){}controls();}
   const fields={host:'smtp-host',port:'smtp-port',tls:'smtp-tls',username:'smtp-username',from:'smtp-from',reply_to:'smtp-reply-to',public_base:'smtp-public-base',ttl_seconds:'smtp-ttl'};
+  const blocked=()=>!!settings?.blocked_reason;
   const status=text=>{$('email-settings-status').textContent=text;};
   function controls() {
-    for(const id of [...Object.values(fields),'smtp-enabled','smtp-authenticate','smtp-password-action','smtp-allow-plaintext'])$(id).disabled=saving;
-    $('email-save').disabled=!settings || saving || uncertain || !settings.storage_ready;
+    for(const id of [...Object.values(fields),'smtp-enabled','smtp-authenticate','smtp-password-action','smtp-allow-plaintext'])$(id).disabled=saving || blocked();
+    $('email-save').disabled=blocked() || !settings || saving || uncertain || !settings.storage_ready;
     $('email-reload').disabled=saving || testing;
-    $('email-test-open').disabled=!settings || saving || testing || uncertain || smtpChecking || !!pendingTest;
-    $('email-smtp-check').disabled=!settings || saving || testing || smtpChecking || uncertain;
+    $('email-test-open').disabled=blocked() || !settings || saving || testing || uncertain || smtpChecking || !!pendingTest;
+    $('email-smtp-check').disabled=blocked() || !settings || saving || testing || smtpChecking || uncertain;
     $('smtp-plaintext-warning').hidden=$('smtp-tls').value!=='none';
     $('email-smtp-hint').textContent='Checks the current form: connection, security and authentication. No settings are saved and no message is sent.';
-    $('email-test-check').hidden=!pendingTest;$('email-test-check').disabled=checking;
-    $('email-test-dismiss').hidden=!pendingTest;$('email-test-dismiss').disabled=testing || checking || lastTest?.state==='sending';
-    $('smtp-password').disabled=saving || $('smtp-password-action').value!=='replace';
+    $('email-test-check').hidden=!pendingTest;$('email-test-check').disabled=blocked() || checking;
+    $('email-test-dismiss').hidden=!pendingTest;$('email-test-dismiss').disabled=blocked() || testing || checking || lastTest?.state==='sending';
+    $('smtp-password').disabled=blocked() || saving || $('smtp-password-action').value!=='replace';
     $('smtp-password').required=$('smtp-password-action').value==='replace';
-    $('email-test-confirm').disabled=testing || smtpChecking || checking || !attempt || (!attempt.submitted && (saving || uncertain || attempt.generation!==generation));
+    $('email-test-confirm').disabled=blocked() || testing || smtpChecking || checking || !attempt || (!attempt.submitted && (saving || uncertain || attempt.generation!==generation));
   }
   function invalidateSmtpResult() {
     const node=$('email-smtp-result');
@@ -32,20 +33,20 @@
     settings=s;for(const [key,id] of Object.entries(fields))$(id).value=s[key] ?? '';
     $('smtp-enabled').checked=s.enabled;$('smtp-authenticate').checked=s.authenticate;
     $('smtp-password').value='';$('smtp-password-action').value='keep';dirty=false;uncertain=false;$('smtp-allow-plaintext').checked=false;
-    $('email-credential-state').textContent=s.credentials_present?'A password is stored. It is never returned to this form.':'No password is stored.';
-    $('email-source').textContent=s.source==='environment'?'Source: server environment. Your first Save creates a complete panel override.':'Source: saved panel settings. Environment values are not merged into this profile.';
-    $('email-storage-notice').textContent=s.storage_ready?'':'Saving requires a private database and sidecar files. Ask the operator to check ownership and permissions.';
-    $('email-storage-notice').hidden=s.storage_ready;
-    $('email-connection-state').textContent=s.operational?'Saved profile: email sending enabled.':'Saved profile: email sending disabled or unavailable. You can test the form without enabling it.';
+    $('email-credential-state').textContent=s.blocked_reason?'Stored credentials were not read.':s.credentials_present?'A password is stored. It is never returned to this form.':'No password is stored.';
+    $('email-source').textContent=s.blocked_reason?'Source: unavailable. No SMTP profile or password was loaded.':s.source==='environment'?'Source: server environment. Your first Save creates a complete panel override.':'Source: saved panel settings. Environment values are not merged into this profile.';
+    $('email-storage-notice').textContent=s.blocked_reason?errorText(s.blocked_reason):s.storage_ready?'':'Saving requires a private database and sidecar files. Ask the operator to check ownership and permissions.';
+    $('email-storage-notice').hidden=s.storage_ready && !s.blocked_reason;
+    $('email-connection-state').textContent=s.blocked_reason?'Email is unavailable until the operator repairs its prerequisites and restarts the panel.':s.operational?'Saved profile: email sending enabled.':'Saved profile: email sending disabled or unavailable. You can test the form without enabling it.';
     controls();
   }
   async function load() {
     status('Loading saved settings…');
-    try {fill(await api('settings'));status('Saved settings loaded. Saving never sends a message.');if(pendingTest)await recoverTest();}
+    try {fill(await api('settings'));status(blocked()?errorText(settings.blocked_reason):'Saved settings loaded. Saving never sends a message.');if(pendingTest && !blocked())await recoverTest();}
     catch(e){status(errorText(e));controls();}
   }
   async function recoverTest() {
-    if(!pendingTest || checking)return;checking=true;controls();
+    if(blocked() || !pendingTest || checking)return;checking=true;controls();
     try {
       lastTest=await api('settings/test/'+encodeURIComponent(pendingTest));
       $('email-test-recovery').textContent=lastTest?'Test to '+lastTest.recipient+' — '+statusText(lastTest):'No recorded result yet. The request may still be completing. Check again before starting another test.';
@@ -56,7 +57,7 @@
   }
   $('email-test-check').addEventListener('click',recoverTest);
   $('email-test-dismiss').addEventListener('click',()=>{
-    if(testing || checking || lastTest?.state==='sending')return;
+    if(blocked() || testing || checking || lastTest?.state==='sending')return;
     if((!lastTest || lastTest.state==='unknown') && !confirm('The earlier test may already have been sent. A new test could duplicate it. Finish reviewing this attempt?'))return;
     rememberTest(null);attempt=null;lastTest=null;$('email-test-recovery').textContent='Previous attempt reviewed. A new test always requires a separate confirmation.';
   });
@@ -64,10 +65,11 @@
   form.addEventListener('input',edited);
   form.addEventListener('change',edited);
   $('smtp-password-action').addEventListener('change',()=>{$('smtp-password').value='';edited();});
-  function validDraft(forTest=false) {
+  function validDraft() {
+    if(blocked())return false;
     if(!form.reportValidity())return false;
     if($('smtp-tls').value==='none' && !$('smtp-allow-plaintext').checked){status('Read the plaintext warning and explicitly acknowledge it before testing or saving.');return false;}
-    if(forTest && settings.credentials_present && $('smtp-password-action').value==='keep' &&
+    if(settings.credentials_present && $('smtp-password-action').value==='keep' &&
       ($('smtp-host').value.trim().toLowerCase()!==settings.host.toLowerCase() || Number($('smtp-port').value)!==settings.port || $('smtp-tls').value!==settings.tls || $('smtp-username').value.trim()!==settings.username || $('smtp-authenticate').checked!==settings.authenticate)) {
       status(errorText('draft_password_scope_changed'));return false;
     }
@@ -93,7 +95,7 @@
     finally {delete body.password;saving=false;controls();}
   });
   $('email-smtp-check').addEventListener('click',async()=>{
-    if(!settings || saving || testing || smtpChecking || uncertain || !validDraft(true))return;
+    if(blocked() || !settings || saving || testing || smtpChecking || uncertain || !validDraft())return;
     const revision=settings.revision, checkedGeneration=generation, body={revision,draft:draft()};smtpChecking=true;controls();
     const resultNode=$('email-smtp-result');resultNode.dataset.result='pending';resultNode.textContent='Checking the current SMTP form. No settings are saved and no message is being sent.';
     try {
@@ -112,7 +114,7 @@
   wireDialog('email-test-dialog');
   $('email-test-cancel').addEventListener('click',()=>close('email-test-dialog'));
   $('email-test-open').addEventListener('click',()=>{
-    if(!settings || saving || testing || smtpChecking || uncertain || pendingTest || !validDraft(true))return;
+    if(blocked() || !settings || saving || testing || smtpChecking || uncertain || pendingTest || !validDraft())return;
     if(!$('email-test-recipient').reportValidity())return;
     const recipient=$('email-test-recipient').value.trim();if(!recipient)return;
     // Confirmation keeps no password. Intervening edits require a new review.
@@ -125,9 +127,9 @@
     $('email-test-confirm').textContent='Send test email';dialog('email-test-dialog',$('email-test-open'));controls();
   });
   $('email-test-confirm').addEventListener('click',async()=>{
-    if(testing || smtpChecking || checking || !attempt)return;
+    if(blocked() || testing || smtpChecking || checking || !attempt)return;
     if(attempt.submitted){await recoverTest();return;}
-    if(saving || uncertain || attempt.generation!==generation || attempt.revision!==settings.revision || !validDraft(true))return;
+    if(saving || uncertain || attempt.generation!==generation || attempt.revision!==settings.revision || !validDraft())return;
     const body={revision:attempt.revision,recipient:attempt.recipient,request_id:attempt.request_id,draft:draft()};
     attempt.submitted=true;rememberTest(attempt.request_id);testing=true;controls();$('email-test-status').textContent='Submitting test email.';
     try {
@@ -136,7 +138,7 @@
     } catch(e){
       // These errors precede admission. A lost response or uncertain commit
       // still uses GET-only recovery and never automatically submits again.
-      const rejected=['draft_password_scope_changed','settings_changed','invalid_test_request','invalid_smtp_host','invalid_smtp_port','invalid_smtp_tls','tls_required','smtp_credentials_required','invalid_smtp_username','invalid_password_action','invalid_public_base','invalid_ttl','invalid_email','plaintext_ack_required','plaintext_auth_forbidden','test_limit','delivery_disabled','delivery_recovery_required','authentication_required','csrf_required'].includes(e.code);
+      const rejected=['draft_password_scope_changed','settings_changed','invalid_test_request','invalid_smtp_host','invalid_smtp_port','invalid_smtp_tls','tls_required','smtp_credentials_required','invalid_smtp_username','invalid_password_action','invalid_public_base','invalid_ttl','invalid_email','plaintext_ack_required','plaintext_auth_forbidden','test_limit','delivery_disabled','delivery_recovery_required','email_storage_restart_required','email_requires_auth','authentication_required','csrf_required'].includes(e.code);
       if(rejected){rememberTest(null);attempt=null;lastTest=null;$('email-test-status').textContent=errorText(e)+' No message was submitted. Correct the form and confirm a new test.';}
       else {$('email-test-status').textContent=errorText(e)+' Check the existing attempt; it will not be sent again.';$('email-test-confirm').textContent='Check test status';}
     }

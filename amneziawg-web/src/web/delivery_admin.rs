@@ -42,10 +42,12 @@ pub(super) fn routes() -> Router<AppState> {
         }))
 }
 fn ctx(state: &AppState) -> Result<&Arc<DeliveryContext>, DeliveryError> {
-    state
+    let context = state
         .delivery
         .as_ref()
-        .ok_or(DeliveryError("delivery_unavailable"))
+        .ok_or(DeliveryError("delivery_unavailable"))?;
+    context.startup_ready()?;
+    Ok(context)
 }
 fn authorize(
     state: &AppState,
@@ -204,6 +206,13 @@ async fn page(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Html<String>, DeliveryError> {
+    if !state.auth.enabled {
+        let mut html = html_head("Settings", &state.base_path);
+        let nav = nav_bar_section(&state.base_path, "", true);
+        html.push_str(nav.split("<script>").next().unwrap_or(&nav));
+        html.push_str("<main><h1>Settings</h1><section class=\"email-card\"><h2>Email requires panel authentication</h2><p>Email settings, recipients and sending are unavailable while panel authentication is disabled. Ask the operator to enable panel authentication and restart the panel before using email. Peer management remains available.</p></section></main></body></html>");
+        return Ok(Html(html));
+    }
     authorize(&state, &headers, false)?;
     let csrf = session_csrf_from_headers(&state, &headers);
     let mut html = html_head("Settings", &state.base_path);
@@ -273,7 +282,13 @@ async fn settings(
     headers: HeaderMap,
 ) -> Result<Json<delivery::runtime::SettingsView>, DeliveryError> {
     authorize(&state, &headers, false)?;
-    Ok(Json(ctx(&state)?.settings_view()))
+    Ok(Json(
+        state
+            .delivery
+            .as_ref()
+            .ok_or(DeliveryError("delivery_unavailable"))?
+            .settings_view(),
+    ))
 }
 async fn save_settings(
     State(state): State<AppState>,
@@ -668,6 +683,188 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+    #[tokio::test]
+    async fn review_startup_block_retains_peer_routes_and_redacted_settings_only() {
+        let mut f = Fixture::new().await;
+        let source = crate::delivery::exports::ExportSource {
+            db: f.ctx.source.db.clone(),
+            directory: f.directory.path().into(),
+            lock_directory: f.directory.path().into(),
+            ownership: f.ctx.source.ownership.clone(),
+        };
+        f.ctx =
+            crate::delivery::bootstrap::blocked(source, "email_storage_restart_required").unwrap();
+        let state = panel_state(&f);
+        let session = generate_session_id();
+        add_session(&state.sessions, session.clone());
+        let app = super::super::build_router_state(state);
+        for path in ["/", "/admin/delivery"] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("cookie", format!("awg_session={session}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{path}");
+        }
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/admin/delivery/settings")
+                    .header("authorization", "Bearer fixture")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let view: serde_json::Value =
+            serde_json::from_slice(&to_bytes(res.into_body(), 8192).await.unwrap()).unwrap();
+        assert_eq!(view["blocked_reason"], "email_storage_restart_required");
+        assert_eq!(view["host"], "");
+        assert_eq!(view["credentials_present"], false);
+        assert!(view.get("password").is_none());
+        for path in ["/api/admin/delivery/contacts", "/api/admin/delivery/jobs"] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("authorization", "Bearer fixture")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::CONFLICT);
+        }
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/delivery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            res.status(),
+            StatusCode::OK,
+            "public retrieval must not mount while blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_auth_disabled_settings_explains_and_peer_ui_keeps_bulk_delete() {
+        let f = Fixture::new().await;
+        let mut state = panel_state(&f);
+        state.auth.enabled = false;
+        let app = super::super::build_router_state(state);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/delivery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = String::from_utf8(
+            to_bytes(response.into_body(), 100_000)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("Email requires panel authentication"));
+        assert!(!html.contains("smtp-password"));
+        assert!(!html.contains("email-settings.js"));
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = String::from_utf8(
+            to_bytes(response.into_body(), 500_000)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("peer-bulk-delete"));
+        assert!(!html.contains("id=\"email-bulk-send\""));
+        assert!(!html.contains("Recent email activity"));
+        assert!(!html.contains("Loading email readiness"));
+        assert!(!html.contains("add_user_email"));
+        let peer_id: i64 = sqlx::query_scalar("SELECT id FROM peers LIMIT 1")
+            .fetch_one(&f.ctx.source.db.pool)
+            .await
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/peers/{peer_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = String::from_utf8(
+            to_bytes(response.into_body(), 500_000)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            !html.contains("peer-send-email"),
+            "auth-disabled detail must omit unavailable email action"
+        );
+        assert!(!html.contains("id=\"peer-email\""));
+        let row = crate::db::peers::find_visible_by_id(&f.ctx.source.db.pool, peer_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let dto = super::super::peer_row_to_detail(row, vec![]);
+        for email_available in [false, true] {
+            let error_html = super::super::render_peer_detail_with_error(
+                &dto,
+                "",
+                &[],
+                "Fixture validation error",
+                None,
+                "",
+                email_available,
+            );
+            assert_eq!(error_html.contains("peer-send-email"), email_available);
+            assert!(error_html.contains("Fixture validation error"));
+            assert!(error_html.contains("<h2>Edit peer</h2>"));
+            assert!(error_html.contains("aria-label=\"Peer details\""));
+        }
+        for path in [
+            "/api/admin/delivery/settings",
+            "/api/admin/delivery/contacts",
+            "/api/admin/delivery/jobs",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_ne!(response.status(), StatusCode::OK);
+        }
     }
     #[tokio::test]
     async fn panel_connection_check_has_explicit_authenticated_route() {

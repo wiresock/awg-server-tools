@@ -39,6 +39,8 @@ pub struct SkippedItem {
     pub reason: String,
 }
 pub struct DeliveryContext {
+    /// Immutable startup block: only a clean process restart may re-admit settings.
+    pub(crate) startup_blocked: Option<&'static str>,
     pub(crate) admission_budget: std::time::Duration,
     pub(crate) quarantined: std::sync::atomic::AtomicBool,
     pub source: ExportSource,
@@ -59,6 +61,7 @@ impl DeliveryContext {
         revision: i64,
     ) -> Self {
         Self {
+            startup_blocked: None,
             admission_budget: std::time::Duration::from_secs(2),
             quarantined: std::sync::atomic::AtomicBool::new(false),
             source,
@@ -79,6 +82,7 @@ impl DeliveryContext {
         (self.clock)()
     }
     pub fn enabled(&self) -> Result<()> {
+        self.startup_ready()?;
         if self.quarantined.load(std::sync::atomic::Ordering::Acquire) {
             return Err(DeliveryError("delivery_recovery_required"));
         }
@@ -89,9 +93,15 @@ impl DeliveryContext {
         }
     }
     pub async fn guards(&self) -> Result<AdmissionGuards> {
+        self.startup_ready()?;
         AdmissionGuards::acquire(&self.source.lock_directory).await
     }
+    pub fn startup_ready(&self) -> Result<()> {
+        self.startup_blocked
+            .map_or(Ok(()), |code| Err(DeliveryError(code)))
+    }
     pub async fn recover(&self) -> Result<()> {
+        self.startup_ready()?;
         let mut tx = self.source.db.pool.begin().await?;
         sqlx::query("UPDATE email_jobs SET state='unknown',error_code='restart_unknown' WHERE state='sending'").execute(&mut *tx).await?;
         sqlx::query("UPDATE delivery_grants SET revoked_at=COALESCE(revoked_at,?) WHERE job_id IN (SELECT id FROM email_jobs WHERE state='unknown')").bind(self.time()).execute(&mut *tx).await?;

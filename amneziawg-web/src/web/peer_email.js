@@ -2,6 +2,7 @@
   'use strict';
   const {$,base,api,node,errorText,statusText,dialog,close,wireDialog}=window.AwgEmail;
   if(!$('peer-email-tools'))return;
+  const emailAvailable=$('peer-email-tools').dataset.emailAvailable!=='false';
   const checks=[...document.querySelectorAll('[data-email-select]')], formats=[...document.querySelectorAll('[data-email-format]')];
   const deleted=new Set();let deleting=false,deleteDone=false,deleteInterrupted=false,deleteItems=[];
   const liveChecks=()=>checks.filter(c=>!deleted.has(c.dataset.emailSelect));
@@ -26,7 +27,7 @@
   try {const stored=JSON.parse(sessionStorage.getItem(storageKey)||'[]');for(const id of stored)if(checks.some(c=>c.dataset.emailSelect===String(id)))selected.add(String(id));}catch(_){}
   function selection() {
     for(const c of checks){c.checked=selected.has(c.dataset.emailSelect);c.disabled=deleting || deleted.has(c.dataset.emailSelect);}
-    $('email-selection-count').textContent=selected.size+' selected';$('email-bulk-send').disabled=selected.size===0 || deleting;$('peer-bulk-delete').disabled=selected.size===0 || deleting;
+    $('email-selection-count').textContent=selected.size+' selected';if(emailAvailable)$('email-bulk-send').disabled=selected.size===0 || deleting;$('peer-bulk-delete').disabled=selected.size===0 || deleting;
     $('email-select-all').disabled=deleting;$('email-clear-selection').disabled=deleting;
     $('email-select-all').checked=liveChecks().length>0 && selected.size===liveChecks().length;
     $('email-select-all').indeterminate=selected.size>0 && selected.size<liveChecks().length;
@@ -40,7 +41,7 @@
       const c=contactFor(e.dataset.emailReadiness);
       e.textContent=!c?'No current contact binding':!c.email?'Add email address':c.email;
     }
-    $('email-readiness').textContent=settings?.operational?'Email enabled · open a peer or select peers to send':'Email is not ready. Open Settings to configure it.';
+    $('email-readiness').textContent=settings?.blocked_reason?errorText(settings.blocked_reason):settings?.operational?'Email enabled · open a peer or select peers to send':'Email is not ready. Open Settings to configure it.';
   }
   let activityRows=[],activityGeneration=0,activityTimer=null,pageHidden=false,pageEpoch=0,showHidden=false,clearingHistory=false,clearGeneration=0;
   const successLifetime=10*60*1000;
@@ -74,11 +75,13 @@
     activityTimer=setTimeout(async()=>{renderActivity();if(document.hidden){scheduleActivity();return;}try{await jobs();}catch(_){report('Activity refresh failed. Use Refresh status to try again.');}},Math.max(100,delay));
   }
   async function jobs() {
+    if(!emailAvailable)return;
     if(clearingHistory)return;
     const current=++activityGeneration;
     try {const rows=await api('jobs');if(current!==activityGeneration || pageHidden)return;activityRows=rows;renderActivity();}
     finally {if(current===activityGeneration)scheduleActivity();}
   }
+  if(emailAvailable) {
   $('email-activity-show').addEventListener('click',()=>{showHidden=!showHidden;renderActivity();scheduleActivity();});
   $('email-activity-clear').addEventListener('click',async()=>{
     if(clearingHistory || !activityRows.some(terminal) || !confirm('Clear completed email activity for all administrators? Active sends and valid links remain. Unknown results stay uncertain; clearing never permits an automatic resend.'))return;
@@ -103,12 +106,13 @@
       }
     }
   });
+  }
   async function load() {
     const current=++loading;
     try {
       const [s,c]=await Promise.all([api('settings'),api('contacts')]);if(current!==loading)return;
       settings=s;contacts=c;ready();selection();await jobs();
-    } catch(e){report(errorText(e));}
+    } catch(e){$('email-readiness').textContent=errorText(e);report(errorText(e));}
   }
   for(const c of checks)c.addEventListener('change',()=>{
     if(deleting)return;
@@ -158,6 +162,18 @@
     report($('peer-delete-status').textContent);$('peer-delete-cancel').focus();
     try{await jobs();}catch(_){}
   });
+  // Email is unavailable without panel authentication. Keep peer selection and
+  // deletion independent; do not read/clear pending email-operation bookkeeping.
+  if(!emailAvailable) {
+    window.addEventListener('pagehide',()=>{pageHidden=true;deleteInterrupted=true;});
+    window.addEventListener('pageshow',event=>{if(event.persisted){
+      selected.clear();selectionVersions.clear();selectionSerial=0;
+      try {const v=JSON.parse(sessionStorage.getItem(versionsKey)||'null');if(v && Number.isSafeInteger(v.serial) && v.serial>=0 && Array.isArray(v.entries)){selectionSerial=v.serial;for(const [id,n] of v.entries)if(Number.isSafeInteger(n) && n>=0 && n<=selectionSerial)selectionVersions.set(String(id),n);}}catch(_){}
+      try {const ids=JSON.parse(sessionStorage.getItem(storageKey)||'[]');if(Array.isArray(ids))for(const id of ids)if(liveChecks().some(c=>c.dataset.emailSelect===String(id)))selected.add(String(id));}catch(_){}
+      pageHidden=false;selection();
+    }});
+    selection();return;
+  }
   wireDialog('email-send-dialog');wireDialog('email-edit-dialog');
   $('email-send-dialog').addEventListener('close',()=>{invalidate();previewBusy=false;});
   $('email-cancel').addEventListener('click',()=>close('email-send-dialog'));

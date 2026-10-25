@@ -160,6 +160,18 @@ async fn draft_keep_cannot_export_stored_password_to_a_changed_smtp_identity() {
             f.ctx.test_email(test).await,
             Err(DeliveryError("draft_password_scope_changed"))
         ));
+        for enabled in [true, false] {
+            let mut save = draft.clone();
+            save["enabled"] = enabled.into();
+            let result = f
+                .ctx
+                .update_settings(serde_json::from_value(save).unwrap(), true, "".into())
+                .await;
+            assert!(
+                matches!(result, Err(DeliveryError("draft_password_scope_changed"))),
+                "Save must reject changed {field} with Keep even when enabled={enabled}"
+            );
+        }
         assert_eq!(
             builds.load(Ordering::SeqCst),
             0,
@@ -199,6 +211,38 @@ async fn draft_keep_cannot_export_stored_password_to_a_changed_smtp_identity() {
         f.ctx.check_smtp(check).await.unwrap().outcome,
         ConnectionCheck::Connected
     );
+    let view = f
+        .ctx
+        .update_settings(serde_json::from_value(same).unwrap(), true, "".into())
+        .await
+        .unwrap();
+    assert_eq!(view.revision, 2);
+    assert_eq!(
+        settings::load_saved(&f.ctx.source.db.pool, true)
+            .await
+            .unwrap()
+            .unwrap()
+            .settings
+            .password,
+        "stored-private-canary"
+    );
+    for (revision, action, secret) in [
+        (2, "replace", Some("replacement-canary")),
+        (3, "clear", None),
+    ] {
+        let mut next = draft_value(revision, action, secret);
+        next["host"] = format!("explicit-{action}.example.test").into();
+        f.ctx
+            .update_settings(serde_json::from_value(next).unwrap(), true, "".into())
+            .await
+            .unwrap();
+        let loaded = settings::load_saved(&f.ctx.source.db.pool, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.revision, revision + 1);
+        assert_eq!(loaded.settings.password, secret.unwrap_or(""));
+    }
 }
 
 #[tokio::test]

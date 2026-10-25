@@ -20,13 +20,15 @@ function page(kind,responder,storage=new Map(),search="",clock={now:Date.now()})
   };all.push(e);return e;}
   const get=id=>{if(!ids.has(id)) ids.set(id,element(id));return ids.get(id);};
   const selects=[7,8].map(id=>{const e=element();e.dataset.emailSelect=String(id);e.dataset.peerName=id===7?'Alice':'Bob';e.dataset.peerKey='key-'+id;e.closest=()=>({remove(){e.removed=true;}});return e;});
-  const sends=(kind==='peers-no-actions'?[]:[7,8]).map(id=>{const e=element();e.dataset.emailSend=String(id);return e;});
-  const edits=(kind==='peers-no-actions'?[]:[7,8]).map(id=>{const e=element();e.dataset.emailEdit=String(id);return e;});
+  const sends=(['peers-no-actions','peers-auth-disabled'].includes(kind)?[]:[7,8]).map(id=>{const e=element();e.dataset.emailSend=String(id);return e;});
+  const edits=(['peers-no-actions','peers-auth-disabled'].includes(kind)?[]:[7,8]).map(id=>{const e=element();e.dataset.emailEdit=String(id);return e;});
   const readiness=[7,8].map(id=>{const e=element();e.dataset.emailReadiness=String(id);return e;});
   const formats=['conf','qr','vpn-uri'].map(format=>{const e=element();e.dataset.emailFormat=format;e.checked=format==='conf';return e;});
   get('email-base').value='/private';get('email-csrf').value='csrf';get('email-mode').value='direct';get('email-ttl').value='86400';
   get('smtp-password-action').value='keep';get('smtp-password').value='';get('email-test-recipient').value='admin@example.test';
-  document.getElementById=id=>id===(kind==='settings'?'peer-email-tools':'email-settings-form')?null:get(id);
+  const authOffIds=new Set(['peer-email-tools','email-base','email-csrf','email-selection-count','email-select-all','email-clear-selection','email-peer-status','peer-bulk-delete','peer-delete-dialog','peer-delete-title','peer-delete-list','peer-delete-status','peer-delete-ack','peer-delete-cancel','peer-delete-confirm']);
+  if(kind==='peers-auth-disabled')get('peer-email-tools').dataset.emailAvailable='false';
+  document.getElementById=id=>kind==='peers-auth-disabled' && !authOffIds.has(id)?null:id===(kind==='settings'?'peer-email-tools':'email-settings-form')?null:get(id);
   document.createElement=element;
   document.querySelectorAll=selector=>selector.includes('email-select')?selects:selector.includes('email-send')?sends:selector.includes('email-edit')?edits:selector.includes('email-readiness')?readiness:selector.includes('email-format')?(selector.includes(':checked')?formats.filter(e=>e.checked):formats):[];
   const window={listeners:{},addEventListener(k,fn){(this.listeners[k] ||= []).push(fn);}};
@@ -499,7 +501,9 @@ test('plaintext Save requires explicit acknowledgment and never clears a passwor
  const p=page('settings',responder());await tick();p.get('smtp-tls').value='none';await p.get('email-settings-form').fire('change');
  await p.get('email-settings-form').fire('submit');assert.equal(p.requests.filter(r=>r.body).length,0);
  p.get('smtp-allow-plaintext').checked=true;await p.get('email-settings-form').fire('submit');
- const body=p.requests.find(r=>r.body).body;assert.equal(body.allow_plaintext,true);assert.equal(body.password_action,'keep');
+ assert.equal(p.requests.filter(r=>r.body).length,0);assert.equal(p.get('smtp-password-action').value,'keep');
+ p.get('smtp-password-action').value='clear';p.get('smtp-authenticate').checked=false;p.get('smtp-username').value='';await p.get('email-settings-form').fire('submit');
+ const body=p.requests.find(r=>r.body).body;assert.equal(body.allow_plaintext,true);assert.equal(body.password_action,'clear');
 });
 
 test('SMTP check truthfully labels stale results and failures and never checks on reload',async()=>{
@@ -560,6 +564,7 @@ test('draft Keep cannot test another server or identity without explicit replace
  for(const [id,value] of [['smtp-host','other.example.test'],['smtp-port','465'],['smtp-tls','implicit'],['smtp-username','other-user']]){
   const p=page('settings',responder());await tick();p.get(id).value=value;await p.get('email-settings-form').fire('input');
   await p.get('email-smtp-check').fire('click');await p.get('email-test-open').fire('click');
+  await p.get('email-settings-form').fire('submit');
   assert.equal(p.requests.filter(r=>r.body).length,0,id);assert.equal(p.get('email-test-dialog').open,false);
   assert.match(p.get('email-settings-status').textContent,/replace.*clear/i);
   assert.equal(p.get('smtp-password-action').value,'keep');assert.equal(p.get('smtp-password').value,'');
@@ -582,4 +587,28 @@ test('definite draft rejection permits a corrected explicit test without uncerta
  await p.get('email-test-cancel').fire('click');p.get('smtp-password-action').value='replace';await p.get('smtp-password-action').fire('change');p.get('smtp-password').value='replacement';
  await p.get('email-test-open').fire('click');await p.get('email-test-confirm').fire('click');
  assert.equal(calls,2);assert.match(p.get('email-test-status').textContent,/sent.*accepted/i);
+});
+
+test('auth-disabled peers omit email DOM and requests while Bulk Delete retains cancel and selection recovery',async()=>{
+  const storage=new Map([['awg-email-pending:/private','keep-uncertain']]);
+  const p=page('peers-auth-disabled',async r=>{assert.match(r.url,/users\/7\/remove$/);return ok({ok:true});},storage);await tick();
+  assert.equal(p.requests.length,0);p.selects[0].checked=true;await p.selects[0].fire('change');
+  await p.get('peer-bulk-delete').fire('click');assert.equal(p.document.activeElement.id,'peer-delete-cancel');await p.get('peer-delete-cancel').fire('click');
+  assert.equal(p.requests.length,0);assert.equal(p.selects[0].checked,true);
+  for(const fn of p.window.listeners.pagehide)fn({});
+  storage.set('awg-email-selected:/private','["8"]');
+  for(const fn of p.window.listeners.pageshow)fn({persisted:true});
+  assert.equal(p.selects[0].checked,false);assert.equal(p.selects[1].checked,true);
+  p.selects[1].checked=false;await p.selects[1].fire('change');p.selects[0].checked=true;await p.selects[0].fire('change');
+  await p.get('peer-bulk-delete').fire('click');p.get('peer-delete-ack').checked=true;await p.get('peer-delete-ack').fire('change');await p.get('peer-delete-confirm').fire('click');
+  assert.equal(p.requests.length,1);assert.equal(p.get('email-selection-count').textContent,'0 selected');assert.equal(storage.get('awg-email-pending:/private'),'keep-uncertain');
+});
+test('startup email quarantine disables settings operations and explains restart without recovering secrets',async()=>{
+  const storage=new Map([['awg-email-test:/private','old-unknown']]);
+  const p=page('settings',responder({settings:()=>ok({...saved,source:'unavailable',revision:0,enabled:false,operational:false,storage_ready:false,credentials_present:false,host:'',username:'',from:'',blocked_reason:'email_storage_restart_required'})}),storage);await tick();
+  for(const id of ['email-save','email-smtp-check','email-test-open','email-test-check','email-test-dismiss','smtp-password','smtp-host'])assert.equal(p.get(id).disabled,true,id);
+  assert.match(p.get('email-credential-state').textContent,/not read/i);
+  assert.match(p.get('email-storage-notice').textContent,/restart/i);assert.match(p.get('email-connection-state').textContent,/unavailable/i);
+  await p.get('email-settings-form').fire('submit');await p.get('email-smtp-check').fire('click');await p.get('email-test-open').fire('click');
+  assert.deepEqual(p.requests.filter(r=>r.url.includes('/delivery/')).map(r=>r.url),['/private/api/admin/delivery/settings']);assert.equal(storage.get('awg-email-test:/private'),'old-unknown');
 });

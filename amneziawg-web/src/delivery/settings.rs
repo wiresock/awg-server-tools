@@ -40,6 +40,24 @@ pub struct StoredSettings {
 }
 
 impl PanelSettingsInput {
+    /// Resolve an administrator's change without forwarding a retained secret
+    /// to a different server or authentication identity. Persisted-row loading
+    /// uses resolve() instead: loading is not an endpoint change.
+    pub fn resolve_change(&self, previous: &Settings, auth_enabled: bool) -> Result<Settings> {
+        let candidate = self.resolve(previous, auth_enabled)?;
+        if matches!(self.password_action, PasswordAction::Keep)
+            && !previous.password.is_empty()
+            && (!candidate.host.eq_ignore_ascii_case(&previous.host)
+                || candidate.port != previous.port
+                || candidate.tls != previous.tls
+                || candidate.username != previous.username
+                || candidate.authenticate != previous.authenticate)
+        {
+            return Err(DeliveryError("draft_password_scope_changed"));
+        }
+        Ok(candidate)
+    }
+
     pub fn resolve(&self, previous: &Settings, auth_enabled: bool) -> Result<Settings> {
         if self.revision < 0 || self.revision == i64::MAX {
             return Err(DeliveryError("settings_changed"));
@@ -343,11 +361,17 @@ mod tests {
     fn panel_password_keep_replace_clear_are_explicit() {
         let previous = env();
         let mut body = input();
+        assert!(matches!(
+            body.resolve_change(&previous, true),
+            Err(DeliveryError("draft_password_scope_changed"))
+        ));
+        body.host = previous.host.to_uppercase();
+        body.username = previous.username.clone();
         let kept = body
-            .resolve(&previous, true)
+            .resolve_change(&previous, true)
             .expect("keep succeeds without sending a password");
         assert_eq!(kept.password, "old-secret-canary");
-        assert_eq!(kept.host, "new.example.test");
+        assert!(kept.host.eq_ignore_ascii_case("old.example.test"));
         body.password = Some(String::new());
         assert_eq!(
             body.resolve(&previous, true).unwrap().password,
