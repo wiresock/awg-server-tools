@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! Best-effort system version detection for the web panel.
 //!
 //! Probes use fixed binaries and explicit argv arrays only. The web UI treats

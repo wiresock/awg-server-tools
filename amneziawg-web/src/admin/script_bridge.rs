@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! Subprocess bridge for invoking `amneziawg-install.sh` non-interactively.
 //!
 //! This module is the **only** place that spawns the install script.  All

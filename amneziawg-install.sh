@@ -2,6 +2,17 @@
 
 # AmneziaWG server installer
 # https://github.com/wiresock/awg-server-tools
+#
+# SPDX-FileCopyrightText: 2019 angristan
+# SPDX-FileCopyrightText: 2024 Roman Zakharchuk
+# SPDX-FileCopyrightText: 2024 Markus Varckin
+# SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+# SPDX-FileContributor: Denis Glotov
+# SPDX-License-Identifier: MIT
+#
+# Derived from angristan/wireguard-install through RomikB/amneziawg-install
+# and Varckin/amneziawg-install. NOTICE.md in the repository describes the
+# origin of each notice; the MIT license text is in LICENSE.
 
 RED='\033[0;31m'
 ORANGE='\033[0;33m'

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! Background polling task.
 //!
 //! Uses `tokio::time::interval` so that cycles are tick-aligned: the period

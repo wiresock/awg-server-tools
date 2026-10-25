@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+# SPDX-License-Identifier: MIT
+#
 # amneziawg-web-uninstall.sh
 # Companion uninstall script for the amneziawg-web management panel.
 #

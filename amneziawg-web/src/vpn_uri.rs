@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! AmneziaVPN import envelope: Qt qCompress framing, then unpadded Base64URL.
 //! Encode the existing config verbatim so protocol extensions are preserved.
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! Database query layer for the `peers` and `snapshots` tables.
 
 use sqlx::SqlitePool;

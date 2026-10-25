@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+# SPDX-License-Identifier: MIT
+#
 # amneziawg-proxy-install.sh
 # Installer for the amneziawg-proxy UDP obfuscation proxy.
 #

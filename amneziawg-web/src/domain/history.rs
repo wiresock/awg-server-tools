@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
+// SPDX-License-Identifier: MIT
+
 //! Traffic history aggregation.
 //!
 //! Given an ordered sequence of peer snapshots (oldest first), compute

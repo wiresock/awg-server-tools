@@ -1,0 +1,36 @@
+# cargo-deny license policy for the repository's own Rust crates,
+# amneziawg-web and amneziawg-proxy. Run by scripts/check-licensing.sh;
+# see docs/LICENSING.md.
+#
+# The BoringTun artifacts have their own, stricter policy in
+# packaging/boringtun/deny.toml; this file does not apply to them.
+#
+# Only the license check runs here. Advisories, bans and sources are left to
+# the existing workflows so that this check depends on no live database.
+
+[graph]
+# No target filter: the install scripts build natively on whatever architecture
+# the server has, so every platform's dependencies are checked.
+# Dev-dependencies are only used by the test suite and are never part of a
+# built binary.
+exclude-dev = true
+
+[licenses]
+# Permissive licenses compatible with MIT-licensed binaries and with
+# redistribution in proprietary products, provided their notices are kept.
+# A license expression is accepted when it can be satisfied by these, so a
+# dual-licensed crate such as "MIT OR Apache-2.0" passes. Any other license, or
+# a crate whose license cannot be determined, fails the check: review it and
+# add it here deliberately, never by allowing everything.
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+# One policy serves both crates, so an allowance one of them does not use is
+# expected and not reported.
+unused-allowed-license = "allow"

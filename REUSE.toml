@@ -1,0 +1,83 @@
+# REUSE (https://reuse.software) licensing metadata for the files that do not
+# carry an SPDX header of their own. Checked by `reuse lint` in
+# .github/workflows/licensing.yml; see docs/LICENSING.md.
+#
+# Source files that are installed or copied on their own (the installer, the
+# component scripts and the Rust sources) carry their notice inline. The
+# annotations below cover the rest, for one of these reasons:
+#
+# - an inline comment would change behaviour: sqlx checksums the migrations,
+#   the HTML and CSS are served verbatim, JSON and hex fixtures take no
+#   comments, and the BoringTun packaging files are inputs to reproducible,
+#   attested release archives whose bytes must not change;
+# - the file is generated (Cargo.lock) or binary (screenshots);
+# - the file is documentation, CI or test code, where a header adds nothing.
+#
+# Every annotated path was written in this repository by Vadim Smirnov, who
+# does business as WireSock (a trade name, not a separate legal entity), or by
+# coding agents he directed (git history from 2026). Code inherited from the upstream
+# installers lives only in amneziawg-install.sh, which carries all of their
+# notices itself. A file added by someone else must not be covered by these
+# globs: give it its own SPDX-FileCopyrightText header, which takes
+# precedence over this file (precedence = "closest").
+version = 1
+
+[[annotations]]
+path = [
+    ".gitattributes",
+    ".gitignore",
+    "README.md",
+    "NOTICE.md",
+    "CONTRIBUTING.md",
+    "REUSE.toml",
+]
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Vadim Smirnov (doing business as WireSock)"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = [
+    ".github/**",
+    "docs/**",
+    "scripts/**",
+    "tests/**",
+]
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Vadim Smirnov (doing business as WireSock)"
+SPDX-License-Identifier = "MIT"
+
+# The web panel and the proxy. Rust and shell sources carry their own headers;
+# this covers manifests, the generated Cargo.lock, migrations, HTML and CSS
+# templates, systemd units, documentation and screenshots.
+[[annotations]]
+path = [
+    "amneziawg-web/**",
+    "amneziawg-proxy/**",
+]
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Vadim Smirnov (doing business as WireSock)"
+SPDX-License-Identifier = "MIT"
+
+# BoringTun packaging inputs. The third-party licenses themselves ship in each
+# archive's THIRD-PARTY-LICENSES.
+[[annotations]]
+path = "packaging/boringtun/**"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Vadim Smirnov (doing business as WireSock)"
+SPDX-License-Identifier = "MIT"
+
+# Files that quote other parties' copyright notices, or example SPDX tags, as
+# data or documentation. Those quotes are not notices of the files themselves,
+# so this annotation overrides what `reuse` would otherwise read from them. It
+# comes last so that it wins over the globs above.
+[[annotations]]
+path = [
+    "packaging/boringtun/required-notices",
+    "NOTICE.md",
+    "CONTRIBUTING.md",
+    "docs/LICENSING.md",
+    "docs/LICENSING_INVENTORY.md",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Vadim Smirnov (doing business as WireSock)"
+SPDX-License-Identifier = "MIT"

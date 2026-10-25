@@ -17,7 +17,7 @@ for updating Git remotes and verifying older releases.
 
 ## 📖 Background
 
-This project started as a fork of [RomikB/amneziawg-install](https://github.com/RomikB/amneziawg-install). I needed a reliable way to stand up **AmneziaWG 2.0** servers for testing [WireSock Secure Connect](https://www.wiresock.net/), and the upstream script predated the 2.0 release — so I took it and extended it to generate and manage the new 2.0 obfuscation parameters (S3/S4 padding and the H1–H4 header ranges). It now also supports an explicit, capability-checked migration to **AmneziaWG 3.1**, while retaining AWG 2.0 defaults and preserving the mode of existing installations.
+This project started from the [RomikB/amneziawg-install](https://github.com/RomikB/amneziawg-install) installer (see [Credits](#credits) for its full lineage). I needed a reliable way to stand up **AmneziaWG 2.0** servers for testing [WireSock Secure Connect](https://www.wiresock.net/), and the upstream script predated the 2.0 release — so I took it and extended it to generate and manage the new 2.0 obfuscation parameters (S3/S4 padding and the H1–H4 header ranges). It now also supports an explicit, capability-checked migration to **AmneziaWG 3.1**, while retaining AWG 2.0 defaults and preserving the mode of existing installations.
 
 Once the installer was solid, it was hard to stop:
 
@@ -1001,7 +1001,13 @@ Backups are restored automatically if migration fails.
 
 ## Credits
 
-Fork of [RomikB/amneziawg-install](https://github.com/RomikB/amneziawg-install).
+The installer descends from
+[angristan/wireguard-install](https://github.com/angristan/wireguard-install),
+adapted for AmneziaWG in
+[RomikB/amneziawg-install](https://github.com/RomikB/amneziawg-install) and
+copied from there as
+[Varckin/amneziawg-install](https://github.com/Varckin/amneziawg-install), whose
+history this repository continues. See [NOTICE.md](NOTICE.md) for details.
 
 ## Disclaimer
 
@@ -1018,4 +1024,29 @@ are responsible for how you deploy and use it.
 
 ## License
 
-MIT License
+The code and documentation in this repository are licensed under the
+[MIT License](LICENSE), which permits use, modification and redistribution,
+including in commercial and proprietary products, provided the copyright and
+permission notices are kept. It comes without warranty.
+
+- **Original authors keep their rights.** The installer is derived from the
+  projects listed under [Credits](#credits); the notices of angristan, Roman
+  Zakharchuk and Markus Varckin are kept in [`LICENSE`](LICENSE) and in the
+  script itself, next to that of Vadim Smirnov, who develops the project under
+  the trade name WireSock. Every contributor keeps the copyright in their
+  contribution.
+- **Third-party software keeps its own license.** BoringTun (BSD-3-Clause), the
+  Rust crates the components use, and AmneziaWG's kernel module and tools
+  (GPL-2.0, installed by the system package manager and not distributed here)
+  are not relicensed by this project. The BoringTun release archives include
+  BoringTun's license and those of the crates linked into it (known gaps are
+  listed in [`docs/LICENSING.md`](docs/LICENSING.md#known-gaps)).
+- **Where to look.** [`NOTICE.md`](NOTICE.md) explains the origin and every
+  notice; [`docs/LICENSING.md`](docs/LICENSING.md) covers reuse,
+  redistribution and attribution; per-file SPDX metadata follows
+  [REUSE](https://reuse.software) and is checked in CI.
+- **Redistributing.** Keep `LICENSE` and the notices in the files you copy, and
+  meet the license terms of any third-party component you also ship.
+
+Contributions are accepted under the same license; see
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
