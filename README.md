@@ -1,16 +1,16 @@
 # WireSock AWG Server Tools
 
-The web panel supports optional, explicit [email delivery of client exports or expiring links](amneziawg-web/docs/EMAIL_DELIVERY.md), with recipient preview and a separately configured public HTTPS endpoint.
+**Deploy, manage, and obfuscate AmneziaWG VPN servers on Linux.**
 
-Install and manage AmneziaWG servers, clients, and protocol imitation. By [WireSock](https://www.wiresock.net/).
+A [WireSock](https://www.wiresock.net/) toolkit for installing and managing AmneziaWG VPN servers, client configurations, and traffic obfuscation. Supports the **kernel backend** by default and an experimental **BoringTun userspace backend**. New installations use **AmneziaWG 2.0**, with optional support for **AWG 3.1**.
 
-Set up an [AmneziaWG](https://docs.amnezia.org/documentation/amnezia-wg/) obfuscated VPN on a supported Linux server using the default kernel backend or the experimental **BoringTun userspace backend**. Fresh installs use AWG 2.0; AWG 3.1, a web panel, and protocol imitation are optional.
+Extend your setup with a **web-based management panel** for client administration, traffic monitoring, and configuration exports. The panel also supports optional [email delivery](amneziawg-web/docs/EMAIL_DELIVERY.md) of client configurations or expiring download links, with recipient preview and a separately configured public HTTPS endpoint.
 
-```
-Choose backend → Install VPN → (optional) Web panel → Manage clients
-```
+For advanced traffic camouflage, use **BoringTun's built-in protocol imitation** or the standalone **UDP obfuscation proxy** (kernel backend, AWG 1.0/2.0 only) to disguise VPN traffic as QUIC, DNS, SIP, or STUN.
 
----
+**Choose backend → Install VPN → (optional) Web panel → Manage clients**
+
+——
 
 The repository was renamed from `wiresock/amneziawg-install` to
 `wiresock/awg-server-tools`. Existing installations keep the same commands,
