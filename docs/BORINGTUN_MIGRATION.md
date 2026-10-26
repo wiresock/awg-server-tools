@@ -64,7 +64,7 @@ in signing or publication jobs.
 The descriptor's `toolchain_sha256` binds the reviewed Rust version, Rust/LLVM
 source commits and pinned input manifest. Compiler/SDK receipts from each build
 are supplemental CI artifacts; their bytes are not included in that digest.
-Native compiler/SDK/Homebrew installation provenance therefore remains an
+Native compiler/SDK/packaging-tool and Bash source-build provenance remains an
 explicit activation gate. Do not describe this digest as attesting every host
 tool or as establishing a fully hermetic build.
 
@@ -131,3 +131,31 @@ for the full web/proxy stack or validate a physical Pi.
 Native ARM64 and macOS execution, ARMv7 emulation/interop, actual GitHub
 event/attestation behavior and disposable host upgrade/rollback must be validated in their real environments before
 activation. Local fixture tests are not substitutes for those checks.
+
+### Exact Bash for native macOS validation
+
+Both macOS architectures build GNU Bash 5.3.20 below `RUNNER_TEMP` using
+`scripts/boringtun-bash.py`. The reviewed
+[`bash-toolchain.json`](../packaging/boringtun/bash-toolchain.json) pins the GNU
+5.3 source archive and all twenty ordered upstream patches by SHA-256, with
+checksums traced to the [immutable Homebrew formula](https://github.com/Homebrew/homebrew-core/blob/9d390e8ea5618fde14eeb084d0da3eb5a4cce53c/Formula/b/bash.rb).
+Its canonical JSON digest is
+`3bb13ba2ffc3096bbe7fe348a85f98e143c61c68072fd8b09be66b324543c73d`.
+The build selects Xcode 16.4/16F6, SDK 15.5 and deployment target 11.0, and
+disables readline and NLS so this shell needs no floating Homebrew libraries.
+It installs no global files. The shared verifier checks both the version banner
+and `BASH_VERSION`, the resulting executable hash, and the source receipt.
+
+The original candidate job installed Homebrew Bash 5.3.15 and later failed the
+production 5.3.20 gate. Its setup check ran under the macOS system Bash and did
+not log either version representation. GNU Bash's shipped `CHANGES` records that
+`[[` became subject to `set -e` after Bash 3.2; an unguarded comparison was
+therefore insufficient there. Installation and verification now have explicit
+failure exits and print the verified receipt. The local GNU-source verification
+build was Linux-only; it is not native macOS validation.
+
+`BASH-TOOLCHAIN.json` is copied into each `NATIVE-TOOLCHAIN.json` as supplemental
+CI provenance. These receipt bytes and the Bash input manifest are not included
+in the release descriptor's existing `toolchain_sha256` projection. This change
+does not clear the native host/tool provenance activation gate or enable
+publication; both native macOS CI lanes must still pass.

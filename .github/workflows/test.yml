@@ -37,6 +37,7 @@ jobs:
           bash tests/test-boringtun-release.sh
           python3 tests/test-boringtun-notices.py
           python3 tests/test-boringtun-platform.py
+          python3 tests/test_bash_toolchain.py
           bash tests/test-boringtun-platform-selection.sh
           python3 tests/test-boringtun-adopt.py
           bash tests/test-boringtun-foreground-launcher.sh

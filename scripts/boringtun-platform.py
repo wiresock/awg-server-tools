@@ -232,10 +232,11 @@ def build_environment(target, directory):
         record["tools"]["gtar"] = fingerprint(tar)
         shell = os.environ.get("BTA_BUILD_SHELL") or shutil.which("bash")
         require(shell, "GNU Bash 5.3.20 is required on macOS")
-        shell_version = tool_output([shell, "--version"]).splitlines()[0]
-        require(shell_version.startswith("GNU bash, version 5.3.20("), "GNU Bash 5.3.20 is required on macOS")
+        shell_receipt = json.loads(tool_output([sys.executable, str(Path(__file__).with_name("boringtun-bash.py")),
+                                                "verify", shell]))
         record["tools"]["bash"] = fingerprint(shell)
-        record["bash_version"] = shell_version
+        record["bash_version"] = shell_receipt["banner"]
+        record["bash_source"] = shell_receipt
     else:
         # Existing native Linux builds retain their original command and flags.
         require(platform.system() == "Linux", "Linux target requires native Linux")
