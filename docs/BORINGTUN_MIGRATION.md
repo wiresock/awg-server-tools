@@ -3,16 +3,16 @@
 ## Current implementation status
 
 The local patch implements the read-only five-platform build workflow, strict
-release policy/orchestration and AWG adoption tooling. The fork's
-`.github/workflows/boringtun-release.yml` is intentionally absent: local creation
-of its future OIDC, attestation-write and release-write jobs awaits explicit
-owner approval after an automatic approval review denial. End-to-end publisher
-wiring is incomplete and unreviewed. `release-policy.json` remains disabled,
-with attribution unresolved. Nothing in this patch activates publication or
-changes existing releases or production.
+release policy/orchestration, dormant publisher workflow and AWG adoption
+tooling. The fork's `.github/workflows/boringtun-release.yml` separates read-only
+validation, attestation and publication jobs. `release-policy.json` remains
+disabled, with attribution unresolved; signing and publication jobs require the
+validated activation output and independently recheck live policy. Nothing in
+this patch activates publication or changes existing releases or production.
 
-The sections below describe the intended completed contract and the remaining
-activation gates, not a claim that automatic publication already works.
+The sections below describe the implemented contract and remaining live
+validation/activation gates. Local fixture tests do not establish successful
+GitHub publication, native macOS acceptance or resolution of historical dates.
 
 The canonical producer moves to `Wiresock-Foundation/wiresock-boringtun`.
 Each merged PR targeting its master branch has a distinct source-based tag:
@@ -74,6 +74,16 @@ scripts come from the promoter's fixed workflow revision; source C executes
 only in isolated read-only jobs. Existing maintainers' authentication can be
 used for read-only local adoption; no new credentials are introduced.
 
+The publisher accepts only successful completed runs of the merged-PR build
+workflow, then validates the exact event, repository, workflow ID, source and
+attempt. It has no direct-push or manual publication trigger. A manually
+dispatched maintenance build remains a dry run because its triggering event is
+not eligible for promotion. Checkout, preparation upload and attestation actions
+in the privileged workflow use immutable commit pins. Attestation receives the
+descriptor and five archive paths derived from the revalidated prepared files.
+Publication is serialized by validated PR number, leaving distinct merged PRs
+in independent queues.
+
 Retries recover and verify the original signed descriptor rather than changing
 its run IDs. The descriptor is uploaded first and its digest recorded in draft
 metadata. Existing asset names are never overwritten. Conflicts and uncertain
@@ -103,6 +113,13 @@ The installed cache key includes source/build but not publisher: adoption must
 reject reuse of an existing source/build identity for different binary bytes.
 Rollback uses the installed prior immutable release and configuration checks;
 neither migration nor a fork release automatically upgrades production.
+
+Publisher retries retain the trusted workflow revision R. The live gate compares
+current master policy bytes with that revision's policy; a code-only security fix
+does not itself revoke an older R if the policy is unchanged. Future publisher
+security fixes must also change the reviewed policy or introduce explicit recipe
+revocation. Keep verification of an original signed release separate from
+permission to execute an obsolete publisher.
 
 ARMv7 support requires ARMv7-A or later with VFPv3-D16 hard-float; original Pi 1
 and original Pi Zero ARMv6 CPUs are excluded. AWG selects the ARMv7 archive for
