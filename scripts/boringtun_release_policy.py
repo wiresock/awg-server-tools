@@ -8,7 +8,7 @@ This module does no I/O and cannot establish that evidence was fetched honestly.
 PR projection: number/state/merged/merge_commit_sha/merged_at,
 base={ref,repo:{full_name}}, head={sha,repo:{full_name}}.
 Run projection: id/run_attempt/workflow_id/path/event/status/conclusion,
-repository={full_name}, head_sha/created_at, pull_requests=[{number,head,base}].
+repository={full_name}, head_sha/head_branch/created_at, optional PR associations.
 Artifact projection: id/name/digest/size_in_bytes/expired,
 workflow_run={id,head_sha}. Its name is boringtun-<run ID>-<attempt>.
 
@@ -188,12 +188,12 @@ def _request(request):
 def check_build_run(run, request, workflow_id):
     """Check attempt-specific API evidence and return a detached copy.
 
-    The caller must also establish the closed-only trusted workflow trigger at C;
+    The caller must also establish the trusted master-push workflow recipe at C;
     created_at is the original run creation time, never run_started_at on retry.
     Pin workflow_id from reviewed configuration, not from the run itself.
-    The head_sha==C contract is intentionally conservative. Pipeline activation
-    stays blocked until a real closed-merged run fixture confirms this contract;
-    do not broaden it to accept either H or C without reviewed evidence.
+    Push run head_sha is the executed source C. PR-event head_sha is H instead;
+    those runs are deliberately ineligible. C must independently identify one
+    canonical merged-master PR; an unsigned artifact cannot establish that fact.
     """
     result = _check_build_identity(run, request, workflow_id)
     _require(run["status"] == "completed" and run["conclusion"] == "success", "build did not succeed")
@@ -203,28 +203,53 @@ def check_build_run(run, request, workflow_id):
 def _check_build_identity(run, request, workflow_id):
     """Identity only, for read-only active-run inventory; never authorizes release."""
     _request(request)
-    _keys(run, "id run_attempt workflow_id path event status conclusion repository head_sha created_at pull_requests", "build run")
+    _keys(run, "id run_attempt workflow_id path event status conclusion repository head_sha head_branch created_at pull_requests", "build run")
     for key in ("id", "run_attempt", "workflow_id"):
         _int(run[key], key)
     _int(workflow_id, "expected workflow ID")
     _require(run["workflow_id"] == workflow_id and run["path"] == BUILD_WORKFLOW,
              "wrong build workflow")
     _repository_object(run["repository"], True)
-    _require(run["event"] == "pull_request", "wrong build event")
+    _require(run["event"] == "push" and run["head_branch"] == "master", "build must be a canonical master push")
     _sha(run["head_sha"])
     _require(run["head_sha"] == request["source_commit"], "build source differs from merged source")
     _require(_date(run["created_at"]) >= _date(request["merged_at"]), "run predates merge")
     prs = run["pull_requests"]
-    _require(type(prs) is list and len(prs) == 1, "run must identify exactly one PR")
-    _keys(prs[0], "number head base", "run PR association")
-    _int(prs[0]["number"], "run PR")
-    _require(prs[0]["number"] == request["pr"], "wrong run PR")
-    _base(prs[0]["base"])
-    _head(prs[0]["head"])
-    _require(prs[0]["head"]["sha"] == request["pr_head_sha"] and
-             prs[0]["head"]["repo"]["full_name"] == request["pr_head_repository"],
-             "run PR head mismatch")
+    _require(type(prs) is list and len(prs) <= 1, "ambiguous run PR associations")
+    if prs:
+        _keys(prs[0], "number head base", "run PR association")
+        _int(prs[0]["number"], "run PR")
+        _require(prs[0]["number"] == request["pr"], "wrong run PR")
+        _base(prs[0]["base"])
+        _head(prs[0]["head"])
+        _require(prs[0]["head"]["sha"] == request["pr_head_sha"] and
+                 prs[0]["head"]["repo"]["full_name"] == request["pr_head_repository"],
+                 "run PR head mismatch")
     return deepcopy(run)
+
+
+def merged_pr_number(pulls, source):
+    """Select only an exact merged-master source from a fully paginated API list.
+
+    This selects a candidate; the caller must independently GET that PR and
+    validate merged_request. Commit association alone is not authorization.
+    """
+    _sha(source)
+    _require(type(pulls) is list, "commit PR discovery must be a list")
+    numbers = set()
+    for pr in pulls:
+        _require(type(pr) is dict, "invalid commit PR discovery entry")
+        base = pr.get("base")
+        _require(type(base) is dict and type(base.get("repo")) is dict,
+                 "missing commit PR base identity")
+        if (pr.get("state") == "closed" and pr.get("merged_at") is not None and
+                pr.get("merge_commit_sha") == source and
+                base.get("ref") == "master" and base["repo"].get("full_name") == REPOSITORY):
+            number = _int(pr.get("number"), "discovered PR")
+            _require(number not in numbers, "duplicate commit PR discovery entry")
+            numbers.add(number)
+    _require(len(numbers) == 1, "source must identify exactly one canonical merged-master PR")
+    return next(iter(numbers))
 
 
 def _artifact(artifact, run):

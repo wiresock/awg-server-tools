@@ -78,7 +78,14 @@ repository and owner identities, and the certificate's exact run and attempt.
 The workflow-controlled invocation must agree with the certificate. A signed
 descriptor binds the source, PR, build attempt, toolchain inputs, notice
 provenance, archive hashes, and binary hashes. The command independently reads
-the merged PR, workflow IDs, and exact build and publication attempts. The
+all pages of commits/C/pulls, requiring exactly one closed merged canonical
+master PR whose postmerge source is C. It then re-reads that PR, verifies C's
+ancestry in master, workflow IDs, and exact build and publication attempts. The
+build must be a canonical master push at C; PR-event and maintenance-dispatch
+runs are ineligible. Empty Actions PR associations are expected and do not
+replace this independent discovery. Unrelated associated PRs cannot select C.
+Normal merge, squash and rebase use the API's postmerge source, not PR head H.
+The
 original build must have succeeded and postdate the merge. The original
 publication attempt must have successful `Validate completed build` and `Attest
 verified content` jobs, read through its attempt-specific paginated jobs API.
@@ -89,7 +96,9 @@ published bytes and original verification evidence.
 
 If a contributor deletes their repository after merge, the canonical PR may
 return a null head repository. Adoption retains the PR's immutable head SHA and
-uses the original build attempt's recorded contributor repository identity.
+uses the original build attempt's recorded contributor repository identity,
+when one exists. With empty associations it uses the fresh canonical PR's
+repository identity; deletion of that repository leaves a visible evidence gap.
 The exact PR number, head SHA, canonical base, merge source and time must still
 agree. GitHub's minimal Actions repository objects contain `id`, `url`, and
 `name`; the owner is read only from an exact `https://api.github.com/repos/OWNER/REPO`

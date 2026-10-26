@@ -175,22 +175,39 @@ def repository_evidence(value):
     return {"id": value["id"], "url": url, "name": name, "full_name": full_name}
 
 
-def check_run_metadata(gh, descriptor, identity):
-    """Independently fetch both exact attempts; signed publisher binds B to C.
+def commit_prs(gh, source):
+    """Read every commit association page, or fail without a partial result."""
+    policy._sha(source)
+    result, seen = [], set()
+    for page in range(1, 12):
+        entries = gh.api(f"repos/{REPO}/commits/{source}/pulls?per_page=100&page={page}")
+        require(type(entries) is list and len(entries) <= 100, "invalid commit PR page")
+        for pr in entries:
+            require(type(pr) is dict, "invalid commit PR entry")
+            number = policy._int(pr.get("number"), "commit PR number")
+            require(number not in seen, "duplicate commit PR pagination entry")
+            seen.add(number)
+            result.append(pr)
+        require(len(result) <= 1000, "commit PR discovery exceeds safe pagination bound")
+        if len(entries) < 100:
+            return result
+    raise policy.PolicyError("commit PR discovery did not terminate")
 
-    The publisher additionally checks the closed-PR event association. Its
-    conservative association schema remains an activation gate pending a live
-    GitHub fixture; adoption does not invent missing fields from PR metadata.
-    """
+
+def check_run_metadata(gh, descriptor, identity):
+    """Independently resolve C to one merged PR and verify both exact attempts."""
     number = descriptor["pr"]
+    source = descriptor["source_commit"]
+    require(policy.merged_pr_number(commit_prs(gh, source), source) == number,
+            "commit discovery differs from signed PR")
     pr = gh.api(f"repos/{REPO}/pulls/{number}")
     require(type(pr) is dict and type(pr.get("head")) is dict, "missing canonical merged PR metadata")
     build = descriptor["build_run"]
     build_run = gh.api(f"repos/{REPO}/actions/runs/{build['id']}/attempts/{build['run_attempt']}")
     require(type(build_run) is dict, "missing exact build attempt metadata")
     associations = build_run.get("pull_requests")
-    require(type(associations) is list and len(associations) == 1 and type(associations[0]) is dict,
-            "exact build attempt must retain one merged PR association")
+    require(type(associations) is list and len(associations) <= 1 and all(type(item) is dict for item in associations),
+            "ambiguous exact build attempt PR associations")
 
     def project_ref(ref, kind):
         require(type(ref) is dict, f"missing run PR {kind} identity")
@@ -199,29 +216,43 @@ def check_run_metadata(gh, descriptor, identity):
         require(key in ref, f"missing run PR {kind} identity")
         return {key: ref[key], "repo": {"full_name": repository["full_name"]}}
 
-    association = associations[0]
-    associated_pr = {"number": association.get("number"), "head": project_ref(association.get("head"), "head"),
-                     "base": project_ref(association.get("base"), "base")}
-    projected = {key: pr[key] for key in ("number", "state", "merged", "merge_commit_sha", "merged_at")}
+    projected = {key: pr.get(key) for key in ("number", "state", "merged", "merge_commit_sha", "merged_at")}
     projected["base"] = project_ref(pr.get("base"), "base")
-    retained_head = repository_evidence(association["head"]["repo"])
-    retained_base = repository_evidence(association["base"]["repo"])
     current_base = repository_evidence(pr["base"]["repo"])
-    require(retained_base["id"] == current_base["id"] == identity["id"], "run PR base repository numeric identity differs")
+    require(current_base["id"] == identity["id"], "PR base repository numeric identity differs")
     # Deleting a contributor's repository can null PR.head.repo. Retain H from
     # the canonical merged PR, and use only the original exact build attempt's
     # recorded head repository. The policy below still matches PR number, H,
     # canonical base, source C, merge time and run/attempt; never infer a name.
-    current_head = None
+    current_head = retained_head = retained_base = None
     if pr["head"].get("repo") is not None:
         current_head = repository_evidence(pr["head"]["repo"])
-        require(current_head["id"] == retained_head["id"], "run PR head repository numeric identity differs")
-    projected["head"] = {"sha": pr["head"].get("sha"), "repo": associated_pr["head"]["repo"]}
+    projected_associations = []
+    if associations:
+        association = associations[0]
+        associated_pr = {"number": association.get("number"), "head": project_ref(association.get("head"), "head"),
+                         "base": project_ref(association.get("base"), "base")}
+        projected_associations.append(associated_pr)
+        retained_head = repository_evidence(association["head"]["repo"])
+        retained_base = repository_evidence(association["base"]["repo"])
+        require(retained_base["id"] == current_base["id"], "run PR base repository numeric identity differs")
+        if current_head is not None:
+            require(current_head["id"] == retained_head["id"], "run PR head repository numeric identity differs")
+        projected["head"] = {"sha": pr["head"].get("sha"), "repo": associated_pr["head"]["repo"]}
+    else:
+        # Push attempts often have no PR associations. Fresh canonical PR data
+        # supplies the contributor identity; a deleted repo without retained
+        # evidence stays blocked rather than being guessed from a user name.
+        projected["head"] = project_ref(pr["head"], "head")
     request = policy.merged_request(projected, number)
     require(request["source_commit"] == descriptor["source_commit"], "merged PR differs from signed source")
+    comparison = gh.api(f"repos/{REPO}/compare/{source}...master")
+    require(type(comparison) is dict and comparison.get("status") in ("ahead", "identical") and
+            type(comparison.get("merge_base_commit")) is dict and comparison["merge_base_commit"].get("sha") == source,
+            "signed source is not an ancestor of current master")
     evidence = {"merged_pr": projected, "current_head_repository": current_head,
                 "retained_head_repository": retained_head, "retained_base_repository": retained_base}
-    expected = [(descriptor["build_run"], "id", policy.BUILD_WORKFLOW, "pull_request", descriptor["source_commit"], "build"),
+    expected = [(descriptor["build_run"], "id", policy.BUILD_WORKFLOW, "push", descriptor["source_commit"], "build"),
                 (descriptor["publisher"], "run_id", policy.PUBLISH_WORKFLOW, "workflow_run", descriptor["publisher"]["recipe_commit"], "publisher")]
     for recorded, id_key, path, event, commit, label in expected:
         workflow = gh.api(f"repos/{REPO}/actions/workflows/{path.rsplit('/', 1)[1]}")
@@ -229,7 +260,7 @@ def check_run_metadata(gh, descriptor, identity):
                 f"{label} workflow identity differs")
         run = build_run if label == "build" else gh.api(f"repos/{REPO}/actions/runs/{recorded[id_key]}/attempts/{recorded['run_attempt']}")
         fields = {"id": recorded[id_key], "run_attempt": recorded["run_attempt"], "workflow_id": recorded["workflow_id"],
-                  "path": path, "event": event, "head_sha": commit}
+                  "path": path, "event": event, "head_sha": commit, "head_branch": "master"}
         fields.update({"status": "completed", "conclusion": "success"} if label == "build" else {"head_branch": "master"})
         require(type(run) is dict and all(run.get(key) == value and type(run.get(key)) is type(value) for key, value in fields.items()),
                 f"{label} attempt is not the exact required recorded run")
@@ -240,9 +271,9 @@ def check_run_metadata(gh, descriptor, identity):
             require(type(created) is str and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", created), "missing original build creation time")
             require(datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ") >= datetime.strptime(request["merged_at"], "%Y-%m-%dT%H:%M:%SZ"),
                     "build attempt predates merged PR")
-            projection = {key: run[key] for key in ("id", "run_attempt", "workflow_id", "path", "event", "status", "conclusion", "head_sha", "created_at")}
+            projection = {key: run[key] for key in ("id", "run_attempt", "workflow_id", "path", "event", "status", "conclusion", "head_sha", "head_branch", "created_at")}
             projection["repository"] = {"full_name": run["repository"]["full_name"]}
-            projection["pull_requests"] = [associated_pr]
+            projection["pull_requests"] = projected_associations
             policy.check_build_run(projection, request, recorded["workflow_id"])
             evidence["build_attempt"] = projection
         else:
