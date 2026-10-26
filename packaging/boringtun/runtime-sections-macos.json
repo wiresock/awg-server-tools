@@ -1,0 +1,1394 @@
+[
+  {
+    "label": "Rust COPYRIGHT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/COPYRIGHT",
+    "transform": "verbatim",
+    "sha256": "172020dbfd5b53a226dfde77616190a48dcff519b0bc0e6deb91a8450782c4af"
+  },
+  {
+    "label": "Rust LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1"
+  },
+  {
+    "label": "Rust LICENSE-APACHE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+  },
+  {
+    "label": "Rust library/compiler-builtins/LICENSE.txt",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/LICENSE.txt",
+    "transform": "verbatim",
+    "sha256": "ab6eec6caf0fa5775e411c7a8bc6a45c4ef2956b0980b157ab74fc5cd62a928b"
+  },
+  {
+    "label": "Rust library/compiler-builtins/libm/LICENSE.txt",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/LICENSE.txt",
+    "transform": "verbatim",
+    "sha256": "3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7"
+  },
+  {
+    "label": "Rust library/backtrace/LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/backtrace/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+  },
+  {
+    "label": "Rust library/backtrace/LICENSE-APACHE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/backtrace/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+  },
+  {
+    "label": "Rust library/stdarch/LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "29662666b44dff84977b46e05642cdef910bc3a93a17b5fd86e632bafa59cf21"
+  },
+  {
+    "label": "Rust library/stdarch/LICENSE-APACHE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+  },
+  {
+    "label": "Unicode-3.0.txt",
+    "source": "Unicode-3.0.txt:",
+    "transform": "verbatim",
+    "sha256": "f5062c9a188d81dfe66b56db4182dcf9e4b17c0d9b0d311a8e20b3a1b075c443"
+  },
+  {
+    "label": "BSD-2-Clause.txt",
+    "source": "BSD-2-Clause.txt:",
+    "transform": "verbatim",
+    "sha256": "f32fb3b417a194167cfad068223fc975ba96c5960513a10f66a3c28720aec1df"
+  },
+  {
+    "label": "ring license map",
+    "source": "ring-0.17.14.crate:ring-0.17.14/LICENSE",
+    "transform": "verbatim",
+    "sha256": "b3d734001a94efff3579978d953391aa7115f877657d25eb54037a43875d078a"
+  },
+  {
+    "label": "ring ring-0.17.14/LICENSE-BoringSSL",
+    "source": "ring-0.17.14.crate:ring-0.17.14/LICENSE-BoringSSL",
+    "transform": "verbatim",
+    "sha256": "005fc765ddc5115da796cca915baa9557abae13ff35e0a47c47affc56f6c414d"
+  },
+  {
+    "label": "ring ring-0.17.14/LICENSE-other-bits",
+    "source": "ring-0.17.14.crate:ring-0.17.14/LICENSE-other-bits",
+    "transform": "verbatim",
+    "sha256": "f025ccfb7dfb6bdfedc75ca0f67acc69e6fb4998143d834f7c2f38a29989680f"
+  },
+  {
+    "label": "ring ring-0.17.14/src/polyfill/once_cell/LICENSE-APACHE",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/polyfill/once_cell/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+  },
+  {
+    "label": "ring ring-0.17.14/src/polyfill/once_cell/LICENSE-MIT",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/polyfill/once_cell/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "6ee2ed6c77710de911761acd5fc1ad1da00f476beb1a7ef27e78c2d1858deafc"
+  },
+  {
+    "label": "addr2line-0.25.1/LICENSE-APACHE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/addr2line-0.25.1/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+  },
+  {
+    "label": "addr2line-0.25.1/LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/addr2line-0.25.1/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "e99d88d232bf57d70f0fb87f6b496d44b6653f99f8a63d250a54c61ea4bcde40"
+  },
+  {
+    "label": "adler2-2.0.1/LICENSE-0BSD",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/adler2-2.0.1/LICENSE-0BSD",
+    "transform": "verbatim",
+    "sha256": "861399f8c21c042b110517e76dc6b63a2b334276c8cf17412fc3c8908ca8dc17"
+  },
+  {
+    "label": "adler2-2.0.1/LICENSE-APACHE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/adler2-2.0.1/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "8ada45cd9f843acf64e4722ae262c622a2b3b3007c7310ef36ac1061a30f6adb"
+  },
+  {
+    "label": "adler2-2.0.1/LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/adler2-2.0.1/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+  },
+  {
+    "label": "cfg-if-1.0.4/LICENSE-APACHE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/cfg-if-1.0.4/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+  },
+  {
+    "label": "cfg-if-1.0.4/LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/cfg-if-1.0.4/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+  },
+  {
+    "label": "gimli-0.32.3/LICENSE-APACHE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/gimli-0.32.3/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+  },
+  {
+    "label": "gimli-0.32.3/LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/gimli-0.32.3/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0"
+  },
+  {
+    "label": "hashbrown-0.17.1/LICENSE-APACHE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/hashbrown-0.17.1/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+  },
+  {
+    "label": "hashbrown-0.17.1/LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/hashbrown-0.17.1/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "ff8f68cb076caf8cefe7a6430d4ac086ce6af2ca8ce2c4e5a2004d4552ef52a2"
+  },
+  {
+    "label": "foldhash-0.2.0/LICENSE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/foldhash-0.2.0/LICENSE",
+    "transform": "verbatim",
+    "sha256": "b1181a40b2a7b25cf66fd01481713bc1005df082c53ef73e851e55071b102744"
+  },
+  {
+    "label": "libc-0.2.185/LICENSE-APACHE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/libc-0.2.185/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+  },
+  {
+    "label": "libc-0.2.185/LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/libc-0.2.185/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "123a331b5dbf04c30097fa43b8f858bc85df671fe776de498d01f3d6b7c1f69e"
+  },
+  {
+    "label": "memchr-2.7.6/COPYING",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/memchr-2.7.6/COPYING",
+    "transform": "verbatim",
+    "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+  },
+  {
+    "label": "memchr-2.7.6/LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/memchr-2.7.6/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+  },
+  {
+    "label": "miniz_oxide-0.8.9/LICENSE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/miniz_oxide-0.8.9/LICENSE",
+    "transform": "verbatim",
+    "sha256": "4108245a1f2df9d4e94df8abed5b4ba0759bb2f9b40a6b939f1be141077ae50b"
+  },
+  {
+    "label": "miniz_oxide-0.8.9/LICENSE-APACHE.md",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/miniz_oxide-0.8.9/LICENSE-APACHE.md",
+    "transform": "verbatim",
+    "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+  },
+  {
+    "label": "miniz_oxide-0.8.9/LICENSE-MIT.md",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/miniz_oxide-0.8.9/LICENSE-MIT.md",
+    "transform": "verbatim",
+    "sha256": "799e9ca9d179295ef372f25d3769cdda7d25bb2668add6a6a1e22d1e4c678b8d"
+  },
+  {
+    "label": "miniz_oxide-0.8.9/LICENSE-ZLIB.md",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/miniz_oxide-0.8.9/LICENSE-ZLIB.md",
+    "transform": "verbatim",
+    "sha256": "0a54e647fe54104658b5e563c04c6f9edf251710e47bce692e0bd990a4ddaa39"
+  },
+  {
+    "label": "object-0.37.3/LICENSE-APACHE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/object-0.37.3/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+  },
+  {
+    "label": "object-0.37.3/LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/object-0.37.3/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "0b74dfa0bcee5c420c6b7f67b4b2658f9ab8388c97b8e733975f2cecbdd668a6"
+  },
+  {
+    "label": "rustc-demangle-0.1.27/LICENSE-APACHE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/rustc-demangle-0.1.27/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+  },
+  {
+    "label": "rustc-demangle-0.1.27/LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/rustc-demangle-0.1.27/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+  },
+  {
+    "label": "rustc-literal-escaper-0.0.8/LICENSE-APACHE",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/rustc-literal-escaper-0.0.8/LICENSE-APACHE",
+    "transform": "verbatim",
+    "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+  },
+  {
+    "label": "rustc-literal-escaper-0.0.8/LICENSE-MIT",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/rustc-literal-escaper-0.0.8/LICENSE-MIT",
+    "transform": "verbatim",
+    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+  },
+  {
+    "label": "Rust standard-library in-tree attribution inventory",
+    "source": "rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz:rustc-1.98.1-x86_64-unknown-linux-gnu/rustc/share/doc/rust/COPYRIGHT-library.html",
+    "transform": "HTML text nodes before out-of-tree-dependencies; blank-line compaction",
+    "sha256": "1094e83639cd73d7cfbcb7bc38c53ee09f6db49f6d1c81b05b37c1e430a196ef"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/build.rs, ring-0.17.14/src/ec/curve25519/ed25519.rs, ring-0.17.14/src/ec/curve25519/ed25519/signing.rs, ring-0.17.14/src/ec/curve25519/ed25519/verification.rs, ring-0.17.14/src/ec/curve25519/x25519.rs, ring-0.17.14/src/ec/suite_b/ecdsa/digest_scalar.rs, ring-0.17.14/src/ec/suite_b/ecdsa/signing.rs, ring-0.17.14/src/ec/suite_b/ecdsa/verification.rs, ring-0.17.14/src/hmac.rs, ring-0.17.14/src/lib.rs, ring-0.17.14/src/polyfill.rs, ring-0.17.14/src/rand.rs, ring-0.17.14/src/rsa.rs, ring-0.17.14/src/rsa/keypair.rs, ring-0.17.14/src/rsa/padding.rs, ring-0.17.14/src/rsa/padding/pkcs1.rs, ring-0.17.14/src/rsa/padding/pss.rs, ring-0.17.14/src/rsa/verification.rs, ring-0.17.14/src/testutil.rs, ring-0.17.14/tests/ecdsa_tests.rs, ring-0.17.14/tests/hmac_tests.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/build.rs,ring-0.17.14/src/ec/curve25519/ed25519.rs,ring-0.17.14/src/ec/curve25519/ed25519/signing.rs,ring-0.17.14/src/ec/curve25519/ed25519/verification.rs,ring-0.17.14/src/ec/curve25519/x25519.rs,ring-0.17.14/src/ec/suite_b/ecdsa/digest_scalar.rs,ring-0.17.14/src/ec/suite_b/ecdsa/signing.rs,ring-0.17.14/src/ec/suite_b/ecdsa/verification.rs,ring-0.17.14/src/hmac.rs,ring-0.17.14/src/lib.rs,ring-0.17.14/src/polyfill.rs,ring-0.17.14/src/rand.rs,ring-0.17.14/src/rsa.rs,ring-0.17.14/src/rsa/keypair.rs,ring-0.17.14/src/rsa/padding.rs,ring-0.17.14/src/rsa/padding/pkcs1.rs,ring-0.17.14/src/rsa/padding/pss.rs,ring-0.17.14/src/rsa/verification.rs,ring-0.17.14/src/testutil.rs,ring-0.17.14/tests/ecdsa_tests.rs,ring-0.17.14/tests/hmac_tests.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "826f6e3ca197d28f0bb2901b0887912574bacc542aa1bfc764724814285511dc"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/chacha/asm/chacha-armv4.pl, ring-0.17.14/crypto/chacha/asm/chacha-armv8.pl, ring-0.17.14/crypto/chacha/asm/chacha-x86.pl, ring-0.17.14/crypto/chacha/asm/chacha-x86_64.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/chacha/asm/chacha-armv4.pl,ring-0.17.14/crypto/chacha/asm/chacha-armv8.pl,ring-0.17.14/crypto/chacha/asm/chacha-x86.pl,ring-0.17.14/crypto/chacha/asm/chacha-x86_64.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "c3604b5d1d2605a024cecbc4be213264269ee6dddf851d13ba64d935a919794e"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/cipher/asm/chacha20_poly1305_armv8.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/cipher/asm/chacha20_poly1305_armv8.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "41863446d81ba3f368de0b756e48ec463a85c90e877e1273f7c524cf8cd4cd99"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/cipher/asm/chacha20_poly1305_x86_64.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/cipher/asm/chacha20_poly1305_x86_64.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "4e56fd993a0234253c26e7800e38e8dfee21acb0136fbd42820bce628def5177"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/constant_time_test.c",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/constant_time_test.c",
+    "transform": "whole copyright/license comment block",
+    "sha256": "0794c420cea59bf58084d3d65f56c5ad92b089bdd870684b253124c185a71f15"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/cpu_intel.c, ring-0.17.14/crypto/fipsmodule/bn/montgomery.c, ring-0.17.14/crypto/internal.h, ring-0.17.14/crypto/mem.c, ring-0.17.14/include/ring-core/mem.h",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/cpu_intel.c,ring-0.17.14/crypto/fipsmodule/bn/montgomery.c,ring-0.17.14/crypto/internal.h,ring-0.17.14/crypto/mem.c,ring-0.17.14/include/ring-core/mem.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "e5df1a1e4be22b4b24531ad846438cb23883f0c98bb97d35158a113a411c503e"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/crypto.c",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/crypto.c",
+    "transform": "whole copyright/license comment block",
+    "sha256": "388358f4a097d89594c39cc7b2cd475e517f6cb5f26216d81157bbf1c5dfca7d"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/curve25519/asm/x25519-asm-arm.S, ring-0.17.14/crypto/fipsmodule/ec/util.h",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/curve25519/asm/x25519-asm-arm.S,ring-0.17.14/crypto/fipsmodule/ec/util.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "8ca246cb5c323120e25c3ff9a3f8fe4de715c71441add4353b34116a494edccd"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/curve25519/curve25519.c, ring-0.17.14/crypto/curve25519/curve25519_tables.h, ring-0.17.14/crypto/curve25519/internal.h, ring-0.17.14/crypto/fipsmodule/ec/p256.c, ring-0.17.14/crypto/fipsmodule/ec/p256_table.h",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/curve25519/curve25519.c,ring-0.17.14/crypto/curve25519/curve25519_tables.h,ring-0.17.14/crypto/curve25519/internal.h,ring-0.17.14/crypto/fipsmodule/ec/p256.c,ring-0.17.14/crypto/fipsmodule/ec/p256_table.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "16256ab70fb55a0f1383aa505862651ead7e380d81a592d5496e5304d031b15b"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/curve25519/curve25519_64_adx.c, ring-0.17.14/include/ring-core/asm_base.h, ring-0.17.14/include/ring-core/target.h",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/curve25519/curve25519_64_adx.c,ring-0.17.14/include/ring-core/asm_base.h,ring-0.17.14/include/ring-core/target.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "86c60ce1d1aad14ef0d9f1d6f056dc640ff9c030f91f627a50eef66728eed29b"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/aes/aes_nohw.c",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/aes/aes_nohw.c",
+    "transform": "whole copyright/license comment block",
+    "sha256": "e01f82dc64c40e422eb046cba40fce87545c6a45bc9719e23176ef53bdb8ce8b"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/aes/asm/aes-gcm-avx2-x86_64.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/aes/asm/aes-gcm-avx2-x86_64.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "8c845e77a4c258cf14f96b6a9ce4a0f077a20de8f2fbdb7147338433facae9a5"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/aes/asm/aesni-gcm-x86_64.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/aes/asm/aesni-gcm-x86_64.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "50491f534421efd7193da8abfe927e3730d8e33248cb67d94bce44f9f66c37b9"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/aes/asm/aesni-x86.pl, ring-0.17.14/crypto/fipsmodule/aes/asm/aesni-x86_64.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/aes/asm/aesni-x86.pl,ring-0.17.14/crypto/fipsmodule/aes/asm/aesni-x86_64.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "49032c237b1d0370051de3efefcbe5d5b71454aa7897c66b343f9d291b843465"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/aes/asm/aesv8-armx.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/aes/asm/aesv8-armx.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "2824581953fef33e7529e87d5b56039df708332cd971b2194020fa1fbf357b6b"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/aes/asm/aesv8-gcm-armv8.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/aes/asm/aesv8-gcm-armv8.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "3428b11ae8b98b710ca5afbb691e9285762fa4043c8cbccc37ff19c93a1b7be2"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/aes/asm/bsaes-armv7.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/aes/asm/bsaes-armv7.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "9c209b766f463d43b1f4fcacf266e7807e973b2e7719afa29de133db1244d8e3"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/aes/asm/ghash-armv4.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/aes/asm/ghash-armv4.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "df740d781d88d1d541b6f0cae23cb279840ee60f106ebffcd8be18b042ac39b5"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/aes/asm/ghash-neon-armv8.pl, ring-0.17.14/crypto/fipsmodule/aes/asm/ghash-x86.pl, ring-0.17.14/crypto/fipsmodule/aes/asm/ghash-x86_64.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/aes/asm/ghash-neon-armv8.pl,ring-0.17.14/crypto/fipsmodule/aes/asm/ghash-x86.pl,ring-0.17.14/crypto/fipsmodule/aes/asm/ghash-x86_64.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "328228f5b32e22467a699ec92ca3b87322e2ddee4d1574fcb234c2bc4b7795ce"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/aes/asm/ghashv8-armx.pl, ring-0.17.14/crypto/fipsmodule/sha/asm/sha512-armv8.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/aes/asm/ghashv8-armx.pl,ring-0.17.14/crypto/fipsmodule/sha/asm/sha512-armv8.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "c449c76fdd06c7552daff1e3c845e0ecd01c0ec4251e361cb82970bc7f19b58e"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/aes/asm/vpaes-armv7.pl, ring-0.17.14/crypto/fipsmodule/aes/asm/vpaes-armv8.pl, ring-0.17.14/crypto/fipsmodule/bn/asm/armv8-mont.pl, ring-0.17.14/crypto/perlasm/arm-xlate.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/aes/asm/vpaes-armv7.pl,ring-0.17.14/crypto/fipsmodule/aes/asm/vpaes-armv8.pl,ring-0.17.14/crypto/fipsmodule/bn/asm/armv8-mont.pl,ring-0.17.14/crypto/perlasm/arm-xlate.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "e8f9f0245cb25739da34251afe4411e3345cef45b31170975566f7d1a0313f9a"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/aes/asm/vpaes-x86.pl, ring-0.17.14/crypto/fipsmodule/aes/asm/vpaes-x86_64.pl, ring-0.17.14/crypto/fipsmodule/bn/asm/x86_64-mont5.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/aes/asm/vpaes-x86.pl,ring-0.17.14/crypto/fipsmodule/aes/asm/vpaes-x86_64.pl,ring-0.17.14/crypto/fipsmodule/bn/asm/x86_64-mont5.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "a98a833c8cffcc1173979ce879df0ae91cd59e60c5520fa6b4949da83674f221"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/bn/asm/armv4-mont.pl, ring-0.17.14/crypto/fipsmodule/sha/asm/sha256-armv4.pl, ring-0.17.14/crypto/fipsmodule/sha/asm/sha512-armv4.pl, ring-0.17.14/crypto/perlasm/x86gas.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/bn/asm/armv4-mont.pl,ring-0.17.14/crypto/fipsmodule/sha/asm/sha256-armv4.pl,ring-0.17.14/crypto/fipsmodule/sha/asm/sha512-armv4.pl,ring-0.17.14/crypto/perlasm/x86gas.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "3ef15f79d7863560863fd4c6d14ff2597ca34d83a01100b1d1b4f67ca1f2619d"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/bn/asm/x86-mont.pl, ring-0.17.14/crypto/fipsmodule/bn/asm/x86_64-mont.pl, ring-0.17.14/crypto/fipsmodule/sha/asm/sha512-x86_64.pl, ring-0.17.14/crypto/perlasm/x86_64-xlate.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/bn/asm/x86-mont.pl,ring-0.17.14/crypto/fipsmodule/bn/asm/x86_64-mont.pl,ring-0.17.14/crypto/fipsmodule/sha/asm/sha512-x86_64.pl,ring-0.17.14/crypto/perlasm/x86_64-xlate.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "a5efec22ee5be68230f1c46656f41db4709d34d8f2f8c3b2a40ee5daa29d15a1"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/bn/internal.h",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/bn/internal.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "f126e3944c1566ef9983c6813f8fad671750e36edc82d409eb517832541a3b5a"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/bn/montgomery_inv.c, ring-0.17.14/crypto/fipsmodule/ec/gfp_p256.c, ring-0.17.14/crypto/fipsmodule/ec/gfp_p384.c, ring-0.17.14/crypto/limbs/limbs.h, ring-0.17.14/crypto/limbs/limbs.inl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/bn/montgomery_inv.c,ring-0.17.14/crypto/fipsmodule/ec/gfp_p256.c,ring-0.17.14/crypto/fipsmodule/ec/gfp_p384.c,ring-0.17.14/crypto/limbs/limbs.h,ring-0.17.14/crypto/limbs/limbs.inl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "6528f641c8d1423a93045a9a9f00784b090f23a7f75453d425036405355fbc6d"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/ec/asm/p256-armv8-asm.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/ec/asm/p256-armv8-asm.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "14ce24564a6171d756bd04345bba2ec40b8f028a7e943448cffb26b3409d6f75"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/ec/asm/p256-x86_64-asm.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/ec/asm/p256-x86_64-asm.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "3b7977afcd364d23a237b28c22c087e3eb09f74916bb018ac4b094abdac0af52"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/ec/ecp_nistz.c, ring-0.17.14/crypto/fipsmodule/ec/ecp_nistz384.h, ring-0.17.14/crypto/fipsmodule/ec/ecp_nistz384.inl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/ec/ecp_nistz.c,ring-0.17.14/crypto/fipsmodule/ec/ecp_nistz384.h,ring-0.17.14/crypto/fipsmodule/ec/ecp_nistz384.inl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "1f6e55e48a7dc93660e034e5c72572e464353ebe46b7af6ae5c065e55277ff25"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/ec/ecp_nistz.h",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/ec/ecp_nistz.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "19c779f8bbc141fa15c14e0a15aacaee2da917f7043af883c90cbef3cd6f4847"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/ec/p256-nistz-table.h",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/ec/p256-nistz-table.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "b1f9a46d45c17233cc3d906e02190b567d28cc0dd410ce89ea762d9fb7cb22eb"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/fipsmodule/ec/p256-nistz.c, ring-0.17.14/crypto/fipsmodule/ec/p256-nistz.h, ring-0.17.14/crypto/fipsmodule/ec/p256_shared.h",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/fipsmodule/ec/p256-nistz.c,ring-0.17.14/crypto/fipsmodule/ec/p256-nistz.h,ring-0.17.14/crypto/fipsmodule/ec/p256_shared.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "696cc66cf72629283bd8169f2f1f57761347846fbf4713d38359c36faee431a0"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/limbs/limbs.c",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/limbs/limbs.c",
+    "transform": "whole copyright/license comment block",
+    "sha256": "1e640b3431319ef67b6da1dc8a4337904e9f601f1e90f9b2cfbd89e4f96081d4"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/perlasm/x86asm.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/perlasm/x86asm.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "b939fda2ca991168686cee066b3b0c3b88a3fb3c0f6c87e445a44c88d6ca24a7"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/perlasm/x86nasm.pl",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/perlasm/x86nasm.pl",
+    "transform": "whole copyright/license comment block",
+    "sha256": "bd63cf39ad5653167c25c869a2d4ca71dd5ff4964bbf3cb276aa9f3b8790253f"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/crypto/poly1305/poly1305.c, ring-0.17.14/crypto/poly1305/poly1305_arm.c",
+    "source": "ring-0.17.14.crate:ring-0.17.14/crypto/poly1305/poly1305.c,ring-0.17.14/crypto/poly1305/poly1305_arm.c",
+    "transform": "whole copyright/license comment block",
+    "sha256": "9d3cd1e69f280a14314994684fb0f503013e1159d5168f8cbb63931bd49ed814"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/include/ring-core/aes.h",
+    "source": "ring-0.17.14.crate:ring-0.17.14/include/ring-core/aes.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "0a3a2968deee45bfbddf2bb9e7fdfee965ac86cd687af9c150a242944ae62e80"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/include/ring-core/base.h",
+    "source": "ring-0.17.14.crate:ring-0.17.14/include/ring-core/base.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "a1f9499b1e8806e42ddfe0f6d94cd584127169aef60c3c3d4788f17ff7451ba0"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/include/ring-core/check.h, ring-0.17.14/tests/constant_time_tests.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/include/ring-core/check.h,ring-0.17.14/tests/constant_time_tests.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "99a07315c47a6c27e677a2a47e357217e12acabb89177deadae9e141696e7195"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/include/ring-core/type_check.h",
+    "source": "ring-0.17.14.crate:ring-0.17.14/include/ring-core/type_check.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "2a4d2dcf0ea50fd3ee028c9b816dca5fedc8718e23d5d67735f8d21fb8637856"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/pregenerated/sha256-armv8-ios64.S, ring-0.17.14/pregenerated/sha256-armv8-linux64.S, ring-0.17.14/pregenerated/sha256-armv8-win64.S, ring-0.17.14/pregenerated/sha512-armv8-ios64.S, ring-0.17.14/pregenerated/sha512-armv8-linux64.S, ring-0.17.14/pregenerated/sha512-armv8-win64.S",
+    "source": "ring-0.17.14.crate:ring-0.17.14/pregenerated/sha256-armv8-ios64.S,ring-0.17.14/pregenerated/sha256-armv8-linux64.S,ring-0.17.14/pregenerated/sha256-armv8-win64.S,ring-0.17.14/pregenerated/sha512-armv8-ios64.S,ring-0.17.14/pregenerated/sha512-armv8-linux64.S,ring-0.17.14/pregenerated/sha512-armv8-win64.S",
+    "transform": "whole copyright/license comment block",
+    "sha256": "e8a4a2bca4a29a49d5a147be15370432736fdfc8c02ab107138b46547046d074"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead.rs, ring-0.17.14/src/arithmetic/bigint/modulus.rs, ring-0.17.14/src/arithmetic/bigint/modulusvalue.rs, ring-0.17.14/src/bb/leaky.rs, ring-0.17.14/src/bb/word.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead.rs,ring-0.17.14/src/arithmetic/bigint/modulus.rs,ring-0.17.14/src/arithmetic/bigint/modulusvalue.rs,ring-0.17.14/src/bb/leaky.rs,ring-0.17.14/src/bb/word.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "237e22bccd2a90c3305dceb0f4d9bcf79710c176f51390a87f725653f43b8d63"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead/aes.rs, ring-0.17.14/src/aead/aes/bs.rs, ring-0.17.14/src/aead/aes/fallback.rs, ring-0.17.14/src/aead/aes/ffi.rs, ring-0.17.14/src/aead/aes/hw.rs, ring-0.17.14/src/aead/aes/vp.rs, ring-0.17.14/src/aead/gcm.rs, ring-0.17.14/src/aead/gcm/clmul.rs, ring-0.17.14/src/aead/gcm/clmulavxmovbe.rs, ring-0.17.14/src/aead/gcm/neon.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead/aes.rs,ring-0.17.14/src/aead/aes/bs.rs,ring-0.17.14/src/aead/aes/fallback.rs,ring-0.17.14/src/aead/aes/ffi.rs,ring-0.17.14/src/aead/aes/hw.rs,ring-0.17.14/src/aead/aes/vp.rs,ring-0.17.14/src/aead/gcm.rs,ring-0.17.14/src/aead/gcm/clmul.rs,ring-0.17.14/src/aead/gcm/clmulavxmovbe.rs,ring-0.17.14/src/aead/gcm/neon.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "6a45aec599a0e0c783330dbce968ffcf3967e085ef7374c4f168e9cb420c80d4"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead/aes_gcm.rs, ring-0.17.14/src/aead/aes_gcm/aarch64.rs, ring-0.17.14/src/aead/aes_gcm/aeshwclmulmovbe.rs, ring-0.17.14/src/aead/aes_gcm/vaesclmulavx2.rs, ring-0.17.14/src/aead/chacha20_poly1305/integrated.rs, ring-0.17.14/src/aead/chacha20_poly1305/mod.rs, ring-0.17.14/src/aead/poly1305.rs, ring-0.17.14/src/arithmetic/limbs/x86_64/mont.rs, ring-0.17.14/src/bb/mod.rs, ring-0.17.14/src/deprecated_constant_time.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead/aes_gcm.rs,ring-0.17.14/src/aead/aes_gcm/aarch64.rs,ring-0.17.14/src/aead/aes_gcm/aeshwclmulmovbe.rs,ring-0.17.14/src/aead/aes_gcm/vaesclmulavx2.rs,ring-0.17.14/src/aead/chacha20_poly1305/integrated.rs,ring-0.17.14/src/aead/chacha20_poly1305/mod.rs,ring-0.17.14/src/aead/poly1305.rs,ring-0.17.14/src/arithmetic/limbs/x86_64/mont.rs,ring-0.17.14/src/bb/mod.rs,ring-0.17.14/src/deprecated_constant_time.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "72048c66c621b211f6c0dfde2e164c601b2b0423fe4d0916bb3b3c37c9eaef2c"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead/algorithm.rs, ring-0.17.14/src/aead/less_safe_key.rs, ring-0.17.14/src/aead/opening_key.rs, ring-0.17.14/src/aead/sealing_key.rs, ring-0.17.14/src/aead/unbound_key.rs, ring-0.17.14/src/rsa/public_key.rs, ring-0.17.14/src/rsa/public_key_components.rs, ring-0.17.14/tests/aead_tests.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead/algorithm.rs,ring-0.17.14/src/aead/less_safe_key.rs,ring-0.17.14/src/aead/opening_key.rs,ring-0.17.14/src/aead/sealing_key.rs,ring-0.17.14/src/aead/unbound_key.rs,ring-0.17.14/src/rsa/public_key.rs,ring-0.17.14/src/rsa/public_key_components.rs,ring-0.17.14/tests/aead_tests.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "b3cb162f8b1889e37cb10b9bdbe6e4bc935be4e179b21a32ec204daff74dd66e"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead/chacha.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead/chacha.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "0ad1a3cc7a7d9e92db1a9d7c021dbf0b99a723576f6690c4001654a2f588d8f0"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead/chacha/fallback.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead/chacha/fallback.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "febed558a6be507d6a0a1644a4aeb21d6adbe39f5384a3f51d6e4087c64a933f"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead/chacha/ffi.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead/chacha/ffi.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "d1c3e8595b158c804dda9bac18d076f2e2dcccf5fbd8dde63e530a9d2642cc06"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead/chacha20_poly1305_openssh.rs, ring-0.17.14/src/bits.rs, ring-0.17.14/src/cpu.rs, ring-0.17.14/src/ec/curve25519.rs, ring-0.17.14/src/ec/suite_b.rs, ring-0.17.14/src/ec/suite_b/ops.rs, ring-0.17.14/src/ec/suite_b/private_key.rs, ring-0.17.14/src/ec/suite_b/public_key.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead/chacha20_poly1305_openssh.rs,ring-0.17.14/src/bits.rs,ring-0.17.14/src/cpu.rs,ring-0.17.14/src/ec/curve25519.rs,ring-0.17.14/src/ec/suite_b.rs,ring-0.17.14/src/ec/suite_b/ops.rs,ring-0.17.14/src/ec/suite_b/private_key.rs,ring-0.17.14/src/ec/suite_b/public_key.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "19150b0a6365ccc80859157a2b9e6603efb5bdbaafd845b2384710e0fe567436"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead/gcm/fallback.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead/gcm/fallback.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "da3826979b38e1936c454677d8c435e56f6ec301ce82741382a53e0c10de1ef7"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead/gcm/ffi.rs, ring-0.17.14/src/aead/nonce.rs, ring-0.17.14/src/aead/quic.rs, ring-0.17.14/src/aead/shift.rs, ring-0.17.14/src/io.rs, ring-0.17.14/src/io/der_writer.rs, ring-0.17.14/src/io/positive.rs, ring-0.17.14/src/io/writer.rs, ring-0.17.14/tests/quic_tests.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead/gcm/ffi.rs,ring-0.17.14/src/aead/nonce.rs,ring-0.17.14/src/aead/quic.rs,ring-0.17.14/src/aead/shift.rs,ring-0.17.14/src/io.rs,ring-0.17.14/src/io/der_writer.rs,ring-0.17.14/src/io/positive.rs,ring-0.17.14/src/io/writer.rs,ring-0.17.14/tests/quic_tests.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "c0dd6d7b3309fa831a1aeabae2e45420d06750ed1d5f97e8d4f6021626060ed0"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead/gcm/vclmulavx2.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead/gcm/vclmulavx2.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "e506ebbdf1bcb57746db792b868f8b523c464637059e80d402497f2643310b0f"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead/overlapping/array.rs, ring-0.17.14/src/aead/overlapping/base.rs, ring-0.17.14/src/aead/overlapping/mod.rs, ring-0.17.14/src/aead/overlapping/partial_block.rs, ring-0.17.14/src/bb/boolmask.rs, ring-0.17.14/src/digest/sha2/ffi.rs, ring-0.17.14/src/digest/sha2/sha2_32.rs, ring-0.17.14/src/digest/sha2/sha2_64.rs, ring-0.17.14/src/error/input_too_long.rs, ring-0.17.14/src/polyfill/cold_error.rs, ring-0.17.14/src/polyfill/cstr.rs, ring-0.17.14/src/polyfill/notsend.rs, ring-0.17.14/src/polyfill/ptr.rs, ring-0.17.14/src/polyfill/sliceutil.rs, ring-0.17.14/src/tests/bits_tests.rs, ring-0.17.14/src/tests/mod.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead/overlapping/array.rs,ring-0.17.14/src/aead/overlapping/base.rs,ring-0.17.14/src/aead/overlapping/mod.rs,ring-0.17.14/src/aead/overlapping/partial_block.rs,ring-0.17.14/src/bb/boolmask.rs,ring-0.17.14/src/digest/sha2/ffi.rs,ring-0.17.14/src/digest/sha2/sha2_32.rs,ring-0.17.14/src/digest/sha2/sha2_64.rs,ring-0.17.14/src/error/input_too_long.rs,ring-0.17.14/src/polyfill/cold_error.rs,ring-0.17.14/src/polyfill/cstr.rs,ring-0.17.14/src/polyfill/notsend.rs,ring-0.17.14/src/polyfill/ptr.rs,ring-0.17.14/src/polyfill/sliceutil.rs,ring-0.17.14/src/tests/bits_tests.rs,ring-0.17.14/src/tests/mod.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "bddecf3d73f993501ad38d56b85ebcf967d389d2c35c6c15bf1557a499baa0cc"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/aead/poly1305/ffi_arm_neon.rs, ring-0.17.14/src/aead/poly1305/ffi_fallback.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/aead/poly1305/ffi_arm_neon.rs,ring-0.17.14/src/aead/poly1305/ffi_fallback.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "2f2f4afce114b8a1b3c1d14a18eeb841fe5803dc553cfda3254bc0eb90e2293b"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/agreement.rs, ring-0.17.14/src/ec.rs, ring-0.17.14/src/ec/curve25519/ops.rs, ring-0.17.14/src/ec/suite_b/curve.rs, ring-0.17.14/src/ec/suite_b/ecdh.rs, ring-0.17.14/src/signature.rs, ring-0.17.14/tests/agreement_tests.rs, ring-0.17.14/tests/digest_tests.rs, ring-0.17.14/tests/ed25519_tests.rs, ring-0.17.14/tests/pbkdf2_tests.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/agreement.rs,ring-0.17.14/src/ec.rs,ring-0.17.14/src/ec/curve25519/ops.rs,ring-0.17.14/src/ec/suite_b/curve.rs,ring-0.17.14/src/ec/suite_b/ecdh.rs,ring-0.17.14/src/signature.rs,ring-0.17.14/tests/agreement_tests.rs,ring-0.17.14/tests/digest_tests.rs,ring-0.17.14/tests/ed25519_tests.rs,ring-0.17.14/tests/pbkdf2_tests.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "7f5ad230d8156d356ddde6fc7da616155c3a22390a4f36edb81e0995990ecf19"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/arithmetic.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/arithmetic.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "1e84d94cf2609b964e7a1a8118c40ff5fac131e75f1e44290c86bfe80c2ae22f"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/arithmetic/bigint.rs, ring-0.17.14/src/arithmetic/bigint/boxed_limbs.rs, ring-0.17.14/src/arithmetic/bigint/private_exponent.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/arithmetic/bigint.rs,ring-0.17.14/src/arithmetic/bigint/boxed_limbs.rs,ring-0.17.14/src/arithmetic/bigint/private_exponent.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "fea1e7957d9e391d2f48d8a875807b136d7fc00144249e7e3ba41e73c8218f72"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/arithmetic/ffi.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/arithmetic/ffi.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "81bdb0e7c0426a845a01b30cb149984faca6f332e13641403de7f2acc4515e39"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/arithmetic/inout.rs, ring-0.17.14/src/arithmetic/limbs/aarch64/mod.rs, ring-0.17.14/src/arithmetic/limbs/aarch64/mont.rs, ring-0.17.14/src/arithmetic/limbs/mod.rs, ring-0.17.14/src/arithmetic/limbs/x86_64/mod.rs, ring-0.17.14/src/arithmetic/limbs512/mod.rs, ring-0.17.14/src/arithmetic/limbs512/storage.rs, ring-0.17.14/src/deprecated_test.rs, ring-0.17.14/src/polyfill/slice/as_chunks.rs, ring-0.17.14/src/polyfill/slice/as_chunks_mut.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/arithmetic/inout.rs,ring-0.17.14/src/arithmetic/limbs/aarch64/mod.rs,ring-0.17.14/src/arithmetic/limbs/aarch64/mont.rs,ring-0.17.14/src/arithmetic/limbs/mod.rs,ring-0.17.14/src/arithmetic/limbs/x86_64/mod.rs,ring-0.17.14/src/arithmetic/limbs512/mod.rs,ring-0.17.14/src/arithmetic/limbs512/storage.rs,ring-0.17.14/src/deprecated_test.rs,ring-0.17.14/src/polyfill/slice/as_chunks.rs,ring-0.17.14/src/polyfill/slice/as_chunks_mut.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "9516efec29bcdaaf2e31549fddd0ec52cf5d91c9bfa96702fb0d666f6d8d8f5a"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/arithmetic/montgomery.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/arithmetic/montgomery.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "77e2f0aee6927969cdb1b5b7bd894539728127b364515d4981f01ac990359f9e"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/arithmetic/n0.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/arithmetic/n0.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "38a6ec7a22e71a78f91d9b785a3657f1b119beb8bd8b0e04df316b1880ca62d2"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/bssl.rs, ring-0.17.14/src/hkdf.rs, ring-0.17.14/src/io/der.rs, ring-0.17.14/src/pbkdf2.rs, ring-0.17.14/tests/hkdf_tests.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/bssl.rs,ring-0.17.14/src/hkdf.rs,ring-0.17.14/src/io/der.rs,ring-0.17.14/src/pbkdf2.rs,ring-0.17.14/tests/hkdf_tests.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "dfb17ab986e447f02bce4df5a83543ac374ee5306e170ea79d9b6abb47652720"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/c.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/c.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "4a42f2ce6a381bc99573c7bb3402bfc2a6ae999428ec28695e825fd20ff985c5"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/cpu/arm.rs, ring-0.17.14/src/cpu/arm/darwin.rs, ring-0.17.14/src/cpu/arm/fuchsia.rs, ring-0.17.14/src/cpu/arm/linux.rs, ring-0.17.14/src/cpu/arm/windows.rs, ring-0.17.14/src/error/into_unspecified.rs, ring-0.17.14/src/error/key_rejected.rs, ring-0.17.14/src/error/mod.rs, ring-0.17.14/src/error/unspecified.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/cpu/arm.rs,ring-0.17.14/src/cpu/arm/darwin.rs,ring-0.17.14/src/cpu/arm/fuchsia.rs,ring-0.17.14/src/cpu/arm/linux.rs,ring-0.17.14/src/cpu/arm/windows.rs,ring-0.17.14/src/error/into_unspecified.rs,ring-0.17.14/src/error/key_rejected.rs,ring-0.17.14/src/error/mod.rs,ring-0.17.14/src/error/unspecified.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "a1de28dd15d492d04a589bd24d738a78e6ff86b7100017c23961a2f3b2693132"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/cpu/intel.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/cpu/intel.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "330113b2198c4da8fda6cb1b723a4bf177d7d471e1954c3f786e0cc3815520db"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/debug.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/debug.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "a264e6ecbb96738bd7385067768eecae76843dad219a8f5549bf4327a085d9b7"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/digest.rs, ring-0.17.14/src/digest/dynstate.rs, ring-0.17.14/src/ec/curve25519/scalar.rs, ring-0.17.14/tests/rand_tests.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/digest.rs,ring-0.17.14/src/digest/dynstate.rs,ring-0.17.14/src/ec/curve25519/scalar.rs,ring-0.17.14/tests/rand_tests.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "e6be49f5608cf90f6b17ca48506967b7cd2ac6a1afafd16891395ea7eb35025a"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/digest/sha1.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/digest/sha1.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "17c1e9bd9a6e4c153fb9d4799c782ec3c73209badd370ba6af6cc013bd7aa428"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/digest/sha2/fallback.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/digest/sha2/fallback.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "def0956b3c24824a62c8f8f6b31f0d5ecf13a82ddfb4a14fca4b9292c62c09cc"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/digest/sha2/mod.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/digest/sha2/mod.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "571a10f8047a0fb1fd161d04896dfca6373bf8d0606ea49a948ad252f37d5aa0"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/ec/suite_b/ops/elem.rs, ring-0.17.14/src/pkcs8.rs, ring-0.17.14/tests/rsa_tests.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/ec/suite_b/ops/elem.rs,ring-0.17.14/src/pkcs8.rs,ring-0.17.14/tests/rsa_tests.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "b513b7bc1a6844fa2a27e39d42c2bf2f49e142c9afe928ac458c2203528d0b6a"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/ec/suite_b/ops/p256.rs, ring-0.17.14/src/ec/suite_b/ops/p384.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/ec/suite_b/ops/p256.rs,ring-0.17.14/src/ec/suite_b/ops/p384.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "1992bdfcc167bcc2e41a493b905b4fdf05ae4be32350ebe0ab0f5aa925596162"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/limb.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/limb.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "ee0af6ac0629846be4aeaccce432c35b254cde9eb1819467e9bb3023ff5e8d21"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/polyfill/array_split_map.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/polyfill/array_split_map.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "cf5e6bf5152921c93919cdaa7555a65b6f2ffda8018f44b5655c1d5fead36a51"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/polyfill/slice.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/polyfill/slice.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "a8040aa6ad623505276a81cf93128024eb4f8e5411b78b15c68a43ba3290295d"
+  },
+  {
+    "label": "ring native/source notice\nFiles: ring-0.17.14/src/polyfill/unwrap_const.rs",
+    "source": "ring-0.17.14.crate:ring-0.17.14/src/polyfill/unwrap_const.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "514793d77703272686d8a5d6fd1f8276c1fbeae542b55bd57456fd71f3f75f4c"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/core/src/ptr/mod.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/core/src/ptr/mod.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "a7d9292295320d21b8b77d05659b721a6211ed9a05ecdcbda4421f596b7bf68e"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/core/src/ptr/mod.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/core/src/ptr/mod.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "9b92ae83d0afed8120124fdb06b0d1ee302a32c23671bb46a0c72dba961b6a29"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/core/src/result.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/core/src/result.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "16b2c0cfddddc38b923f8ab3260899523cf9369f2aaae0d668264dde73e25208"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/core/src/slice/memchr.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/core/src/slice/memchr.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "2ccfcf2a31aac8bbdfb071619d051e756eedeb805ccf40f8159f3accf3abe107"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/env.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/env.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "19cdc057300ecca5e04c60de52b7f6758e5d7e74cd6de740fb18230b3a9adaf8"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "a240093e453586ae711a3dbc8870e421bed37dd4ec9c36a74e49dc8e99d4a85d"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "4e8d1b3310373825aaa89a40c8c5cbfad5494c2440f14afabca0161f93927245"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "b017d945e8f0e76350b3ea4aaa22c909e4ebead3bfb520940c1aba259541e8de"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "f5eaafd6aca6778c36ddfe3531aed7e7877a9bc2e7eb9cb37d2849c2533e336a"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "f44ade931bf1dc22f7e0451fc84dfbc0eb23d40452026b861c4e094021df2c9e"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "5891fd21fc6074e4e49a329160bd76691923fa006bf0362a7a9ec29d45c486d5"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "cec72689ef17d298ff0361848b509975e30004cb99188f45a968f6419dcc8baf"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "6bbb8ec7abef29077ccbfe32ec56abaae4bc41827db79a6284553a570f254fc5"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "5aabc6327372c1310b2972d93d7485afb1b402b7c656915a4c8a693d680fe179"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "1b06e0c0f683f9ed37941dfc28d40fc9ada2d93da32f9e774447940d582cf1d5"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "e1f52c146b51e3981eab4e577cf570669cdb2210ab523910c131bc53fea3f3e3"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "800745af22b5c7eeca049727f3e7bbdd4d863490d20e739e1dd1184c62a54cac"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "24679afe9bfb03364e9234f6932526e924ea3dab5555cb4b55ac9bae8b1f29ba"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "686917f59ff7f8cbe988490cf73f753a68be746797752c3a7aa664653f440cef"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "13f0d7ba711494e87906756a42fb874f574a1c470010f67bb2678a333c7e6241"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "877b7c0913439a02b03a6491b49c0217db5c8bcc211e00d1edda077f52c3c967"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "e6c6de099501b0a5e7e23182da3d465b66e31eb5201fa3b43b16aac8a7c1e796"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "414c99b7fa8a66c575a973c65e359ef21fbe3bc664b12b3bbfffa34b445f3490"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "ee7a9c82544212b8662a7fbdabf46b66730175766d2af2875e17a3617053f911"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "73684b85d01390ff10983c15dcd595aa1ee3eeb27bfaa0b9ed6537a2958400b9"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "5a221d94d85569436f7324572680c882f27b31b159b83ef8c07ffaa5d653e45e"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "565dcff9eec9d738c21e52128de6b9887fb2749b307070d350f47c5b61655897"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "6673dbfb8b26859bd33fc8edfc778c4b771004a4431b70268ae052e6bc571c70"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "3903a82e525f70f2a93942bb0b2b73ffc7817052434049cd856c9bc269e9450e"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "6c74e658415ba0912c225b0c3440a5e5974f1a27108e43012ebdd6f91f01a5e5"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "b035eedd081c56ddd06f4904a92875de7c730359ee5092937f09d898bd47ea08"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "6f50651c24136f279b444cced5c266b8945e68aef6ffa0faa8f31f68fdfa71b2"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "c116aea636fb686ffded64ba541bc7b7b0acbcb7e7d09dee13f15223172822f3"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "6124d602af2030daac3940be6f151f18d281f70107618f027e4105e0485f34ea"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs/tests.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs/tests.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "c21d4de1198b01fcbcb83c0fb0bb47eb6af129284555666784a242761ac126c5"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs/tests.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs/tests.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "f9280c121183393f69b99986546b80b7db0252d40a0b9ee2cd19f7d8d2141c77"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs/tests.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/fs/tests.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "4b23e3dfdfe0c46bcea80d29b2d0f79a9874866a58f59a60d0a440456d1e7d46"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/net/linux_ext/addr.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/net/linux_ext/addr.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "2bd50fac3598b8f8b3821145d54bc46418fadcc15b7337be48d3a20fa00f1716"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "45fa9e010ef91dbf2b4de2112580fad9f686ec63687ad84a99dcae0b9ee200a5"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "c0157097a7661c8202f4c01eaefac8f86612888b73a666452d78f298abd5de43"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "184d2ca6631401da2e7c02e39c88b3be22941210b9f0ca34495a57acd3aa3f3c"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "4f0c55f7058625b7544e02996204a5f88dd2df60c11627c948951cf78790a5be"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "08d873f462fb99f0189b1b7d65ca150e3d5908c84c5c250ee1033fcb67d3c321"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "84e4276e27f0f7f3eae55b0e47117da10a281b14114b25d2e83d80e1397b8d42"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "9054ad987de240c795af11283292d5c5ddb680112dea781e9b04777bf6a25de7"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "8928511d7b7ccc438ffdd54f0ab7e30a93688fa8b84741020cfe7d3cd4e2cc03"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/mod.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/mod.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "70038aca9969995042c94f2a4fa4930d52a418ceedcf304d4b18228652294383"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/process.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/process.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "d290a6745d6c571a8bfe6d72d6056bc7c6c965463c4a02cc5327a95d466c9ffc"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/xdg.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/unix/xdg.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "e8ed3537e9578851b542f30d66ad1f756bdb0a215696c9b27fd1204a205bd99b"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/wasi/mod.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/wasi/mod.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "cf2e5a7655f0b8d7ddae66e6e5b8c58a9f60d1d1764401ea65b73bbaafbf243a"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "7ed50a9f663fa7901c7ef4be380e266eacecdb35fe1cc878043103afeba1222f"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "7db388ab1c9dc8230832b060402460676ca81ae456dad66c31761866fda197c5"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "e54d45b8bc39430d6e08d6a9999f3c6bcf08da08a21fc4eb32e3d956a962ed5e"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/os/windows/fs.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "f2fa7d856251de3c060014d3526e92db48c19754baa9189ff4e87f88b5649614"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/path.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/path.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "21d6686aa947bb463cced1936a39a9a91c5cf0b4530018e5c1eb7cd63e60cc49"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/path.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/path.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "8b4756601e94e24734f567eaea074f21567c3944cb8d548a7a2af7e417490dc7"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/path.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/path.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "084b2adecda69c17a17f66c80a062ec7ccc2a98a9fc8e25319494975d09e144c"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/path.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/path.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "b72a368c9a24332032496ae3043983f0dc6f0e8ce7c625c8a6d9ab37e1aba833"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/path.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/path.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "4fc3c81185f3632ad734691228e14ba8e7df382876d923f0c7388b2b9276f14b"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/process.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/process.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "80fd1ba39153b59fde8800f316c606eacc5ab88d1efa2df6a49bddb2ba4e084a"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sync/mpmc/mod.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sync/mpmc/mod.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "47289e1869bbe4a590da5c282f8e6d068a31e8543057d86a1c5bc5782e78f5d5"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/hermit.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/hermit.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "107283264e50243a7eafc270bb026315de8cc0cbc9822f81f907cb57c352dfab"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "a0c868abf3b2b5b729fb4599f217fe1449d5866cbc716cc7822cc58609baf503"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "d03fe707c34a7314461ab4b9a0e7e53252403fbe0348a4a02f80625f65a9f0f4"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "60b61bbbb4cbce1aeb163e41eb3f882612427b6f28845d63398a9f64fda78026"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "f49e9ca326441e73349559a65a56b9bf9c03c1c15f1d75046f7632613b8bbc57"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "9af7195027077c96e6846745ec1c6b2b75732eac36bc6ecbce2cab10ac5d699c"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "5a203c46d9a33b15518c134b96e435352450a32d67a0be54b3dd35dd76e5dff5"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "cdafbcc595533a5e087ceb25cf38c4ea068797b42a70896ae48430667a4695ec"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix/tests.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/unix/tests.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "ecb9919de57fbf296ebebe6c50d06c60517c03db64ae40881b53bd293725954f"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/vexos.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/vexos.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "a70f67d1880e02cbfed6c8b8e3a16304a3d0cd64db304e72168c13680329f2b0"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/windows.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/windows.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/windows.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/windows.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "69778b97f10a2a80523cd4941d08bed9f04eab2bae3b71b85ae6adecaaea3ab6"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/windows.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/windows.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "363881400315e4e83dc547f2f0988ac801ebc7b17076052387c45cab966f5a5a"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/windows/remove_dir_all.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/fs/windows/remove_dir_all.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "28dabd8b768316469d68574613547181dadf4efcf09c5c0b6e0ce05cfa022e81"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/pal/uefi/mod.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/pal/uefi/mod.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "ada7bdeb623c45f29e9e8d4f40c033158983bac46e20d1ed438a512dfdb00de1"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/pal/unix/stack_overflow.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/pal/unix/stack_overflow.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "df392c0156d1d03917c20f7b994779a050f9be8206c12c8a6adb2c80d8aa4980"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/process/windows.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/process/windows.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "20dfa798568063b121b3b2e5c50c651b50391e1bbcec3db391db0c9205e23681"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/sync/mutex/fuchsia.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/sys/sync/mutex/fuchsia.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "6133ca74dff96ceeed521c04c732b4c644190a74d1a722f9e301650fb5146ac4"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/thread/functions.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/thread/functions.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "168934e63a8cb5479adce82a53562b9e45375b48d9604db4f165cfa35c5060f8"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/thread/join_handle.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/thread/join_handle.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "84c18d2e75d7414702566d7700cd50fea360b770750a3c3c2da5ed70a240cf06"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/thread/scoped.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/src/thread/scoped.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "7920273d3a5619712fed4ce74a02f5dd04eb9d1060eea835faedea0de113b2bc"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins/src/probestack.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins/src/probestack.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "6d9b208b35fe86dda1dba0f5e5181ea0583bb9ed6aed2b0d48af43a8bd90211e"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/acos.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/asin.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/j0.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/j1.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/jn.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log10.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log2.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/rem_pio2_large.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/acos.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/asin.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/j0.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/j1.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/jn.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log10.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log2.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/rem_pio2_large.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "74344ebf347f27ca446e00f1c1921f705546f4b20e0fb31c183cd2c8464b1bc5"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/acosf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/asinf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/atan.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/atan2f.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/atanf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/cbrtf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/cosf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/erf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/erff.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/expf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/expm1.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/expm1f.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/j0f.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/j1f.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/jnf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/k_cosf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/k_sinf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/lgammaf_r.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log10f.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log1p.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log1pf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log2f.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/logf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/powf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/rem_pio2f.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/sincos.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/sincosf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/sinf.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/tanf.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/acosf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/asinf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/atan.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/atan2f.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/atanf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/cbrtf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/cosf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/erf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/erff.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/expf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/expm1.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/expm1f.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/j0f.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/j1f.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/jnf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/k_cosf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/k_sinf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/lgammaf_r.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log10f.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log1p.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log1pf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/log2f.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/logf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/powf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/rem_pio2f.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/sincos.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/sincosf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/sinf.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/tanf.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "0c3d0381d2cd647be68590170490be5f624c962d9f95eb698489e578c1de8f05"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/approx/cbrtf64.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/approx/cbrtf64.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "11a1dc1ce0b6b2879da93a266c5aebe81c4324e749c77a2ce3048b5b24ab58c0"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/atan2.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/lgamma_r.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/atan2.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/lgamma_r.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "11f476f899dacfef801a097465ad0755ad4546afe03b02c9a17aa38e228344e1"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/cbrt.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/fma.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/ceil.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fma.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/rint.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/sqrt.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/hypot.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/cbrt.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/fma.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/ceil.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fma.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/rint.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/sqrt.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/hypot.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "f73e293daa12abe52dd73882816fe4002b4f6e69065892abd57881180fb26bf2"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/cbrt.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/cbrt.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "225167f203ade8fe5b0714aed4abf358d23fb9dd385a63580ba216ac88a7b799"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/cos.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/cos.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "78faf2571fe417f3bcd7b38798c4d9ddf499ca43d1ede6fa44992ba75445bff7"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/exp.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/pow.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/exp.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/pow.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "15e78071c8347a689c48ec92bbdd5eba7bd8dc74f86ee3e7ad31d34b24fefe83"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/exp2.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/exp2.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "2728151294eb93196ab6dd7cb28ddc6e9ab76bf7ebf8c2e1a15f0d2221c98c76"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/exp2f.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/exp2f.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "d9d31636bf6dc09dbbe83abe0514e8d867f635bf3ef99b5163b54c56e6524077"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/fmaf16.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/fmaf16.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "80ef000233f022bf9edb37d7237c8266453c31bfa014693626cdbb281d6e5504"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/floor.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/floor.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "cc7ddd4aec15d176fc40570979991b6bbe00d3ec3d9bbf7c5dd8bfe0e04278b9"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fmax.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fmaximum.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fmaximum_num.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fmin.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fminimum.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fminimum_num.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fmod.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/support/int_traits/narrowing_div.rs, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/support/modular.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fmax.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fmaximum.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fmaximum_num.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fmin.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fminimum.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fminimum_num.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/fmod.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/support/int_traits/narrowing_div.rs,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/support/modular.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "a997449a08324894b63f1159f979a44ef52a95bd4a0d2374c76e2e1b87e50963"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/trunc.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/generic/trunc.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "b1e0b197ab096657b36a818578674de4e4af0030827bf8a6e5b4405fafda000d"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/hypot.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/hypot.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "17050c001d36064dbfc01fdbd90b93b7ea0ab69524394915e97cf654ede6e4bd"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/k_cos.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/k_cos.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "cd052f4fc22d6625c9f4439c66d4512a9011446d3f2dff15842925b024821cbb"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/k_sin.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/k_sin.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "e00a06f546cd736ac64d82d5c88c23810aec69eec0f61cc64705ea57693e6049"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/k_tan.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/k_tan.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "ae36b8732e1a0fd7cf1b44f0840d2fca6e15432a92e6c1a1d7ef4bd5b5d83bc6"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/k_tanf.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/k_tanf.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "5a534ed1f9266ed799e9f2e3f830f15411762021829da121b23df5edc498c6b6"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/rem_pio2.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/rem_pio2.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "da28bd93659d512cba362af000b10121e71e63ef135f3ba398a05f376e90bc7e"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/sin.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/sin.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "0beade56a930d1c1a35daa8cd5bbe8350757c3b38ac025a553f7db8bdfaf9e16"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/tan.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/src/math/tan.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "59ee71a59035c18a5043881ef760e797cc17dc0cfd65eb43075f72a0ecf8292a"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/backtrace/src/print/fuchsia.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/backtrace/src/print/fuchsia.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "5505314a3a71438cda805008cd03e465e1eebf0418df14fe4bcabd2cc0d32936"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/core_arch/src/riscv_shared/mod.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/core_arch/src/riscv_shared/mod.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "4e2c10bba3481af91afbb92529eb4098030be2f90c48e6fec5eb6479ed0b8b8e"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/core_arch/src/riscv_shared/mod.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/core_arch/src/riscv_shared/mod.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "a3746e757350c65b95c7d400c6fc51837788aca658eb7aeb196ccbb6647c28aa"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/core_arch/src/x86/clflushopt.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/core_arch/src/x86/clflushopt.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "4016b251ebe4dafcbca7b2f6241425fd6959519267241cf7d5af1793617100f4"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/core_arch/src/x86/kl.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/core_arch/src/x86/kl.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "c20984b8c7a2add4d17efdf32627193994952233ad6efff79a96d0ece47e5bef"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/core_arch/src/x86/sse2.rs",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/core_arch/src/x86/sse2.rs",
+    "transform": "whole copyright/license comment block",
+    "sha256": "01b5b6aafba5fad9222238b05ac88d05bf34239d3d7884dd17dd0168da376389"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/stdarch-gen-hexagon-scalar/hexagon_protos.h, rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/stdarch-gen-hexagon/hvx_hexagon_protos.h",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/stdarch-gen-hexagon-scalar/hexagon_protos.h,rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/stdarch-gen-hexagon/hvx_hexagon_protos.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "76fe21148be565852ba80b78927c5cea2fb3f4faa3f2f9b4d576dd92bca06387"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/stdarch-gen-loongarch/lasxintrin.h",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/stdarch-gen-loongarch/lasxintrin.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "565ae57e3c052ad3312da3c5c23c1ff5d209c60f317125309e553d98f6d3472d"
+  },
+  {
+    "label": "Rust in-tree source notice\nFiles: rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/stdarch-gen-loongarch/lsxintrin.h",
+    "source": "rust-src-1.98.1.tar.xz:rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/crates/stdarch-gen-loongarch/lsxintrin.h",
+    "transform": "whole copyright/license comment block",
+    "sha256": "0490962d6ba965337795251aa08a6ddfbea8e8d9b3d13a8a17b6ea13df9ecd2a"
+  }
+]

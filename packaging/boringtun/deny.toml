@@ -3,9 +3,9 @@
 # `scripts/boringtun-artifact.sh licenses`; see docs/BORINGTUN_ARTIFACTS.md.
 
 [graph]
-# Only what is linked into the Linux artifacts: no dev-dependencies, and only
-# the dependencies of the two shipped targets.
-targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+# Only what is linked into the release artifacts: no dev-dependencies, and only
+# the dependencies of all five reviewed targets.
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "armv7-unknown-linux-musleabihf", "x86_64-apple-darwin", "aarch64-apple-darwin"]
 exclude-dev = true
 
 [advisories]

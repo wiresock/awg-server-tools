@@ -21,6 +21,7 @@
 
 BTC_SOURCE_REPOSITORY="https://github.com/Wiresock-Foundation/wiresock-boringtun"
 BTC_RELEASE_DOWNLOAD_URL="https://github.com/wiresock/awg-server-tools/releases/download"
+BTC_FORK_RELEASE_DOWNLOAD_URL="https://github.com/Wiresock-Foundation/wiresock-boringtun/releases/download"
 # Historical installers embed this URL; GitHub redirects the renamed repository.
 BTC_LEGACY_RELEASE_DOWNLOAD_URL="https://github.com/wiresock/amneziawg-install/releases/download"
 BTC_EMBEDDED_NAMES="TAG BASE_URL VERSION SOURCE_REPOSITORY SOURCE_COMMIT BUILD
@@ -35,7 +36,7 @@ btc_embedded_value() { # <installer> <NAME>
 # Every way in which the release an installer embeds is not internally
 # consistent, one per line; nothing when it is. The tag, the download URL and
 # the asset names must all follow from the embedded version, source commit and
-# build, and the four hashes must be four different SHA-256 values.
+# build, and every populated hash must be a different SHA-256 value.
 btc_embedded_release_problems() { # <installer>
 	_btc_embedded_release_problems "$1" with-build
 }
@@ -52,7 +53,8 @@ btc_buildless_embedded_release_problems() { # <installer>
 }
 
 _btc_embedded_release_problems() { # <installer> <with-build | without-build>
-	local INSTALLER="$1" FORMAT="$2" NAME COUNT STEM ARCH
+	local INSTALLER="$1" FORMAT="$2" NAME COUNT STEM ARCH ARM_FIELDS=0 HASH_COUNT=4
+	local HASH_NAMES="ARCHIVE_SHA256_X86_64 BINARY_SHA256_X86_64 ARCHIVE_SHA256_AARCH64 BINARY_SHA256_AARCH64"
 	local -A E=()
 	case "${FORMAT}" in
 		with-build | without-build) ;;
@@ -84,19 +86,45 @@ _btc_embedded_release_problems() { # <installer> <with-build | without-build>
 	[[ "${E[TAG]}" == "${STEM}-b${E[BUILD]}" ]] ||
 		echo "AWG_BT_RELEASE_TAG '${E[TAG]}' is not ${STEM}-b${E[BUILD]}"
 	[[ "${E[BASE_URL]}" == "${BTC_RELEASE_DOWNLOAD_URL}/${E[TAG]}" ||
+		"${E[BASE_URL]}" == "${BTC_FORK_RELEASE_DOWNLOAD_URL}/${E[TAG]}" ||
 		"${E[BASE_URL]}" == "${BTC_LEGACY_RELEASE_DOWNLOAD_URL}/${E[TAG]}" ]] ||
 		echo "AWG_BT_RELEASE_BASE_URL '${E[BASE_URL]}' is not an exact current or historical repository URL for ${E[TAG]}"
 	for ARCH in X86_64:x86_64 AARCH64:aarch64; do
 		[[ "${E[ASSET_${ARCH%%:*}]}" == "${STEM}-linux-${ARCH#*:}-musl.tar.gz" ]] ||
 			echo "AWG_BT_RELEASE_ASSET_${ARCH%%:*} '${E[ASSET_${ARCH%%:*}]}' is not ${STEM}-linux-${ARCH#*:}-musl.tar.gz"
 	done
-	for NAME in ARCHIVE_SHA256_X86_64 BINARY_SHA256_X86_64 ARCHIVE_SHA256_AARCH64 BINARY_SHA256_AARCH64; do
+	# Historical installers have no ARMv7 fields. A prepared installer has all
+	# three empty; an adopted release has all three populated. Partial fields,
+	# duplicate assignments and partial values are never an adoption contract.
+	for NAME in ASSET_ARMV7 ARCHIVE_SHA256_ARMV7 BINARY_SHA256_ARMV7; do
+		COUNT="$(grep -c "^AWG_BT_RELEASE_${NAME}=" "${INSTALLER}")"
+		if [[ "${COUNT}" != 0 ]]; then
+			ARM_FIELDS=$((ARM_FIELDS + 1))
+			[[ "${COUNT}" == 1 ]] || echo "AWG_BT_RELEASE_${NAME} is assigned ${COUNT} times, not once"
+			grep -qE "^AWG_BT_RELEASE_${NAME}=\"[^\"]*\"$" "${INSTALLER}" ||
+				echo "AWG_BT_RELEASE_${NAME} must be a double-quoted literal"
+		fi
+		E[${NAME}]="$(btc_embedded_value "${INSTALLER}" "${NAME}" | head -n 1)"
+	done
+	[[ "${ARM_FIELDS}" == 0 || "${ARM_FIELDS}" == 3 ]] || echo "the three ARMv7 release fields must all be present or all absent"
+	if [[ -n "${E[ASSET_ARMV7]}${E[ARCHIVE_SHA256_ARMV7]}${E[BINARY_SHA256_ARMV7]}" ]]; then
+		[[ "${E[ASSET_ARMV7]}" == "${STEM}-linux-armv7-musleabihf.tar.gz" ]] ||
+			echo "AWG_BT_RELEASE_ASSET_ARMV7 '${E[ASSET_ARMV7]}' is not ${STEM}-linux-armv7-musleabihf.tar.gz"
+		HASH_NAMES+=" ARCHIVE_SHA256_ARMV7 BINARY_SHA256_ARMV7"
+		HASH_COUNT=6
+	fi
+	for NAME in ${HASH_NAMES}; do
 		[[ "${E[${NAME}]}" =~ ^[0-9a-f]{64}$ ]] ||
 			echo "AWG_BT_RELEASE_${NAME} '${E[${NAME}]}' is not a lowercase SHA-256"
 	done
-	COUNT="$(printf '%s\n' "${E[ARCHIVE_SHA256_X86_64]}" "${E[BINARY_SHA256_X86_64]}" \
-		"${E[ARCHIVE_SHA256_AARCH64]}" "${E[BINARY_SHA256_AARCH64]}" | LC_ALL=C sort -u | wc -l)"
-	[[ "${COUNT}" == 4 ]] || echo "the four embedded SHA-256 values are not four different values"
+	COUNT="$(for NAME in ${HASH_NAMES}; do printf '%s\n' "${E[${NAME}]}"; done | LC_ALL=C sort -u | wc -l)"
+	if [[ "${COUNT}" != "${HASH_COUNT}" ]]; then
+		if [[ "${HASH_COUNT}" == 4 ]]; then
+			echo "the four embedded SHA-256 values are not four different values"
+		else
+			echo "the six embedded SHA-256 values are not six different values"
+		fi
+	fi
 }
 
 # Every way in which the artifact pin's commit is not where it belongs, one per

@@ -53,10 +53,12 @@ operation and many fixes) and added everything else in the repository:
 - `amneziawg-web/`, the web management panel (Rust);
 - `amneziawg-proxy/`, the UDP proxy with protocol imitation (Rust);
 - the wrappers `amneziawg-web.sh` and `amneziawg-proxy.sh`, the build and
-  release scripts in `scripts/`, the BoringTun packaging in
+  release scripts in `scripts/`, the BoringTun packaging recipe in
   `packaging/boringtun/`, the tests, the CI workflows and the documentation.
 
-These files carry `SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business
+The separately attributed upstream notice texts in `packaging/boringtun/` keep
+their original holders and terms. The repository's own files carry
+`SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business
 as WireSock)`. The attribution rests on the git history, in which these files
 were written by Vadim Smirnov or by automated coding agents that he directed on
 his repository, with version-bump commits from GitHub Actions. Commit
@@ -87,7 +89,10 @@ A contributor keeps the copyright in their contribution; see
 | `amneziawg-install.sh` | MIT | 2019 angristan; 2024 Roman Zakharchuk; 2024 Markus Varckin; 2026 Vadim Smirnov (doing business as WireSock); contributor Denis Glotov |
 | `amneziawg-web/` | MIT (`amneziawg-web/LICENSE`) | 2026 Vadim Smirnov (doing business as WireSock) |
 | `amneziawg-proxy/` | MIT (`amneziawg-proxy/LICENSE`) | 2026 Vadim Smirnov (doing business as WireSock) |
-| everything else | MIT (`LICENSE`) | 2026 Vadim Smirnov (doing business as WireSock) |
+| `packaging/boringtun/fork-license.txt` | BSD-3-Clause | Cloudflare, Inc. 2019; Vadim Smirnov (doing business as WireSock), existing 2024-2026 range retained but 2024 unverified |
+| `packaging/boringtun/runtime-notices.txt` | `LicenseRef-BoringTun-Runtime-Notices`: Linux profile; the original terms for each included portion | Upstream holders identified by the reproduced source notices |
+| `packaging/boringtun/runtime-notices-macos.txt` | `LicenseRef-BoringTun-Runtime-Notices-macOS`: macOS profile; the original terms for each included portion | Upstream holders identified by the reproduced source notices |
+| other repository-authored files | MIT (`LICENSE`) | 2026 Vadim Smirnov (doing business as WireSock) |
 
 `amneziawg-web/LICENSE` previously gave the year as 2024. The component first
 appears in this repository on 2026-03-25, as a single commit that already
@@ -96,30 +101,46 @@ is now 2026.
 
 ## Third-party software
 
-The repository contains no copied or vendored third-party source code other
-than the inherited installer code described above. The software below is used,
-downloaded or distributed separately and keeps its own license; it is not
-relicensed by this project.
+The repository contains the inherited installer code described above and
+vendored upstream license/notice texts for BoringTun packaging. The software
+below keeps its own license; it is not relicensed by this project.
+
+The runtime notice collections include conservative source-notice supersets and
+retain the terms applying to each portion. Their distinct `LicenseRef` identifiers
+resolve to exact copies in `LICENSES/`: the Linux `runtime-notices.txt` collection
+and the macOS `runtime-notices-macos.txt` collection. These references are not
+blanket license grants or assertions that every mentioned source is linked.
+The copyright annotations identify the holders through the reproduced notices,
+without inventing combined year ranges or assigning their rights to Vadim.
+The macOS profile omits Linux musl and self-contained CRT/libunwind sections;
+common Rust and ring source-notice supersets remain. The packaging/provenance
+metadata and generator remain the repository's own MIT-licensed work. See
+[the metadata explanation](docs/LICENSING.md#vendored-notice-texts-and-spdx-metadata).
 
 ### Distributed by this project: WireSock BoringTun (`boringtun-cli`)
 
 The BoringTun backend runs `boringtun-cli`, built from
 [WireSock BoringTun](https://github.com/Wiresock-Foundation/wiresock-boringtun),
 a fork of [cloudflare/boringtun](https://github.com/cloudflare/boringtun), at
-the commit pinned in `packaging/boringtun/pin.env`. Its archives are published
-as releases of this repository and downloaded by the installer.
+the commit pinned in `packaging/boringtun/pin.env`. Existing archives were published
+as releases of this repository and are downloaded by the installer. Fork-owned
+publication is being prepared; adoption remains a separate reviewed update.
 
 - License: BSD-3-Clause. Upstream notice: Copyright (c) 2019 Cloudflare, Inc.
-  Files added by the fork carry "Copyright (c) 2024-2026 WireSock", the
-  trade name of Vadim Smirnov; correcting that notice is tracked in
-  [issue #175](https://github.com/wiresock/awg-server-tools/issues/175).
+  The prepared fork notice names Vadim Smirnov (doing business as WireSock).
+  Its existing 2024-2026 range is retained but its 2024 start remains
+  unverified and blocks release; [issue #175](https://github.com/wiresock/awg-server-tools/issues/175)
+  tracks the correction and replacement releases.
 - Each archive contains `LICENSE` (BoringTun's license) and
   `THIRD-PARTY-LICENSES` (the licenses of every Rust crate linked into the
   binary, generated by cargo-about and gated by cargo-deny), and its `MANIFEST`
   names the exact source repository and commit. The installer keeps all three
   next to the binary in `/usr/local/lib/amneziawg-install/boringtun/`.
-- The binary also links statically the musl C library and the Rust standard
-  library, whose notices `THIRD-PARTY-LICENSES` does not yet include; see
+- Linux binaries also link statically the musl C library and Rust runtime.
+  macOS binaries use the platform system libraries and a separate Rust/native
+  notice profile. The packaging fix appends the reviewed target-specific
+  notices, but existing published archives retain the omissions. The fix
+  requires new releases and a separate reviewed installer adoption; see
   [`docs/LICENSING.md`](docs/LICENSING.md#known-gaps) and [issue #175](https://github.com/wiresock/awg-server-tools/issues/175).
 
 ### Built from source on the server: Rust crates of the web panel and proxy

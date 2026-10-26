@@ -1,0 +1,28 @@
+{
+  "format": 2,
+  "rust_toolchain": "1.98.1",
+  "fork_license_sha256": "6adfe9856fbe7c19bf55de149f4ef35465dca35a13a94a9256b7e28329b37adc",
+  "source_lock_sha256": [
+    "d2d199e325b1b31b2b5ff6a02f66322b17aa563f6494761ee0f5856f7233d165",
+    "3d15a1248c7b083073aa2d8e41eeb076cd797069b6cb1070553102f0bb7aea02"
+  ],
+  "profiles": {
+    "linux-musl": {
+      "targets": [
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+        "armv7-unknown-linux-musleabihf"
+      ],
+      "runtime_file": "runtime-notices.txt",
+      "runtime_sha256": "fdfb2fb0409a9c7800ba5f516eeb1c455c00c6d9b91e2c0a35eb5446a1b9ddac"
+    },
+    "macos-system": {
+      "targets": [
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin"
+      ],
+      "runtime_file": "runtime-notices-macos.txt",
+      "runtime_sha256": "6db0c7220eee8d3df28d4b0607baf22bcf06585e659c70978dc1c77a81bb50bf"
+    }
+  }
+}

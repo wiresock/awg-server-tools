@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Unit tests for scripts/boringtun-artifact.sh. Nothing here compiles Rust:
-# a fixture git repository stands in for the BoringTun source, a shell script
-# for the binary, and mocks for cargo, rustc, readelf and uname. The real build
+# a fixture git repository stands in for the BoringTun source, a minimal static C
+# executable for the binary, and mocks for cargo, rustc and uname. The real build
 # runs in .github/workflows/boringtun-artifacts.yml.
 
 set -uo pipefail
@@ -55,6 +55,7 @@ PIN_FILE="${TEST_ROOT}/pin.env"
 run_script() {
 	env PATH="${BIN_DIR}:${PATH}" HOME="${TEST_ROOT}/home" CARGO_HOME="${TEST_ROOT}/cargo-home" \
 		RUSTUP_HOME="${TEST_ROOT}/home/.rustup" BORINGTUN_PIN_FILE="${PIN_FILE}" \
+		BORINGTUN_NOTICE_CONFIG="${TEST_ROOT}/notice-config" \
 		RUSTFLAGS="--caller-rustflags-must-not-leak" CFLAGS="-DCALLER_CFLAGS" \
 		bash "${ARTIFACT_SCRIPT}" "$@" >"${TEST_ROOT}/run.out" 2>"${TEST_ROOT}/run.err"
 	RUN_RC=$?
@@ -97,6 +98,10 @@ EOF
 
 cat >"${BIN_DIR}/rustc" <<EOF
 #!/usr/bin/env bash
+if [[ "\${1:-}" == --print && "\${2:-}" == sysroot ]]; then
+    printf '%s\n' "${TEST_ROOT}/sysroot"
+    exit 0
+fi
 printf 'rustc %s (0000000aa 2026-09-01)\n' "\$(cat "${STATE}/toolchain" 2>/dev/null || echo 1.98.1)"
 EOF
 
@@ -125,6 +130,22 @@ case "${1:-}" in
 		esac
 		mkdir -p "${CARGO_TARGET_DIR}/${target}/release"
 		cp "${STATE}/binary" "${CARGO_TARGET_DIR}/${target}/release/boringtun-cli"
+		python3 - "${STATE}" "${CARGO_TARGET_DIR}/${target}/release/boringtun-cli" <<'PY'
+from pathlib import Path
+import struct, sys
+state, binary = map(Path, sys.argv[1:])
+data = bytearray(binary.read_bytes())
+if (state / "machine").exists():
+    struct.pack_into("<H", data, 18, 183)
+if (state / "interp").exists():
+    offset = struct.unpack_from("<Q", data, 32)[0]
+    struct.pack_into("<I", data, offset, 3)
+if (state / "needed").exists():
+    offset = struct.unpack_from("<Q", data, 32)[0]
+    struct.pack_into("<IIQQQQQQ", data, offset, 2, 4, len(data), 0, 0, 32, 32, 8)
+    data.extend(struct.pack("<QQQQ", 1, 1, 0, 0))
+binary.write_bytes(data)
+PY
 		chmod 0755 "${CARGO_TARGET_DIR}/${target}/release/boringtun-cli"
 		;;
 	fetch)
@@ -175,13 +196,16 @@ chmod +x "${BIN_DIR}"/*
 
 # A stand-in for boringtun-cli: the version it reports is $1.
 write_fake_binary() {
-	cat >"$2" <<EOF
-#!/bin/sh
-case "\$1" in
-	--version) echo "boringtun $1" ;;
-	--help) printf 'Usage: boringtun-cli [OPTIONS] <INTERFACE_NAME>\n      --tun-fd <TUN_FD>\n      --uapi-fd <UAPI_FD>\n' ;;
-esac
+	cat >"${STATE}/fixture.c" <<EOF
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) puts("boringtun $1");
+    else puts("Usage: boringtun-cli [OPTIONS] <INTERFACE_NAME>\\n      --tun-fd <TUN_FD>\\n      --uapi-fd <UAPI_FD>");
+    return 0;
+}
 EOF
+	cc -static -s -Wl,--build-id=none -o "$2" "${STATE}/fixture.c" || exit 1
 	chmod 0755 "$2"
 }
 write_fake_binary 0.7.1 "${STATE}/binary"
@@ -212,8 +236,31 @@ SOURCE="${TEST_ROOT}/work/boringtun-src"
 mkdir -p "${SOURCE}/boringtun-cli"
 printf '[workspace]\nmembers = ["boringtun-cli"]\n' >"${SOURCE}/Cargo.toml"
 printf '# fixture lockfile\nversion = 4\n' >"${SOURCE}/Cargo.lock"
-printf 'Copyright (c) 2019 Cloudflare, Inc. All rights reserved.\n\nRedistribution and use in source and binary forms, with or without modification, are permitted.\n' \
-	>"${SOURCE}/LICENSE.md"
+cp "${PROJECT_ROOT}/packaging/boringtun/fork-license.txt" "${SOURCE}/LICENSE.md"
+mkdir -p "${TEST_ROOT}/notice-config"
+cp "${PROJECT_ROOT}/packaging/boringtun/"{notice-policy.json,runtime-notices.txt,fork-license.txt} "${TEST_ROOT}/notice-config/"
+[[ ! -f "${PROJECT_ROOT}/packaging/boringtun/runtime-notices-macos.txt" ]] || cp "${PROJECT_ROOT}/packaging/boringtun/runtime-notices-macos.txt" "${TEST_ROOT}/notice-config/"
+python3 - "${TEST_ROOT}" <<'PY'
+from pathlib import Path
+import hashlib, json, sys
+root = Path(sys.argv[1])
+target = "x86_64-unknown-linux-musl"
+name = target + "/lib/fixture-runtime.rlib"
+path = root / "sysroot/lib/rustlib" / name
+path.parent.mkdir(parents=True)
+path.write_bytes(b"fixture-runtime")
+(root / "notice-config/runtime-provenance.json").write_text(json.dumps({
+    "rust_toolchain": "1.98.1", "target_objects": {target: [name]},
+    "target_object_sha256": {target: {name: hashlib.sha256(path.read_bytes()).hexdigest()}}
+}))
+PY
+python3 - "${TEST_ROOT}/notice-config/notice-policy.json" "${SOURCE}/Cargo.lock" <<'PY'
+import hashlib, json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+policy = json.loads(path.read_text())
+policy['source_lock_sha256'] = [hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()]
+path.write_text(json.dumps(policy))
+PY
 printf '[package]\nname = "boringtun-cli"\nversion = "0.7.1"\n\n[dependencies.boringtun]\nversion = "0.7.1"\n' \
 	>"${SOURCE}/boringtun-cli/Cargo.toml"
 git -C "${SOURCE}" init -q
@@ -346,6 +393,12 @@ write_pin
 
 echo "=== Source and toolchain checks ==="
 
+# Exercise target identity through the same sourced helper used by packaging.
+for PLATFORM_TARGET in armv7-unknown-linux-musleabihf aarch64-apple-darwin x86_64-apple-darwin; do
+	PLATFORM_ARCH="$(bash -c 'source "$1"; bta_target_arch "$2"' _ "${ARTIFACT_SCRIPT}" "${PLATFORM_TARGET}" 2>/dev/null)"
+	assert_eq "${PLATFORM_TARGET%%-*}" "${PLATFORM_ARCH}" "new target ${PLATFORM_TARGET} has its explicit architecture"
+done
+
 run_script build "${SOURCE}" x86_64-unknown-linux-gnu "${TEST_ROOT}/b-gnu"
 assert_fails_with "unsupported target" "a glibc target is rejected"
 
@@ -457,13 +510,14 @@ assert_fails_with "depends on shared libraries" "a binary with shared library de
 rm -f "${STATE}/needed"
 printf 'AArch64\n' >"${STATE}/machine"
 run_script build "${SOURCE}" "${TARGET}" "${TEST_ROOT}/b-machine"
-assert_fails_with "is not a 64-bit x86_64 ELF executable" "a binary for another architecture fails"
+assert_fails_with "ELF architecture mismatch" "a binary for another architecture fails"
 rm -f "${STATE}/machine"
 
 echo "=== Package ==="
 
 THIRD_PARTY="${TEST_ROOT}/THIRD-PARTY-LICENSES"
 write_third_party "${THIRD_PARTY}"
+cat "${PROJECT_ROOT}/packaging/boringtun/runtime-notices.txt" >>"${THIRD_PARTY}"
 mkdir -p "${TEST_ROOT}/out-1" "${TEST_ROOT}/out-2"
 run_script package "${BUILD}" "${SOURCE}" "${THIRD_PARTY}" "${TEST_ROOT}/out-1"
 assert_succeeds "a build packages"
@@ -587,7 +641,9 @@ else
 fi
 make_variant license; printf 'not the license\n' >"${VARIANT_DIR}/LICENSE"; pack_variant
 check_variant license "not the expected notice" "an archive without the BSD-3-Clause notice is rejected"
-make_variant notices; write_third_party "${VARIANT_DIR}/THIRD-PARTY-LICENSES" bare; pack_variant
+make_variant notices; write_third_party "${VARIANT_DIR}/THIRD-PARTY-LICENSES" bare
+cat "${PROJECT_ROOT}/packaging/boringtun/runtime-notices.txt" >>"${VARIANT_DIR}/THIRD-PARTY-LICENSES"
+pack_variant
 check_variant notices "lacks required copyright notices" "an archive without the required curve25519-dalek notices is rejected"
 make_variant version; write_fake_binary 0.7.0 "${VARIANT_DIR}/boringtun-cli"
 sed -i "s/^binary_sha256=.*/binary_sha256=$(sha256sum "${VARIANT_DIR}/boringtun-cli" | cut -d' ' -f1)/" "${VARIANT_DIR}/MANIFEST"; pack_variant
@@ -667,6 +723,10 @@ mv "${BIN_DIR}/cargo-about" "${TEST_ROOT}/cargo-about.hidden"
 run_script licenses "${SOURCE}" "${TEST_ROOT}/licenses-tool"
 assert_fails_with "cargo-about is required" "the gate requires cargo-about"
 mv "${TEST_ROOT}/cargo-about.hidden" "${BIN_DIR}/cargo-about"
+
+echo "=== Runtime notice regression ==="
+run_script check-notices "${STATE}/third-party"
+assert_fails_with "runtime notice bundle" "Cargo notices alone cannot pass the production notice gate"
 
 echo "=== Device smoke test and usage ==="
 

@@ -27,13 +27,13 @@ not legal advice, and where it summarises a license, the license text governs.
 
 | File | Contents |
 | --- | --- |
-| [`LICENSE`](../LICENSE) | The MIT License with every copyright notice that applies to the repository. |
+| [`LICENSE`](../LICENSE) | The MIT License and holder notices for the repository's own code and inherited installer. Vendored notices retain their separately recorded terms. |
 | [`amneziawg-web/LICENSE`](../amneziawg-web/LICENSE), [`amneziawg-proxy/LICENSE`](../amneziawg-proxy/LICENSE) | The same MIT terms for each Rust crate, so a crate copied on its own keeps its license. |
-| [`LICENSES/`](../LICENSES) | The standard text of each license used, as referenced by SPDX identifiers ([REUSE](https://reuse.software)). |
+| [`LICENSES/`](../LICENSES) | SPDX license texts, plus the exact Linux and macOS runtime notice collections identified by their scoped `LicenseRef` identifiers ([REUSE](https://reuse.software)). |
 | [`REUSE.toml`](../REUSE.toml) and SPDX headers | The copyright holders and license of every file, machine-readable. |
 | [`NOTICE.md`](../NOTICE.md) | Origin of the project, the meaning of each notice and the third-party software. |
 | [`docs/LICENSING_INVENTORY.md`](LICENSING_INVENTORY.md) | The audit behind these files: per-component evidence, confidence and open questions. |
-| `THIRD-PARTY-LICENSES` in each BoringTun archive | The licenses of the Rust crates linked into `boringtun-cli`. |
+| `THIRD-PARTY-LICENSES` in newly built BoringTun archives | Cargo dependency notices plus the reviewed runtime/native collection for the target profile (Linux musl or macOS system libraries). Existing published archives have the gaps listed below. |
 
 `reuse spdx` prints a complete SPDX bill of materials for the repository.
 
@@ -71,9 +71,9 @@ program that runs it.
 
 | Component | License | How the project uses it | Obligations for the project |
 | --- | --- | --- | --- |
-| WireSock BoringTun `boringtun-cli` | BSD-3-Clause (Cloudflare, Inc.; fork additions by Vadim Smirnov, doing business as WireSock) | Built in CI and **distributed** as release archives of this repository; the installer downloads and runs it as a separate program. | Binary redistribution must reproduce BoringTun's notices and those of everything linked into it: each archive ships `LICENSE` and `THIRD-PARTY-LICENSES` (see below). BSD-3-Clause does not require source to be provided; the archive `MANIFEST` names the public source repository and commit anyway. |
+| WireSock BoringTun `boringtun-cli` | BSD-3-Clause (Cloudflare, Inc.; fork additions by Vadim Smirnov, doing business as WireSock) | Existing releases are **distributed** by this repository; fork-owned publication is being prepared. The installer downloads an explicitly selected release and runs it as a separate program. | Binary redistribution must reproduce BoringTun's notices and those of everything linked into it: each archive ships `LICENSE` and `THIRD-PARTY-LICENSES` (see below). BSD-3-Clause does not require source to be provided; the archive `MANIFEST` names the public source repository and commit anyway. |
 | Rust crates linked into `boringtun-cli` | Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0 (gated by `packaging/boringtun/deny.toml`) | Statically linked into the distributed binary. | Reproduced in `THIRD-PARTY-LICENSES`. No crate in the graph may ship an Apache-2.0 `NOTICE` file: the build fails if one does, because that file would have to be reproduced too. |
-| musl libc and the Rust standard library | MIT (musl); MIT OR Apache-2.0 (Rust) | Statically linked into `boringtun-cli`. | Their notices are not yet in `THIRD-PARTY-LICENSES`; see [Known gaps](#known-gaps). |
+| musl libc, Rust runtime and native support code | Per-component terms, including MIT, Apache-2.0 WITH LLVM-exception and upstream notices | Rust runtime is linked into `boringtun-cli`; Linux targets also use musl and self-contained native runtime objects, while macOS uses platform system libraries. | The reviewed target-specific runtime bundle is appended to newly generated notices; published archives still need replacement releases. See [Known gaps](#known-gaps). |
 | Rust crates of `amneziawg-web` and `amneziawg-proxy` | Permissive, gated by `.github/licensing/deny.toml` | Downloaded from crates.io and built **on the server** by the install scripts. | None for the project, which distributes only its own source. Whoever distributes a built binary must include the crates' notices (see below). |
 | SQLite (via `libsqlite3-sys`) | Public domain | Compiled into `amneziawg-web` on the server. | None. |
 | AmneziaWG kernel module and `amneziawg-tools` (`awg`, `awg-quick`) | GPL-2.0 | Installed by the system package manager from Amnezia's package repository; run as separate programs. | None for the project, which does not distribute them. The packages carry their own license and source offers. |
@@ -94,9 +94,60 @@ installer keeps the notices next to the binary in
 `/usr/local/lib/amneziawg-install/boringtun/<release>/`. See
 [`BORINGTUN_ARTIFACTS.md`](BORINGTUN_ARTIFACTS.md).
 
+The generator appends the reviewed runtime collection selected by the version-2
+notice policy: `packaging/boringtun/runtime-notices.txt` for the three Linux musl
+targets, or `runtime-notices-macos.txt` for the two macOS targets. The exact
+checksum-pinned source inputs, five target distribution inventories and
+transformations are recorded in `runtime-provenance.json`, `runtime-sections.json`
+and `runtime-sections-macos.json`. The source lockfile and toolchain must match
+the reviewed policy. Packaging and archive verification require the complete
+bundle for the selected target and the complete upstream/fork `LICENSE` bytes.
+Missing terms, altered text, an unsupported target or an unreviewed source
+lockfile fail these checks.
+
 These files are inputs to reproducible, attested release builds. Changing them
-changes the archive bytes and needs a new release build, so the licensing
-changes in this repository leave them as they are.
+changes archive bytes and requires a new release; published assets stay intact.
+The installer continues to use its explicitly selected published release until
+a separate reviewed adoption update.
+
+### Vendored notice texts and SPDX metadata
+
+`packaging/boringtun/fork-license.txt` preserves Cloudflare's original notice and
+BSD-3-Clause terms and the fork notice under the same terms. Its REUSE annotation
+names both holders and retains the existing fork year range. The 2024 start is
+unverified, and retaining it does not resolve the release gate below.
+
+The two runtime files contain texts from several upstream projects, including
+conservative source-notice supersets. Each portion retains the holders and terms
+identified with it. Neither collection is attributed to Vadim Smirnov or
+relicensed under the repository's MIT License.
+
+| Packaging input | Profile | Exact `LICENSES/` copy |
+| --- | --- | --- |
+| `runtime-notices.txt` | Linux musl: x86_64, aarch64, armv7 | `LicenseRef-BoringTun-Runtime-Notices.txt` |
+| `runtime-notices-macos.txt` | macOS system libraries: x86_64, aarch64 | `LicenseRef-BoringTun-Runtime-Notices-macOS.txt` |
+
+Each copy's filename without `.txt` is the SPDX identifier for that collection.
+The references identify the reproduced terms; they do not grant a new blanket
+license or claim that every listed source is linked into a binary. The macOS
+collection excludes the Linux musl and self-contained LLVM CRT/libunwind notice
+sections. Both retain conservative common Rust and ring source-notice supersets.
+The compiled component selection and exact source evidence remain in the
+provenance records.
+
+REUSE permits an identifying group descriptor for copyright holders. These two
+annotations identify upstream holders through their notices in each file,
+without inventing one aggregate owner or year range. The licensing check allows
+that exact descriptor only for these two packaging inputs. It still rejects
+accidental quoted fragments elsewhere, checks both `LicenseRef` copies byte for
+byte, and validates the policy hashes and profile mappings for all five targets.
+After regenerating the bundles, synchronize the copies with:
+
+```bash
+cp packaging/boringtun/runtime-notices.txt LICENSES/LicenseRef-BoringTun-Runtime-Notices.txt
+cp packaging/boringtun/runtime-notices-macos.txt LICENSES/LicenseRef-BoringTun-Runtime-Notices-macOS.txt
+bash scripts/check-licensing.sh --offline
+```
 
 ### Distributing binaries of the web panel or the proxy
 
@@ -125,22 +176,17 @@ license or the separate BoringTun policy.
 
 ## Known gaps
 
-These are known and not yet fixed. They do not change the license of anything
-in this repository.
+Implementation and publication are separate. These remaining gates do not
+change the license of anything in this repository.
 
-1. **BoringTun archives omit two sets of notices.** `boringtun-cli` is a static
-   musl binary, so it contains the musl C library (MIT, "Copyright © 2005-2020
-   Rich Felker, et al.") and the Rust standard library with its runtime
-   components (mostly MIT OR Apache-2.0; the unwinder is LLVM's libunwind,
-   Apache-2.0 WITH LLVM-exception). `THIRD-PARTY-LICENSES` lists only the crates of the
-   BoringTun dependency graph, so their notices are missing. In addition, the
-   archive `LICENSE` reproduces only Cloudflare's notice, while the files
-   added by the fork carry "Copyright (c) 2024-2026 WireSock" under the same
-   BSD-3-Clause terms, which should name Vadim Smirnov (doing business as
-   WireSock). The fix ships in new, reproducible and attested release builds
-   (a new build number or pin, as `packaging/boringtun/release.env` requires
-   for any change of the archive bytes); published archives are never
-   modified. It is tracked in
+1. **Existing published BoringTun archives retain the notice gaps.** The local
+   packaging fix adds checksum-pinned runtime/native notices and the complete
+   fork notice, but does not modify any published archive. The corrected fork
+   year range still needs owner evidence or an explicit correction: the 2024
+   start has not been verified. New releases need the reviewed fork source,
+   successful build and reproducibility gates on every supported target, verified
+   attestations and authorized activation/publication. Installer adoption is
+   a separate reviewed change. This work is tracked in
    [issue #175](https://github.com/wiresock/awg-server-tools/issues/175) and
    should be done before `boringtun-cli` is distributed in any other product.
 
@@ -156,12 +202,12 @@ checks that:
 - `reuse lint` passes, with no tag it cannot parse: every file has a valid SPDX
   license and copyright, and every license used has its text in `LICENSES/`;
 - every copyright that `reuse spdx` resolves looks like a notice (no table
-  bar or backtick, and a year or contact address), so a table row or heading
-  quoted in a document is never taken for the document's own;
+  bar or backtick, and a year or contact address), except the exact upstream
+  holder descriptor for the two runtime collections described above;
 - the Rust sources and the installed shell scripts carry their own SPDX
   header;
-- `LICENSES/` contains only the licenses the repository is meant to use (MIT),
-  so adding a license is a deliberate change;
+- `LICENSES/` contains only MIT, BSD-3-Clause and the two scoped runtime notice
+  `LicenseRef` texts, each byte-identical to its reviewed profile bundle;
 - `LICENSES/MIT.txt` is the unmodified SPDX text; `LICENSE` and the component
   `LICENSE` files carry its MIT terms and a copyright notice; and `LICENSE` and
   the installer keep the upstream notices, the installer also its named

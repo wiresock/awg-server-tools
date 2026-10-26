@@ -272,7 +272,8 @@ assert_eq "x86_64" "$(host_arch_of x86_64)" "x86_64 maps to x86_64"
 assert_eq "x86_64" "$(host_arch_of amd64)" "amd64 maps to x86_64"
 assert_eq "aarch64" "$(host_arch_of aarch64)" "aarch64 maps to aarch64"
 assert_eq "aarch64" "$(host_arch_of arm64)" "arm64 maps to aarch64"
-for MACHINE in armv7l armhf i686 riscv64 ppc64le s390x; do
+assert_eq "armv7" "$(host_arch_of armv7)" "the canonical ARMv7 test identity maps to armv7"
+for MACHINE in armv6l armhf i686 riscv64 ppc64le s390x; do
 	run host_arch_of "${MACHINE}"
 	assert_rc 1 "${RC}" "${MACHINE} has no BoringTun release"
 done
@@ -890,10 +891,10 @@ for OTHER_OS in fedora centos almalinux rocky; do
 	assert_rc 1 "${RC}" "${OTHER_OS} is refused"
 done
 OS=ubuntu
-AWG_BT_HOST_ARCH=armv7l
+AWG_BT_HOST_ARCH=armv6l
 run support
 assert_rc 1 "${RC}" "an unsupported architecture is refused before anything is installed"
-assert_contains "only for x86_64 and aarch64" "${ERR}" "and the supported architectures are named"
+assert_contains "amd64, arm64, or ARMv7-capable armhf" "${ERR}" "and the supported architectures are named"
 AWG_BT_HOST_ARCH=aarch64
 run support
 assert_rc 0 "${RC}" "aarch64 is supported"

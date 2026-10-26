@@ -1,9 +1,17 @@
 # BoringTun build artifacts
 
-This repository builds static `boringtun-cli` binaries from a pinned commit of
-[WireSock BoringTun](https://github.com/Wiresock-Foundation/wiresock-boringtun),
-for a future userspace AmneziaWG backend (see
-[BORINGTUN_BACKEND_DESIGN.md](BORINGTUN_BACKEND_DESIGN.md)).
+New static `boringtun-cli` production is moving to
+[WireSock BoringTun](https://github.com/Wiresock-Foundation/wiresock-boringtun).
+AWG's current workflows now consume explicitly pinned published releases;
+its current publication job is retired. Fork activation remains blocked pending
+reviewed attribution, platform evidence and owner-side historical workflow
+retirement. See [BORINGTUN_MIGRATION.md](BORINGTUN_MIGRATION.md),
+[BORINGTUN_NOTICES.md](BORINGTUN_NOTICES.md), and
+[BORINGTUN_ADOPTION.md](BORINGTUN_ADOPTION.md).
+
+The following records the historical AWG producer and published release
+contracts. Keeping these records and verification tools does not authorize
+another AWG publication or alter any existing release.
 
 **Status: four releases published.** The current pin `e94c04f3f4fd` has the
 published release `boringtun-cli-0.7.1-ge94c04f3f4fd-b1` (release 410888149),
