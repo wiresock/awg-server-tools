@@ -734,7 +734,7 @@ bta_package() {
             install -m 0644 -- "${BORINGTUN_NOTICE_CONFIG:-${BTA_CONFIG_DIR}}/fork-license.txt" "${stage}/${stem}/LICENSE" &&
             install -m 0644 -- "${third_party}" "${stage}/${stem}/THIRD-PARTY-LICENSES" &&
             bta_write_manifest info "${arch}" >"${stage}/${stem}/MANIFEST" &&
-            chmod 0644 -- "${stage}/${stem}/MANIFEST" &&
+            python3 -c 'import os, sys; os.chmod(sys.argv[1], 0o644)' "${stage}/${stem}/MANIFEST" &&
             (cd "${stage}" && LC_ALL=C bta_tar --sort=name --format=ustar --owner=0 --group=0 \
                 --numeric-owner --mtime="@${info[source_date_epoch]}" -cf archive.tar -- "${stem}") &&
             gzip -9 -n -c -- "${stage}/archive.tar" >"${stage}/archive.tar.gz" &&

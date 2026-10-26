@@ -573,6 +573,32 @@ else
 fi
 assert_eq "" "$(find "${TEST_ROOT}/out-1" "${TEST_ROOT}/out-2" -name '.package.*')" "no staging directory is left behind"
 
+# BSD chmod treats a post-mode -- as a file name. Exercise the complete package
+# operation with that behavior, then require the same canonical archive bytes.
+REAL_CHMOD="$(command -v chmod)"
+cat >"${BIN_DIR}/chmod" <<EOF
+#!/usr/bin/env bash
+for argument in "\$@"; do
+    if [[ "\${argument}" == -- ]]; then
+        printf 'chmod: --: No such file or directory\n' >&2
+        exit 1
+    fi
+done
+exec "${REAL_CHMOD}" "\$@"
+EOF
+"${REAL_CHMOD}" 0755 "${BIN_DIR}/chmod"
+mkdir -p "${TEST_ROOT}/out bsd-chmod"
+run_script package "${BUILD}" "${SOURCE}" "${THIRD_PARTY}" "${TEST_ROOT}/out bsd-chmod"
+assert_succeeds "packaging works with BSD chmod argument semantics"
+if cmp -s "${ARCHIVE}" "${TEST_ROOT}/out bsd-chmod/${STEM}.tar.gz"; then
+	ok "BSD-compatible packaging preserves all archive bytes and exact modes"
+else
+	not_ok "BSD-compatible packaging preserves all archive bytes and exact modes"
+fi
+run_script verify-archive "${TEST_ROOT}/out bsd-chmod/${STEM}.tar.gz" "${TEST_ROOT}/extract-bsd-chmod"
+assert_succeeds "the BSD-compatible archive passes the complete verification gate"
+rm -f -- "${BIN_DIR}/chmod"
+
 run_script package "${BUILD}" "${SOURCE}" "${THIRD_PARTY}" "${TEST_ROOT}/out-1"
 assert_fails_with "refusing to overwrite" "an existing archive is not overwritten"
 mkdir -p "${TEST_ROOT}/out-3"
