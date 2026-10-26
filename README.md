@@ -1,4 +1,4 @@
-# AmneziaWG Server Tools
+# WireSock AWG Server Tools
 
 The web panel supports optional, explicit [email delivery of client exports or expiring links](amneziawg-web/docs/EMAIL_DELIVERY.md), with recipient preview and a separately configured public HTTPS endpoint.
 
