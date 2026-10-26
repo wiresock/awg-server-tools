@@ -52,7 +52,7 @@ esac
 
 # Licenses whose texts may be in LICENSES/. Extend only together with the
 # documentation in NOTICE.md and docs/LICENSING.md.
-EXPECTED_LICENSES="MIT"
+EXPECTED_LICENSES="BSD-3-Clause LicenseRef-BoringTun-Runtime-Notices LicenseRef-BoringTun-Runtime-Notices-macOS MIT"
 # Crate directory and the SPDX license its Cargo.toml must declare.
 CRATES="amneziawg-web:MIT amneziawg-proxy:MIT"
 # Built from parts so that `reuse lint` does not read this script's patterns
@@ -119,6 +119,15 @@ check_reuse() {
         /^FileCopyrightText: <text>/ { t = 1; sub(/^FileCopyrightText: <text>/, "") }
         t {
             line = $0; done = sub(/<\/text>.*/, "", line)
+            # These two aggregates identify holders by their verbatim source
+            # notices, without assigning all portions to one owner. REUSE
+            # permits an identifying group descriptor without a year.
+            if ((name == "./packaging/boringtun/runtime-notices.txt" ||
+                 name == "./packaging/boringtun/runtime-notices-macos.txt") &&
+                line == "Upstream copyright holders identified in the source notices reproduced in this file") {
+                if (done) t = 0
+                next
+            }
             if (line != "" && (line ~ /[|`]/ || (line !~ /[0-9][0-9][0-9][0-9]/ && line !~ /<[^>]+@[^>]+>/)))
                 print name " :: " line
             if (done) t = 0
@@ -203,6 +212,35 @@ EOF
     if [[ "${lost}" -eq 0 ]]; then
         pass "LICENSE and amneziawg-install.sh keep the upstream notices and contributor"
     fi
+}
+
+# The heterogeneous runtime collections are stored as LicenseRef texts so SPDX
+# consumers receive the actual per-section terms, not a blanket MIT grant.
+# Each copy must remain byte-identical to its packaging input, whose digest and
+# platform mapping are checked by the version-2 policy. No other files get the
+# aggregate-holder exemption in check_reuse.
+check_boringtun_notice_metadata() {
+    local bundle reference target toolchain
+    while read -r bundle reference; do
+        if [[ ! -f "${bundle}" || -L "${bundle}" || ! -f "${reference}" || -L "${reference}" ]] || \
+            ! cmp -s -- "${bundle}" "${reference}"; then
+            fail "${reference} must be an exact copy of the reviewed runtime notice bundle"
+            return
+        fi
+    done <<'EOF'
+packaging/boringtun/runtime-notices.txt LICENSES/LicenseRef-BoringTun-Runtime-Notices.txt
+packaging/boringtun/runtime-notices-macos.txt LICENSES/LicenseRef-BoringTun-Runtime-Notices-macOS.txt
+EOF
+    toolchain="$(sed -n 's/^BORINGTUN_RUST_TOOLCHAIN=//p' packaging/boringtun/pin.env)"
+    for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf \
+        x86_64-apple-darwin aarch64-apple-darwin; do
+        if ! BORINGTUN_NOTICE_CONFIG="${ROOT}/packaging/boringtun" python3 scripts/boringtun-notices.py bundle \
+            "${toolchain}" --target "${target}" >/dev/null; then
+            fail "the BoringTun runtime and fork notice inputs differ from the reviewed policy for ${target}"
+            return
+        fi
+    done
+    pass "BoringTun notice metadata preserves both reviewed upstream collections for all five targets"
 }
 
 check_crates() {
@@ -327,6 +365,7 @@ check_reuse
 check_inline_headers
 check_license_dir
 check_license_files
+check_boringtun_notice_metadata
 check_crates
 check_holders
 check_boringtun_policies

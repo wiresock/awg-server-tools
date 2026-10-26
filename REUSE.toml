@@ -13,7 +13,8 @@
 # - the file is generated (Cargo.lock) or binary (screenshots);
 # - the file is documentation, CI or test code, where a header adds nothing.
 #
-# Every annotated path was written in this repository by Vadim Smirnov, who
+# Except for the explicitly identified upstream notice files below, annotated
+# paths were written in this repository by Vadim Smirnov, who
 # does business as WireSock (a trade name, not a separate legal entity), or by
 # coding agents he directed (git history from 2026). Code inherited from the upstream
 # installers lives only in amneziawg-install.sh, which carries all of their
@@ -58,13 +59,42 @@ precedence = "closest"
 SPDX-FileCopyrightText = "2026 Vadim Smirnov (doing business as WireSock)"
 SPDX-License-Identifier = "MIT"
 
-# BoringTun packaging inputs. The third-party licenses themselves ship in each
-# archive's THIRD-PARTY-LICENSES.
+# BoringTun packaging recipe and provenance metadata. The three vendored notice
+# texts are attributed separately below; this does not relicense their contents.
 [[annotations]]
 path = "packaging/boringtun/**"
 precedence = "closest"
 SPDX-FileCopyrightText = "2026 Vadim Smirnov (doing business as WireSock)"
 SPDX-License-Identifier = "MIT"
+
+# Complete upstream texts, not this repository's own MIT-licensed code.
+# Each runtime file has many holders and per-section licenses. The descriptive
+# group identifies those exact reproduced notices without inventing aggregate
+# years or attributing them to the maintainer. The LicenseRef text is an exact
+# copy of the generated collection, not a new license grant for its portions.
+[[annotations]]
+path = "packaging/boringtun/runtime-notices.txt"
+precedence = "override"
+SPDX-FileCopyrightText = "Upstream copyright holders identified in the source notices reproduced in this file"
+SPDX-License-Identifier = "LicenseRef-BoringTun-Runtime-Notices"
+SPDX-FileComment = "Each portion retains the upstream terms and holders identified with it; see docs/LICENSING.md. No blanket relicensing or conclusion that every listed source is linked."
+
+[[annotations]]
+path = "packaging/boringtun/runtime-notices-macos.txt"
+precedence = "override"
+SPDX-FileCopyrightText = "Upstream copyright holders identified in the source notices reproduced in this file"
+SPDX-License-Identifier = "LicenseRef-BoringTun-Runtime-Notices-macOS"
+SPDX-FileComment = "Each portion retains the upstream terms and holders identified with it; see docs/LICENSING.md. macOS profile excludes the Linux musl and self-contained CRT/libunwind sections."
+
+[[annotations]]
+path = "packaging/boringtun/fork-license.txt"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2019 Cloudflare, Inc. All rights reserved.",
+    "2024-2026 Vadim Smirnov (doing business as WireSock). All rights reserved.",
+]
+SPDX-License-Identifier = "BSD-3-Clause"
+SPDX-FileComment = "Preserves the existing fork year range; 2024 remains unverified and release-blocking."
 
 # Files that quote other parties' copyright notices, or example SPDX tags, as
 # data or documentation. Those quotes are not notices of the files themselves,

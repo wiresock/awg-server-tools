@@ -130,15 +130,16 @@ no_mutation() {
 }
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
-# A minimal ELF64 header: enough for readelf to report the class and machine,
-# with no program interpreter and no dynamic section.
+# A structurally valid ELF64 fixture with a loadable segment, no program
+# interpreter and no dynamic dependency. This does not execute target code.
 write_elf() { # <x86_64|aarch64> <file>
 	python3 - "$1" "$2" <<'PY'
 import struct, sys
 machine = {"x86_64": 0x3E, "aarch64": 0xB7}[sys.argv[1]]
 header = b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8)
-header += struct.pack("<HHIQQQIHHHHHH", 2, machine, 1, 0x400000, 0, 0, 0, 64, 56, 0, 64, 0, 0)
-open(sys.argv[2], "wb").write(header + sys.argv[1].encode())
+header += struct.pack("<HHIQQQIHHHHHH", 2, machine, 1, 0x400100, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+segment = struct.pack("<IIQQQQQQ", 1, 5, 0, 0x400000, 0x400000, 512, 512, 0x1000)
+open(sys.argv[2], "wb").write((header + segment + sys.argv[1].encode()).ljust(512, b"\0"))
 PY
 	chmod 0755 "$2"
 }
@@ -164,6 +165,7 @@ write_third_party() { # <file> [variant]
 		fi
 		printf '%s\nMIT License (MIT)\n\nUsed by:\n  ring 0.17.14 <https://github.com/briansmith/ring>\n%s\n' "${LINE80}" "${DASH80}"
 		printf 'Copyright 2015-2025 Brian Smith.\n'
+		cat "${PROJECT_ROOT}/packaging/boringtun/runtime-notices.txt"
 	} >"$1"
 }
 
@@ -175,8 +177,7 @@ make_archive() { # <arch> <out-dir> [variant]
 	STAGE="$(mktemp -d "${TEST_ROOT}/stage.XXXXXX")"
 	mkdir -p "${STAGE}/${STEM}" "${OUT}"
 	write_elf "${ARCH}" "${STAGE}/${STEM}/boringtun-cli"
-	printf 'Copyright (c) 2019 Cloudflare, Inc. All rights reserved.\n\nRedistribution and use in source and binary forms, with or without modification, are permitted.\n' \
-		>"${STAGE}/${STEM}/LICENSE"
+	cp "${PROJECT_ROOT}/packaging/boringtun/fork-license.txt" "${STAGE}/${STEM}/LICENSE"
 	if [[ "${VARIANT}" == notices ]]; then
 		write_third_party "${STAGE}/${STEM}/THIRD-PARTY-LICENSES" placeholder
 	else
@@ -459,35 +460,35 @@ edit_attestation() { # <jq filter>
 echo "=== Required notices (scripts/boringtun-artifact.sh) ==="
 
 write_third_party "${TEST_ROOT}/tpl-good"
-run_artifact check-notices "${TEST_ROOT}/tpl-good"
+run_artifact check-notices "${TEST_ROOT}/tpl-good" "${PROJECT_ROOT}/packaging/boringtun/fork-license.txt"
 assert_succeeds "THIRD-PARTY-LICENSES with every required notice passes"
 write_third_party "${TEST_ROOT}/tpl-missing" missing-go
-run_artifact check-notices "${TEST_ROOT}/tpl-missing"
+run_artifact check-notices "${TEST_ROOT}/tpl-missing" "${PROJECT_ROOT}/packaging/boringtun/fork-license.txt"
 assert_fails_with "missing required notice of curve25519-dalek 4.1.3: Copyright (c) 2012 The Go Authors" \
 	"a missing curve25519-dalek notice fails"
 write_third_party "${TEST_ROOT}/tpl-placeholder" placeholder
-run_artifact check-notices "${TEST_ROOT}/tpl-placeholder"
+run_artifact check-notices "${TEST_ROOT}/tpl-placeholder" "${PROJECT_ROOT}/packaging/boringtun/fork-license.txt"
 assert_fails_with "only a placeholder notice (no copyright holder) attributes curve25519-dalek 4.1.3" \
 	"curve25519-dalek attributed by the bare SPDX template fails"
 write_third_party "${TEST_ROOT}/tpl-other-crate" "" x25519-dalek
-run_artifact check-notices "${TEST_ROOT}/tpl-other-crate"
+run_artifact check-notices "${TEST_ROOT}/tpl-other-crate" "${PROJECT_ROOT}/packaging/boringtun/fork-license.txt"
 assert_fails_with "missing required notice of curve25519-dalek 4.1.3" "the notices must be in curve25519-dalek's own section"
 sed 's/^  curve25519-dalek 4.1.3 /  curve25519-dalek 4.1.4 /' "${TEST_ROOT}/tpl-good" >"${TEST_ROOT}/tpl-version"
-run_artifact check-notices "${TEST_ROOT}/tpl-version"
+run_artifact check-notices "${TEST_ROOT}/tpl-version" "${PROJECT_ROOT}/packaging/boringtun/fork-license.txt"
 assert_fails_with "missing required notice of curve25519-dalek 4.1.3" "a different crate version needs a reviewed required-notices entry"
-if [[ "$(grep -c 'Copyright (c) <year> <owner>' "${TEST_ROOT}/tpl-good")" == 1 ]]; then
+if [[ "$(sed '/^BEGIN BORINGTUN RUNTIME AND NATIVE NOTICES/,$d' "${TEST_ROOT}/tpl-good" | grep -c 'Copyright (c) <year> <owner>')" == 1 ]]; then
 	ok "(the placeholder is allowed for BoringTun's own crates, whose notice is LICENSE)"
 else
 	not_ok "(fixture has the workspace placeholder)"
 fi
 printf 'curve25519-dalek 4.1.3 Copyright (c) 2012 The Go Authors.\n' >"${TEST_ROOT}/notices-bad"
 env BORINGTUN_NOTICES_FILE="${TEST_ROOT}/notices-bad" BORINGTUN_PIN_FILE="${PIN_FILE}" \
-	bash "${ARTIFACT_SCRIPT}" check-notices "${TEST_ROOT}/tpl-good" >/dev/null 2>"${TEST_ROOT}/run.err"
+	bash "${ARTIFACT_SCRIPT}" check-notices "${TEST_ROOT}/tpl-good" "${PROJECT_ROOT}/packaging/boringtun/fork-license.txt" >/dev/null 2>"${TEST_ROOT}/run.err"
 RUN_RC=$? RUN_ERR="$(cat "${TEST_ROOT}/run.err")"
 assert_fails_with "is not '<crate> <version> | Copyright ...'" "a malformed required-notices line fails"
 printf '# only comments\n' >"${TEST_ROOT}/notices-empty"
 env BORINGTUN_NOTICES_FILE="${TEST_ROOT}/notices-empty" BORINGTUN_PIN_FILE="${PIN_FILE}" \
-	bash "${ARTIFACT_SCRIPT}" check-notices "${TEST_ROOT}/tpl-good" >/dev/null 2>"${TEST_ROOT}/run.err"
+	bash "${ARTIFACT_SCRIPT}" check-notices "${TEST_ROOT}/tpl-good" "${PROJECT_ROOT}/packaging/boringtun/fork-license.txt" >/dev/null 2>"${TEST_ROOT}/run.err"
 RUN_RC=$? RUN_ERR="$(cat "${TEST_ROOT}/run.err")"
 assert_fails_with "lists no notice" "an empty required-notices list fails"
 assert_eq "curve25519-dalek 4.1.3 | Copyright (c) 2016-2021 isis agora lovecruft. All rights reserved.
@@ -1093,14 +1094,11 @@ if job_block "${RELEASE_WORKFLOW}" verify | grep -q 'contents: read' && \
 else
 	not_ok "the dry-run job can only read"
 fi
-assert_eq "1" "$(grep -c 'contents: write' "${RELEASE_WORKFLOW}")" "contents: write appears once, in the publish job"
-if job_block "${RELEASE_WORKFLOW}" publish | grep -q 'contents: write' && \
-	job_block "${RELEASE_WORKFLOW}" publish | grep -qF "if: inputs.mode == 'publish'" && \
-	job_block "${RELEASE_WORKFLOW}" publish | grep -qF 'needs: verify' && \
-	job_block "${RELEASE_WORKFLOW}" publish | grep -qF '"$GITHUB_REF" != refs/heads/main'; then
-	ok "the publish job runs only for mode=publish, after the dry run, from main"
+assert_eq "0" "$(grep -c 'contents: write' "${RELEASE_WORKFLOW}")" "the retired AWG workflow has no content-write permission"
+if ! grep -qE '^  publish:|^          - publish$|boringtun-release.sh publish' "${RELEASE_WORKFLOW}"; then
+	ok "the retired AWG workflow cannot select or invoke publication"
 else
-	not_ok "the publish job runs only for mode=publish, after the dry run, from main"
+	not_ok "the retired AWG workflow cannot select or invoke publication"
 fi
 assert_eq "dry-run" "$(awk '/^      mode:/ { on = 1 } on && /default:/ { print $2; exit }' "${RELEASE_WORKFLOW}")" "the default mode is dry-run"
 if ! grep -nE -- '--clobber|release (upload|delete|edit)|method DELETE|-X DELETE|force' \
@@ -1117,16 +1115,13 @@ else
 fi
 assert_eq "permissions:
   contents: read" "$(grep -A1 -E '^permissions:' "${ARTIFACTS_WORKFLOW}")" "the artifacts workflow is read-only by default"
-assert_eq "2" "$(grep -cE 'id-token: write|attestations: write' "${ARTIFACTS_WORKFLOW}")" \
-	"the artifacts workflow requests id-token and attestations write once each"
-ATTEST="$(job_block "${ARTIFACTS_WORKFLOW}" attest)"
-if grep -q 'id-token: write' <<<"${ATTEST}" && grep -q 'attestations: write' <<<"${ATTEST}" && \
-	grep -q 'contents: read' <<<"${ATTEST}" && grep -qF "if: github.event_name != 'pull_request'" <<<"${ATTEST}" && \
-	grep -q 'uses: actions/attest-build-provenance@v4' <<<"${ATTEST}" && \
-	grep -q 'subject-path: dist/boringtun-cli-\*.tar.gz' <<<"${ATTEST}"; then
-	ok "only the attest job can attest, it attests the archives, and never for a pull request"
+assert_eq "0" "$(grep -cE 'id-token: write|attestations: write' "${ARTIFACTS_WORKFLOW}")" \
+	"the AWG consumer has no signing permission"
+if ! grep -qE 'uses: actions/attest|boringtun-artifact.sh (build|licenses|package)|^  attest:' "${ARTIFACTS_WORKFLOW}" && \
+	grep -q 'bash tests/test-boringtun-public-release.sh' "${ARTIFACTS_WORKFLOW}"; then
+	ok "AWG checks the embedded public release without producing or attesting artifacts"
 else
-	not_ok "only the attest job can attest, it attests the archives, and never for a pull request"
+	not_ok "AWG checks the embedded public release without producing or attesting artifacts"
 fi
 if ! top_block "${ARTIFACTS_WORKFLOW}" on | grep -qE '^  (release|schedule|workflow_run):|tags:'; then
 	ok "building artifacts never publishes: no release, tag or schedule trigger"

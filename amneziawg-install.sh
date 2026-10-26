@@ -127,6 +127,11 @@ AWG_BT_RELEASE_BINARY_SHA256_X86_64="7c717357554a4d8022154fbdb1c40c92de8174ee064
 AWG_BT_RELEASE_ASSET_AARCH64="boringtun-cli-0.7.1-ge94c04f3f4fd-linux-aarch64-musl.tar.gz"
 AWG_BT_RELEASE_ARCHIVE_SHA256_AARCH64="a2d7c4a0cc702a7dfc146036e6bda6e341701a3609a6842462bfdbebf7490880"
 AWG_BT_RELEASE_BINARY_SHA256_AARCH64="cc1cdf215bb3d75f8a7006f8d424d698e9574dadb3e08becd8ace17a3c44cb08"
+# ARMv7 support is prepared, but this published release has no ARMv7 artifact.
+# A separate verified adoption must fill all three values before installation.
+AWG_BT_RELEASE_ASSET_ARMV7=""
+AWG_BT_RELEASE_ARCHIVE_SHA256_ARMV7=""
+AWG_BT_RELEASE_BINARY_SHA256_ARMV7=""
 
 # Where the BoringTun runtime lives. The generated helpers embed these values
 # when they are written, so a helper never reads a path from its environment.
@@ -4841,7 +4846,7 @@ function _awgBtTrustedAncestors() {
 	return 0
 }
 
-function _awgBtHostArch() {
+function _awgBtKernelArch() {
 	local MACHINE="${AWG_BT_HOST_ARCH}"
 	if [[ -z "${MACHINE}" ]]; then
 		MACHINE="$(uname -m 2>/dev/null)" || return 1
@@ -4849,6 +4854,62 @@ function _awgBtHostArch() {
 	case "${MACHINE}" in
 		x86_64 | amd64) echo x86_64 ;;
 		aarch64 | arm64) echo aarch64 ;;
+		armv7 | armv7l | armv8l) echo armv7 ;;
+		*) return 1 ;;
+	esac
+}
+
+# Preferred ABI for a new download. dpkg identifies the native userland;
+# uname supplies a minimum CPU/kernel baseline, so Raspberry Pi's ARMv6 armhf
+# userland never selects an ARMv7 executable. On aarch64, a running armhf
+# userland also demonstrates AArch32 execution support. The test-only setting
+# is reset when the installer loads and is never imported from the environment.
+function _awgBtHostArch() {
+	local KERNEL NATIVE
+	if [[ -n "${AWG_BT_HOST_ARCH}" ]]; then
+		case "${AWG_BT_HOST_ARCH}" in
+			x86_64 | amd64) echo x86_64 ;;
+			aarch64 | arm64) echo aarch64 ;;
+			armv7) echo armv7 ;;
+			*) return 1 ;;
+		esac
+		return
+	fi
+	KERNEL="$(_awgBtKernelArch)" || return 1
+	NATIVE="$(dpkg --print-architecture 2>/dev/null)" || return 1
+	case "${NATIVE}:${KERNEL}" in
+		amd64:x86_64) echo x86_64 ;;
+		arm64:aarch64) echo aarch64 ;;
+		armhf:armv7 | armhf:aarch64) echo armv7 ;;
+		*) return 1 ;;
+	esac
+}
+
+# Runtime compatibility is independent of download preference. Keep an existing
+# static ARM64 store usable on a 64-bit kernel with a 32-bit userland. Do not
+# assume an arm64 userland implies that its kernel supports AArch32.
+function _awgBtCanRunArch() { # <artifact arch>
+	local KERNEL
+	KERNEL="$(_awgBtKernelArch)" || return 1
+	case "$1:${KERNEL}" in
+		x86_64:x86_64 | aarch64:aarch64) return 0 ;;
+		armv7:armv7 | armv7:aarch64) [[ "$(_awgBtHostArch)" == armv7 ]] ;;
+		*) return 1 ;;
+	esac
+}
+
+function _awgBtTarget() { # <artifact arch>
+	case "$1" in
+		x86_64 | aarch64) printf '%s-unknown-linux-musl\n' "$1" ;;
+		armv7) echo armv7-unknown-linux-musleabihf ;;
+		*) return 1 ;;
+	esac
+}
+
+function _awgBtPlatformSuffix() { # <artifact arch>
+	case "$1" in
+		x86_64 | aarch64) printf 'linux-%s-musl\n' "$1" ;;
+		armv7) echo linux-armv7-musleabihf ;;
 		*) return 1 ;;
 	esac
 }
@@ -4862,7 +4923,7 @@ function _awgBtHostArch() {
 # installer's, given when it stored a release whose binary had the embedded
 # SHA-256, and the store is root's alone.
 function _awgBtReleaseIdValid() {
-	[[ "${1:-}" =~ ^boringtun-cli-[0-9]+\.[0-9]+\.[0-9]+-g[0-9a-f]{12}(-b([2-9]|[1-9][0-9]{1,8}))?-linux-(x86_64|aarch64)-musl$ ]]
+	[[ "${1:-}" =~ ^boringtun-cli-[0-9]+\.[0-9]+\.[0-9]+-g[0-9a-f]{12}(-b([2-9]|[1-9][0-9]{1,8}))?-linux-(x86_64-musl|aarch64-musl|armv7-musleabihf)$ ]]
 }
 
 # Verify the BoringTun store and set _AWG_BT_VERIFIED_BIN to the canonical path
@@ -4876,10 +4937,6 @@ function _awgBtReleaseIdValid() {
 function _awgBtVerifyStore() {
 	local STORE="${AWG_BT_STORE_DIR}" RELEASE_ID="" OWNER="" MODE=""
 	_AWG_BT_VERIFIED_BIN=""
-	if ! _awgBtHostArch >/dev/null; then
-		_awgBtErr "BoringTun artifacts exist only for x86_64 and aarch64 hosts"
-		return 1
-	fi
 	if ! _awgBtTrustedAncestors "${STORE}" || ! _awgBtTrustedNode "${STORE}" dir; then
 		_awgBtErr "the BoringTun store ${STORE} is missing, or it or a parent directory is writable by someone other than root"
 		return 1
@@ -4902,14 +4959,10 @@ function _awgBtVerifyStore() {
 # points current at a release. Sets _AWG_BT_VERIFIED_BIN.
 function _awgBtVerifyRelease() { # <release id>
 	local STORE="${AWG_BT_STORE_DIR}" RELEASE_ID="$1" RELEASE BINARY MANIFEST LINE KEY VALUE
-	local ARCH ACTUAL_SHA="" CANONICAL_STORE CANONICAL_BINARY BUILD_PART=""
+	local ARCH TARGET PLATFORM ACTUAL_SHA="" CANONICAL_STORE CANONICAL_BINARY BUILD_PART=""
 	local -A FIELDS=()
 	_AWG_BT_VERIFIED_BIN=""
 	_AWG_BT_VERIFIED_VERSION=""
-	if ! ARCH="$(_awgBtHostArch)"; then
-		_awgBtErr "BoringTun artifacts exist only for x86_64 and aarch64 hosts"
-		return 1
-	fi
 	if ! _awgBtTrustedAncestors "${STORE}" || ! _awgBtTrustedNode "${STORE}" dir; then
 		_awgBtErr "the BoringTun store ${STORE} is missing, or it or a parent directory is writable by someone other than root"
 		return 1
@@ -4947,14 +5000,19 @@ function _awgBtVerifyRelease() { # <release id>
 			return 1
 		fi
 	done
+	ARCH="${FIELDS[arch]}"
+	if ! TARGET="$(_awgBtTarget "${ARCH}")" || ! PLATFORM="$(_awgBtPlatformSuffix "${ARCH}")" || ! _awgBtCanRunArch "${ARCH}"; then
+		_awgBtErr "${MANIFEST} does not describe release ${RELEASE_ID} for an architecture this host can run (${ARCH})"
+		return 1
+	fi
 	if [[ "${FIELDS[artifact_format]}" != 1 || "${FIELDS[name]}" != boringtun-cli || \
 		"${FIELDS[binary]}" != boringtun-cli || "${FIELDS[os]}" != linux || \
 		"${FIELDS[libc]}" != musl || "${FIELDS[linkage]}" != static || \
-		"${FIELDS[arch]}" != "${ARCH}" || "${FIELDS[target]}" != "${ARCH}-unknown-linux-musl" ]] || \
+		"${FIELDS[target]}" != "${TARGET}" ]] || \
 		! [[ "${FIELDS[version]}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && \
 			"${FIELDS[source_commit]}" =~ ^[0-9a-f]{40}$ && \
 			"${FIELDS[binary_sha256]}" =~ ^[0-9a-f]{64}$ ]] || \
-		[[ "${RELEASE_ID}" != "boringtun-cli-${FIELDS[version]}-g${FIELDS[source_commit]:0:12}${BUILD_PART}-linux-${ARCH}-musl" ]]; then
+		[[ "${RELEASE_ID}" != "boringtun-cli-${FIELDS[version]}-g${FIELDS[source_commit]:0:12}${BUILD_PART}-${PLATFORM}" ]]; then
 		_awgBtErr "${MANIFEST} does not describe release ${RELEASE_ID} for this ${ARCH} host"
 		return 1
 	fi
@@ -6405,7 +6463,7 @@ function awgBackendCtlMain() {
 }
 
 # Functions the generated helpers carry. Keep in step with their callers.
-_AWG_BT_HELPER_FUNCTIONS="_awgBtErr _awgBtReleaseIdValid _awgBtValidInterfaceName _awgBtImitationProtocolValid _awgBtImitationUsesDomain _awgBtImitationDomainValid _awgBtImitationCheck _awgBtBinaryImitationSupport _awgBtStatOwnerMode _awgBtTrustedNode _awgBtTrustedAncestors _awgBtHostArch _awgBtVerifyStore _awgBtVerifyRelease _awgBtRuntimeFilePath _awgBtReadRuntimeFile _awgBtPidFile _awgBtPrepareRunDir _awgBtWriteState _awgBtListenPort _awgBtUapiReady _awgBtLinkExists _awgBtLinkIsTun _awgBtLinkIndex _awgBtListedByAwg _awgBtProcStat _awgBtProcessStartTime _awgBtProcessAlive _awgBtProcessIs _awgBtSignalProcess _awgBtStopProcess _awgBtPathId _awgBtPathAbsent _awgBtRecordedNodeGone _awgBtRemoveOwnedPath _awgBtSocketHeldBy _awgBtSymlinkToNode _awgBtProveUapiNodes _awgBtNewToken _awgBtCurrentAttempt _awgBtAttemptBase _awgBtStateFile _awgBtFlagsArm _awgBtFlagRaise _awgBtFlagIs _awgBtAttemptRemove _awgBtStateValueValid _awgBtStateNew _awgBtStateSave _awgBtStateLoad _awgBtDaemonArgv _awgBtCloseInheritedFds"
+_AWG_BT_HELPER_FUNCTIONS="_awgBtErr _awgBtReleaseIdValid _awgBtValidInterfaceName _awgBtImitationProtocolValid _awgBtImitationUsesDomain _awgBtImitationDomainValid _awgBtImitationCheck _awgBtBinaryImitationSupport _awgBtStatOwnerMode _awgBtTrustedNode _awgBtTrustedAncestors _awgBtKernelArch _awgBtHostArch _awgBtCanRunArch _awgBtTarget _awgBtPlatformSuffix _awgBtVerifyStore _awgBtVerifyRelease _awgBtRuntimeFilePath _awgBtReadRuntimeFile _awgBtPidFile _awgBtPrepareRunDir _awgBtWriteState _awgBtListenPort _awgBtUapiReady _awgBtLinkExists _awgBtLinkIsTun _awgBtLinkIndex _awgBtListedByAwg _awgBtProcStat _awgBtProcessStartTime _awgBtProcessAlive _awgBtProcessIs _awgBtSignalProcess _awgBtStopProcess _awgBtPathId _awgBtPathAbsent _awgBtRecordedNodeGone _awgBtRemoveOwnedPath _awgBtSocketHeldBy _awgBtSymlinkToNode _awgBtProveUapiNodes _awgBtNewToken _awgBtCurrentAttempt _awgBtAttemptBase _awgBtStateFile _awgBtFlagsArm _awgBtFlagRaise _awgBtFlagIs _awgBtAttemptRemove _awgBtStateValueValid _awgBtStateNew _awgBtStateSave _awgBtStateLoad _awgBtDaemonArgv _awgBtCloseInheritedFds"
 _AWG_BT_LAUNCH_FUNCTIONS="awgBoringtunLaunchMain _awgBtRecordSocketNodes _awgBtLaunchRefused _awgBtLaunchFailed"
 _AWG_BT_CTL_FUNCTIONS="awgBackendCtlMain _awgBtInterfaceValues _awgBtSaveConfigEnabled _awgBtWithoutSaveConfig _awgBtTryDownCopy _awgBtDownCopy _awgBtLinkIsOwned _awgBtGuardedDown _awgBtRecordFailedDown _awgBtReplayPostDown _awgBtReportUnfinishedDown _awgBtFilteredStrip _awgBtSync _awgBtRenderModprobeOverride _awgBtModprobeActionBlocked _awgBtKernelModuleBlocked _awgBtCheckKernelModule _awgBtCheckPlatform _awgBtCheckHelpers _awgBtCheckBaseUnit _awgBtVerifyActiveInstance _awgBtCtlPrecheck _awgBtCtlPoststart _awgBtCtlStop _awgBtCtlPoststop"
 
@@ -7275,12 +7333,15 @@ function _awgBtScratchDestroy() {
 # start. A store that already holds a valid release is reused as it is and
 # never replaced: upgrades are not part of this installer version.
 
-# The release asset for an architecture (x86_64 or aarch64): sets
+# The adopted release asset for an architecture: sets
 # _AWG_BT_REL_ASSET, _AWG_BT_REL_ARCHIVE_ID (the archive's top-level
 # directory), _AWG_BT_REL_ID (the store's release directory,
 # _awgBtReleaseStoreId: the archive's directory for build 1),
 # _AWG_BT_REL_ARCHIVE_SHA256 and _AWG_BT_REL_BINARY_SHA256.
 function _awgBtSelectRelease() {
+	local PLATFORM
+	_AWG_BT_REL_ASSET="" _AWG_BT_REL_ARCHIVE_SHA256="" _AWG_BT_REL_BINARY_SHA256=""
+	_AWG_BT_REL_ARCHIVE_ID="" _AWG_BT_REL_ID=""
 	case "$1" in
 		x86_64)
 			_AWG_BT_REL_ASSET="${AWG_BT_RELEASE_ASSET_X86_64}"
@@ -7292,8 +7353,24 @@ function _awgBtSelectRelease() {
 			_AWG_BT_REL_ARCHIVE_SHA256="${AWG_BT_RELEASE_ARCHIVE_SHA256_AARCH64}"
 			_AWG_BT_REL_BINARY_SHA256="${AWG_BT_RELEASE_BINARY_SHA256_AARCH64}"
 			;;
+		armv7)
+			if [[ -z "${AWG_BT_RELEASE_ASSET_ARMV7}" || -z "${AWG_BT_RELEASE_ARCHIVE_SHA256_ARMV7}" || -z "${AWG_BT_RELEASE_BINARY_SHA256_ARMV7}" ]]; then
+				_awgBtErr "an ARMv7 hard-float release has not yet been published and adopted by this installer; the installed release was not changed"
+				return 1
+			fi
+			_AWG_BT_REL_ASSET="${AWG_BT_RELEASE_ASSET_ARMV7}"
+			_AWG_BT_REL_ARCHIVE_SHA256="${AWG_BT_RELEASE_ARCHIVE_SHA256_ARMV7}"
+			_AWG_BT_REL_BINARY_SHA256="${AWG_BT_RELEASE_BINARY_SHA256_ARMV7}"
+			;;
 		*) return 1 ;;
 	esac
+	PLATFORM="$(_awgBtPlatformSuffix "$1")" || return 1
+	if [[ "${_AWG_BT_REL_ASSET}" != "boringtun-cli-${AWG_BT_RELEASE_VERSION}-g${AWG_BT_RELEASE_SOURCE_COMMIT:0:12}-${PLATFORM}.tar.gz" ||
+		! "${_AWG_BT_REL_ARCHIVE_SHA256}" =~ ^[0-9a-f]{64}$ || ! "${_AWG_BT_REL_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+		_AWG_BT_REL_ASSET="" _AWG_BT_REL_ARCHIVE_SHA256="" _AWG_BT_REL_BINARY_SHA256=""
+		_awgBtErr "the embedded BoringTun release contract for $1 is incomplete or malformed"
+		return 1
+	fi
 	_AWG_BT_REL_ARCHIVE_ID="${_AWG_BT_REL_ASSET%.tar.gz}"
 	_AWG_BT_REL_ID="$(_awgBtReleaseStoreId "${AWG_BT_RELEASE_VERSION}" "${AWG_BT_RELEASE_SOURCE_COMMIT}" "${AWG_BT_RELEASE_BUILD}" "$1")" || return 1
 }
@@ -7301,10 +7378,11 @@ function _awgBtSelectRelease() {
 # The store directory of a release: build 1 keeps the name every earlier
 # installer gave it, a later build adds -b<build> (_awgBtReleaseIdValid).
 function _awgBtReleaseStoreId() { # <version> <source commit> <build> <arch>
-	local SUFFIX=""
+	local SUFFIX="" PLATFORM
 	[[ "$3" =~ ^[1-9][0-9]{0,8}$ ]] || return 1
+	PLATFORM="$(_awgBtPlatformSuffix "$4")" || return 1
 	[[ "$3" == 1 ]] || SUFFIX="-b$3"
-	printf 'boringtun-cli-%s-g%s%s-linux-%s-musl\n' "$1" "${2:0:12}" "${SUFFIX}" "$4"
+	printf 'boringtun-cli-%s-g%s%s-%s\n' "$1" "${2:0:12}" "${SUFFIX}" "${PLATFORM}"
 }
 
 # Print the paths that show a standalone amneziawg-proxy installation. Its
@@ -7382,10 +7460,11 @@ function checkBoringtunHostSupport() {
 		echo -e "${RED}ERROR: the BoringTun backend is supported only on Debian and Ubuntu hosts.${NC}" >&2
 		return 1
 	fi
-	if ! ARCH="$(_awgBtHostArch)" || ! _awgBtSelectRelease "${ARCH}"; then
-		echo -e "${RED}ERROR: BoringTun releases exist only for x86_64 and aarch64 hosts, not for $(uname -m 2>/dev/null).${NC}" >&2
+	if ! ARCH="$(_awgBtHostArch)"; then
+		echo -e "${RED}ERROR: BoringTun needs an amd64, arm64, or ARMv7-capable armhf userland and a compatible kernel.${NC}" >&2
 		return 1
 	fi
+	_awgBtSelectRelease "${ARCH}" || return 1
 	if [[ ! -d "${AWG_BT_SYSTEMD_RUNTIME_DIR}" ]]; then
 		echo -e "${RED}ERROR: the BoringTun backend needs a host running systemd.${NC}" >&2
 		return 1
@@ -7438,8 +7517,9 @@ function installBoringtunHostPackages() {
 # regular files, a MANIFEST that describes this exact release (read as data),
 # and a binary with the embedded SHA-256. Nothing in it runs.
 function _awgBtCheckReleaseDir() { # <dir> <arch>
-	local DIR="$1" ARCH="$2" FILE LINE KEY VALUE ACTUAL
+	local DIR="$1" ARCH="$2" FILE LINE KEY VALUE ACTUAL TARGET
 	local -A FIELDS=()
+	TARGET="$(_awgBtTarget "${ARCH}")" || return 1
 	for FILE in LICENSE MANIFEST THIRD-PARTY-LICENSES boringtun-cli; do
 		if [[ -L "${DIR}/${FILE}" || ! -f "${DIR}/${FILE}" ]]; then
 			echo "ERROR: the BoringTun release has no regular file ${FILE}" >&2
@@ -7469,7 +7549,7 @@ function _awgBtCheckReleaseDir() { # <dir> <arch>
 		"${FIELDS[version]}" != "${AWG_BT_RELEASE_VERSION}" ||
 		"${FIELDS[source_repository]}" != "${AWG_BT_RELEASE_SOURCE_REPOSITORY}" ||
 		"${FIELDS[source_commit]}" != "${AWG_BT_RELEASE_SOURCE_COMMIT}" ||
-		"${FIELDS[target]}" != "${ARCH}-unknown-linux-musl" || "${FIELDS[arch]}" != "${ARCH}" ||
+		"${FIELDS[target]}" != "${TARGET}" || "${FIELDS[arch]}" != "${ARCH}" ||
 		"${FIELDS[os]}" != linux || "${FIELDS[libc]}" != musl || "${FIELDS[linkage]}" != static ||
 		"${FIELDS[binary]}" != boringtun-cli || "${FIELDS[binary_sha256]}" != "${_AWG_BT_REL_BINARY_SHA256}" ]]; then
 		echo "ERROR: the BoringTun release MANIFEST does not describe ${_AWG_BT_REL_ID} (${AWG_BT_RELEASE_SOURCE_COMMIT})" >&2
@@ -7678,10 +7758,11 @@ function _awgBtEnsurePinnedRelease() { # <arch>
 # it was, or absent.
 function installBoringtunRelease() {
 	local ARCH CANONICAL_STORE
-	if ! ARCH="$(_awgBtHostArch)" || ! _awgBtSelectRelease "${ARCH}"; then
-		echo -e "${RED}ERROR: BoringTun releases exist only for x86_64 and aarch64 hosts.${NC}" >&2
+	if ! ARCH="$(_awgBtHostArch)"; then
+		echo -e "${RED}ERROR: BoringTun needs an amd64, arm64, or ARMv7-capable armhf userland and a compatible kernel.${NC}" >&2
 		return 1
 	fi
+	_awgBtSelectRelease "${ARCH}" || return 1
 	if ! _awgBtEnsureDirectory "${AWG_BT_STORE_DIR%/*}" 0755 || ! _awgBtEnsureDirectory "${AWG_BT_STORE_DIR}" 0755; then
 		echo -e "${RED}ERROR: cannot prepare the BoringTun store ${AWG_BT_STORE_DIR}.${NC}" >&2
 		return 1
@@ -12515,7 +12596,7 @@ function requireBoringtunImitationSupport() { # <protocol>
 		echo "ERROR: could not determine whether the installed BoringTun release ${CURRENT} supports protocol imitation $1: its binary did not answer as a release with or without it does. Nothing was changed." >&2
 		return 1
 	fi
-	_awgBtSelectRelease "$(_awgBtHostArch 2>/dev/null)" && PINNED="${_AWG_BT_REL_ID}"
+	_awgBtSelectRelease "$(_awgBtHostArch 2>/dev/null)" 2>/dev/null && PINNED="${_AWG_BT_REL_ID}"
 	if [[ -n "${PINNED}" && "${PINNED}" != "${CURRENT}" ]]; then
 		echo "ERROR: the installed BoringTun release ${CURRENT} does not support protocol imitation $1. Run 'amneziawg-install.sh --upgrade-boringtun' to move to ${PINNED}, the release this installer pins, then select $1 again. Nothing was changed." >&2
 	else
@@ -12833,7 +12914,7 @@ function printBackendStatus() {
 	printf 'imitation_protocol=%s\n' "${AWG_BORINGTUN_IMITATE_PROTOCOL}"
 	printf 'imitation_domain=%s\n' "${AWG_BORINGTUN_IMITATE_DOMAIN}"
 	printf 'imitation_domain_mode=%s\n' "$(boringtunImitationDomainMode "${AWG_BORINGTUN_IMITATE_PROTOCOL}" "${AWG_BORINGTUN_IMITATE_DOMAIN}")"
-	if _awgBtSelectRelease "$(_awgBtHostArch 2>/dev/null)"; then
+	if _awgBtSelectRelease "$(_awgBtHostArch 2>/dev/null)" 2>/dev/null; then
 		PINNED="${_AWG_BT_REL_ID}"
 	fi
 	if _awgBtVerifyStore 2>/dev/null; then
@@ -13108,7 +13189,7 @@ function _awgBtVerifyLifecycleActivation() {
 #     release; a release this transaction stored is removed. Every failing
 #     step is reported on its own.
 function boringtunBinaryLifecycle() ( # <upgrade|rollback>
-	local MODE="$1" ARCH UNIT STATE ACTIVE=0 CURRENT_ID PREVIOUS_ID="" PREVIOUS_EXISTED=0 LINK_RC
+	local MODE="$1" ARCH="" UNIT STATE ACTIVE=0 CURRENT_ID PREVIOUS_ID="" PREVIOUS_EXISTED=0 LINK_RC
 	local TARGET CREATED=0 WORK="" SWITCHED=0 RESTARTED=0 REPAIRED=0 HASHES_BEFORE="" HASHES_AFTER="" UNMANAGED
 	case "${MODE}" in
 		upgrade | rollback) ;;
@@ -13121,9 +13202,14 @@ function boringtunBinaryLifecycle() ( # <upgrade|rollback>
 		return 1
 	fi
 	normalizeAwgProtocolVersion || return 1
-	if ! ARCH="$(_awgBtHostArch)" || ! _awgBtSelectRelease "${ARCH}"; then
-		echo "ERROR: BoringTun releases exist only for x86_64 and aarch64 hosts." >&2
-		return 1
+	# Rollback verifies the retained target against its own manifest. It must
+	# not depend on a published download for the newly preferred userland ABI.
+	if [[ "${MODE}" == upgrade ]]; then
+		if ! ARCH="$(_awgBtHostArch)"; then
+			echo "ERROR: BoringTun needs an amd64, arm64, or ARMv7-capable armhf userland and a compatible kernel." >&2
+			return 1
+		fi
+		_awgBtSelectRelease "${ARCH}" || return 1
 	fi
 	if ! _awgBtReadStoreLink current || ! _awgBtVerifyStore; then
 		echo "ERROR: the release ${AWG_BT_STORE_DIR}/current selects does not verify; nothing was changed." >&2

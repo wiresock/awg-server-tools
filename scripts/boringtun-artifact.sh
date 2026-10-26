@@ -11,7 +11,8 @@
 # Commands:
 #   pin                                         print the validated pin as KEY=VALUE
 #   build <source> <target> <build-dir>         build boringtun-cli into a new <build-dir>
-#   licenses <source> <output-file>             license/source gate and THIRD-PARTY-LICENSES
+#   licenses <source> <output-file> [target]    license/source gate and THIRD-PARTY-LICENSES
+#   verify-binary <binary> <target> [0|1]      inspect format; optionally execute (default 1)
 #   package <build-dir> <source> <third-party-licenses> <out-dir>
 #                                               write a deterministic .tar.gz into <out-dir>
 #   verify-archive <archive> <extract-dir>      extract safely and check contents and binary
@@ -22,7 +23,7 @@
 #                                               the verify-archive checks except the required
 #                                               notices, for a test-only archive packaged with
 #                                               placeholder notices; never for a published one
-#   check-notices <third-party-licenses>        check the required copyright notices
+#   check-notices <third-party-licenses> <license> check the complete required notices
 #   device-smoke <boringtun-cli>                as root: create a TUN device and query its UAPI
 #   checksums <dir>                             write <dir>/SHA256SUMS for the archives in <dir>
 #
@@ -30,14 +31,15 @@
 # installs nothing and writes only below the directories it is given.
 #
 # BORINGTUN_PIN_FILE and BORINGTUN_NOTICES_FILE override the pin and the
-# required-notices list (used by the tests).
+# required-notices list (used by the tests). BORINGTUN_NOTICE_CONFIG selects
+# a reviewed notice policy directory; production uses the repository default.
 
 BTA_ROOT="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 BTA_PIN_FILE="${BORINGTUN_PIN_FILE:-${BTA_ROOT}/packaging/boringtun/pin.env}"
 BTA_CONFIG_DIR="${BTA_ROOT}/packaging/boringtun"
 BTA_NOTICES_FILE="${BORINGTUN_NOTICES_FILE:-${BTA_CONFIG_DIR}/required-notices}"
 BTA_PACKAGE="boringtun-cli"
-BTA_SUPPORTED_TARGETS="x86_64-unknown-linux-musl aarch64-unknown-linux-musl"
+BTA_SUPPORTED_TARGETS="x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf x86_64-apple-darwin aarch64-apple-darwin"
 # Recorded verbatim in MANIFEST. The placeholders stand for the local source and
 # Cargo home paths that the build remaps, so no runner path reaches the binary.
 BTA_BUILD_PROFILE="release,strip=symbols"
@@ -59,7 +61,29 @@ bta_info() {
 }
 
 bta_sha256() {
-    sha256sum -- "$1" | awk '{ print $1 }'
+    python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"
+}
+
+bta_tar() {
+    if [[ "$(uname -s)" == Darwin ]]; then
+        [[ "$(gtar --version | head -n 1)" == 'tar (GNU tar) 1.35' ]] || {
+            bta_err "GNU tar 1.35 (gtar) is required on macOS"
+            return 1
+        }
+        command gtar "$@"
+    else
+        command tar "$@"
+    fi
+}
+
+bta_profile() {
+    python3 "${BTA_ROOT}/scripts/boringtun-platform.py" profile "$1"
+}
+
+bta_rustflags_record() {
+    printf '%s' "${BTA_RUSTFLAGS_RECORD}"
+    [[ "$1" != armv7-unknown-linux-musleabihf ]] || printf ' -Clinker-flavor=ld.lld -Clink-self-contained=yes'
+    printf '\n'
 }
 
 # Parse the pin file as data: comments and blank lines, then exactly one line
@@ -160,8 +184,12 @@ bta_target_arch() {
 }
 
 bta_archive_stem() {
-    local arch="$1"
-    printf '%s-%s-g%s-linux-%s-musl\n' "${BTA_PACKAGE}" "${BTA_VERSION}" "${BTA_COMMIT:0:12}" "${arch}"
+    local target="$1" profile arch os libc linkage suffix
+    # Preserve the sourced helper's old Linux architecture-only interface.
+    [[ "${target}" == x86_64 || "${target}" == aarch64 ]] && target="${target}-unknown-linux-musl"
+    profile="$(bta_profile "${target}")" || return 1
+    IFS=$'\t' read -r arch os libc linkage suffix <<<"${profile}"
+    printf '%s-%s-g%s-%s\n' "${BTA_PACKAGE}" "${BTA_VERSION}" "${BTA_COMMIT:0:12}" "${suffix}"
 }
 
 # Refuse a source tree that is not exactly the pinned commit: wrong HEAD, local
@@ -202,6 +230,7 @@ bta_verify_source() {
         bta_err "boringtun-cli/Cargo.toml declares version '${version}', but the pin expects ${BTA_VERSION}"
         return 1
     fi
+    python3 "${BTA_ROOT}/scripts/boringtun-notices.py" source "${BTA_RUST_TOOLCHAIN}" "${source_dir}"
 }
 
 bta_abs_dir() {
@@ -288,31 +317,14 @@ bta_elf_machine() {
 # architecture can still be checked on the host.
 bta_verify_binary() {
     local binary="$1" target="$2" execute="${3:-1}"
-    local arch machine header output
+    local arch output
 
     arch="$(bta_target_arch "${target}")" || return 1
-    machine="$(bta_elf_machine "${arch}")" || return 1
     if [[ ! -f "${binary}" || -L "${binary}" || ! -x "${binary}" ]]; then
         bta_err "boringtun-cli binary is missing or not an executable regular file: ${binary}"
         return 1
     fi
-    if ! header="$(LC_ALL=C readelf -hW -- "${binary}" 2>/dev/null)"; then
-        bta_err "${binary} is not an ELF file"
-        return 1
-    fi
-    if ! grep -Eq '^[[:space:]]*Class:[[:space:]]+ELF64$' <<<"${header}" || \
-        ! grep -Eq "^[[:space:]]*Machine:[[:space:]]+${machine}\$" <<<"${header}"; then
-        bta_err "${binary} is not a 64-bit ${arch} ELF executable"
-        return 1
-    fi
-    if LC_ALL=C readelf -lW -- "${binary}" 2>/dev/null | grep -q 'INTERP'; then
-        bta_err "${binary} is dynamically linked: it requests a program interpreter"
-        return 1
-    fi
-    if LC_ALL=C readelf -dW -- "${binary}" 2>/dev/null | grep -q '(NEEDED)'; then
-        bta_err "${binary} depends on shared libraries"
-        return 1
-    fi
+    python3 "${BTA_ROOT}/scripts/boringtun-platform.py" inspect "${target}" "${binary}" || return 1
     [[ "${execute}" == 0 ]] && return 0
     output="$("${binary}" --version 2>&1)" || true
     if [[ "${output}" != "boringtun ${BTA_VERSION}" ]]; then
@@ -331,12 +343,17 @@ bta_verify_binary() {
 # directory; nothing is written anywhere else.
 bta_build() {
     local source_dir="$1" target="$2" build_dir="$3"
-    local arch host_arch source_abs build_abs lock_before epoch binary leak_path remap_config
+    local arch host_arch source_abs build_abs lock_before epoch binary leak_path remap_config native_env sysroot execute=1
+    local -a build_env=()
     local build_command="cargo build --release --locked -p ${BTA_PACKAGE} --bin ${BTA_PACKAGE} --target ${target}"
 
     arch="$(bta_target_arch "${target}")" || return 1
     host_arch="$(uname -m)"
-    if [[ "${host_arch}" != "${arch}" ]]; then
+    [[ "${host_arch}" == arm64 ]] && host_arch=aarch64
+    if [[ "${target}" == armv7-unknown-linux-musleabihf ]]; then
+        [[ "$(uname -s)" == Linux ]] || { bta_err "ARMv7 cross builds require Linux"; return 1; }
+        execute=0
+    elif [[ "${host_arch}" != "${arch}" ]]; then
         bta_err "only native builds are supported: target ${target} needs an ${arch} host, this is ${host_arch}"
         return 1
     fi
@@ -349,6 +366,8 @@ bta_build() {
     fi
     bta_check_no_cargo_config "${source_abs}" "${BTA_CARGO_HOME}" || return 1
     bta_check_toolchain || return 1
+    sysroot="$(bta_toolchain_env rustc --print sysroot)" || return 1
+    python3 "${BTA_ROOT}/scripts/boringtun-notices.py" runtime "${BTA_RUST_TOOLCHAIN}" "${sysroot}" --target "${target}" || return 1
     if [[ -e "${build_dir}" && ( ! -d "${build_dir}" || -n "$(ls -A -- "${build_dir}")" ) ]]; then
         bta_err "build directory must be new or empty: ${build_dir}"
         return 1
@@ -361,6 +380,10 @@ bta_build() {
             return 1
             ;;
     esac
+    native_env="$(bta_toolchain_env "BTA_BUILD_SHELL=${BASH}" python3 "${BTA_ROOT}/scripts/boringtun-platform.py" build-env "${target}" "${build_abs}")" || return 1
+    if [[ -n "${native_env}" ]]; then
+        mapfile -t build_env <<<"${native_env}"
+    fi
 
     # Remap the local source and Cargo home paths out of the binary. Passed with
     # --config so that Cargo joins it to any rustflags the pinned source defines
@@ -376,6 +399,9 @@ bta_build() {
         esac
     done
     remap_config="target.${target}.rustflags=[\"--remap-path-prefix=${source_abs}=/boringtun\", \"--remap-path-prefix=${BTA_CARGO_HOME}=/cargo\"]"
+    if [[ "${target}" == armv7-unknown-linux-musleabihf ]]; then
+        remap_config="${remap_config%]}, \"-Clinker-flavor=ld.lld\", \"-Clink-self-contained=yes\"]"
+    fi
 
     lock_before="$(bta_sha256 "${source_abs}/Cargo.lock")"
     epoch="$(git -C "${source_abs}" show -s --format=%ct HEAD)"
@@ -384,6 +410,7 @@ bta_build() {
         CARGO_TARGET_DIR="${build_abs}/cargo-target" \
         CARGO_PROFILE_RELEASE_STRIP=symbols \
         SOURCE_DATE_EPOCH="${epoch}" \
+        "${build_env[@]}" \
         cargo build --release --locked -p "${BTA_PACKAGE}" --bin "${BTA_PACKAGE}" --target "${target}" \
             --config "${remap_config}"); then
         bta_err "cargo build failed"
@@ -407,7 +434,7 @@ bta_build() {
             return 1
         fi
     done
-    bta_verify_binary "${build_abs}/${BTA_PACKAGE}" "${target}" || return 1
+    bta_verify_binary "${build_abs}/${BTA_PACKAGE}" "${target}" "${execute}" || return 1
 
     {
         printf 'target=%s\n' "${target}"
@@ -451,6 +478,7 @@ bta_check_notices() {
         bta_err "${notices} lists no notice"
         return 1
     fi
+    python3 "${BTA_ROOT}/scripts/boringtun-notices.py" check "${BTA_RUST_TOOLCHAIN}" "${file}" "${2:-}" --target "${3:-x86_64-unknown-linux-musl}" || return 1
     # Sections are separated by a line of 80 '='; a line of 80 '-' ends the
     # section's "Used by:" crate list and starts its license text.
     problems="$(LC_ALL=C awk -v workspace=" boringtun ${BTA_PACKAGE} " '
@@ -466,6 +494,9 @@ bta_check_notices() {
         {
             line = $0
             sub(/[ \t\r]+$/, "", line)
+            # The complete supplemental text has already been byte-verified.
+            # Its upstream license templates may contain literal placeholders.
+            if (line == "BEGIN BORINGTUN RUNTIME AND NATIVE NOTICES") exit
             if (line == eq) { sec++; header = 1; next }
             if (!sec) next
             if (header && line == dash) { header = 0; next }
@@ -514,10 +545,11 @@ bta_check_notices() {
 # deterministic for a given pin. Fails when a crate linked into the binary ships
 # an Apache-2.0 NOTICE file, whose contents this file does not reproduce yet.
 bta_licenses() {
-    local source_dir="$1" output="$2"
+    local source_dir="$1" output="$2" target="${3:-x86_64-unknown-linux-musl}"
     local source_abs output_abs lock_before crates line name version manifest notice tool
     local -a crate_lines=()
 
+    bta_target_arch "${target}" >/dev/null || return 1
     bta_verify_source "${source_dir}" || return 1
     source_abs="$(bta_abs_dir "${source_dir}")" || return 1
     BTA_CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
@@ -580,7 +612,8 @@ bta_licenses() {
         bta_err "generated THIRD-PARTY-LICENSES is incomplete"
         return 1
     fi
-    if ! bta_check_notices "${output_abs}.tmp"; then
+    if ! python3 "${BTA_ROOT}/scripts/boringtun-notices.py" bundle "${BTA_RUST_TOOLCHAIN}" --target "${target}" >>"${output_abs}.tmp" || \
+        ! bta_check_notices "${output_abs}.tmp" "${BORINGTUN_NOTICE_CONFIG:-${BTA_CONFIG_DIR}}/fork-license.txt" "${target}"; then
         rm -f -- "${output_abs}.tmp"
         bta_err "generated THIRD-PARTY-LICENSES lacks required copyright notices (packaging/boringtun/required-notices)"
         return 1
@@ -624,7 +657,9 @@ bta_read_kv() {
 
 bta_write_manifest() {
     local -n info_ref="$1"
-    local arch="$2"
+    local arch="$2" profile os libc linkage suffix
+    profile="$(bta_profile "${info_ref[target]}")" || return 1
+    IFS=$'\t' read -r arch os libc linkage suffix <<<"${profile}"
 
     printf 'artifact_format=%s\n' "${BTA_ARTIFACT_FORMAT}"
     printf 'name=%s\n' "${BTA_PACKAGE}"
@@ -633,16 +668,16 @@ bta_write_manifest() {
     printf 'source_commit=%s\n' "${BTA_COMMIT}"
     printf 'source_date_epoch=%s\n' "${info_ref[source_date_epoch]}"
     printf 'target=%s\n' "${info_ref[target]}"
-    printf 'os=linux\n'
+    printf 'os=%s\n' "${os}"
     printf 'arch=%s\n' "${arch}"
-    printf 'libc=musl\n'
-    printf 'linkage=static\n'
+    printf 'libc=%s\n' "${libc}"
+    printf 'linkage=%s\n' "${linkage}"
     printf 'rust_toolchain=%s\n' "${BTA_RUST_TOOLCHAIN}"
     printf 'rustc=%s\n' "${info_ref[rustc]}"
     printf 'cargo=%s\n' "${info_ref[cargo]}"
     printf 'build_command=%s\n' "${info_ref[build_command]}"
     printf 'build_profile=%s\n' "${BTA_BUILD_PROFILE}"
-    printf 'rustflags=%s\n' "${BTA_RUSTFLAGS_RECORD}"
+    printf 'rustflags=%s\n' "$(bta_rustflags_record "${info_ref[target]}")"
     printf 'binary=%s\n' "${BTA_PACKAGE}"
     printf 'binary_sha256=%s\n' "${info_ref[binary_sha256]}"
     printf 'license=LICENSE (BSD-3-Clause)\n'
@@ -679,11 +714,13 @@ bta_package() {
         bta_err "THIRD-PARTY-LICENSES file is missing or empty: ${third_party}"
         return 1
     fi
+    bta_check_notices "${third_party}" "${BORINGTUN_NOTICE_CONFIG:-${BTA_CONFIG_DIR}}/fork-license.txt" "${info[target]}" || return 1
+    bta_verify_binary "${build_dir}/${BTA_PACKAGE}" "${info[target]}" 0 || return 1
     if [[ ! -d "${out_dir}" ]]; then
         bta_err "output directory does not exist: ${out_dir}"
         return 1
     fi
-    stem="$(bta_archive_stem "${arch}")"
+    stem="$(bta_archive_stem "${info[target]}")" || return 1
     archive="${out_dir}/${stem}.tar.gz"
     if [[ -e "${archive}" ]]; then
         bta_err "refusing to overwrite ${archive}"
@@ -694,11 +731,11 @@ bta_package() {
     {
         install -d -m 0755 -- "${stage}/${stem}" &&
             install -m 0755 -- "${build_dir}/${BTA_PACKAGE}" "${stage}/${stem}/${BTA_PACKAGE}" &&
-            install -m 0644 -- "${source_dir}/LICENSE.md" "${stage}/${stem}/LICENSE" &&
+            install -m 0644 -- "${BORINGTUN_NOTICE_CONFIG:-${BTA_CONFIG_DIR}}/fork-license.txt" "${stage}/${stem}/LICENSE" &&
             install -m 0644 -- "${third_party}" "${stage}/${stem}/THIRD-PARTY-LICENSES" &&
             bta_write_manifest info "${arch}" >"${stage}/${stem}/MANIFEST" &&
-            chmod 0644 -- "${stage}/${stem}/MANIFEST" &&
-            (cd "${stage}" && LC_ALL=C tar --sort=name --format=ustar --owner=0 --group=0 \
+            python3 -c 'import os, sys; os.chmod(sys.argv[1], 0o644)' "${stage}/${stem}/MANIFEST" &&
+            (cd "${stage}" && LC_ALL=C bta_tar --sort=name --format=ustar --owner=0 --group=0 \
                 --numeric-owner --mtime="@${info[source_date_epoch]}" -cf archive.tar -- "${stem}") &&
             gzip -9 -n -c -- "${stage}/archive.tar" >"${stage}/archive.tar.gz" &&
             mv -- "${stage}/archive.tar.gz" "${archive}"
@@ -719,16 +756,19 @@ bta_package() {
 # path of the extracted binary.
 bta_verify_archive() {
     local archive="$1" extract_dir="$2" execute="${3:-1}" notices="${4:-1}"
-    local name stem arch expected listing line mode path binary
+    local name stem arch expected listing line mode path binary target profile os libc linkage suffix
     local -A manifest=()
 
     name="$(basename -- "${archive}")"
-    if [[ ! "${name}" =~ ^boringtun-cli-([0-9]+\.[0-9]+\.[0-9]+)-g([0-9a-f]{12})-linux-(x86_64|aarch64)-musl\.tar\.gz$ ]]; then
+    if [[ ! "${name}" =~ ^boringtun-cli-([0-9]+\.[0-9]+\.[0-9]+)-g([0-9a-f]{12})-(linux-(x86_64|aarch64)-musl|linux-armv7-musleabihf|macos-(x86_64|aarch64))\.tar\.gz$ ]]; then
         bta_err "unexpected artifact name: ${name}"
         return 1
     fi
-    arch="${BASH_REMATCH[3]}"
-    stem="$(bta_archive_stem "${arch}")"
+    suffix="${BASH_REMATCH[3]}"
+    target="$(python3 "${BTA_ROOT}/scripts/boringtun-platform.py" target-for-suffix "${suffix}")" || return 1
+    profile="$(bta_profile "${target}")" || return 1
+    IFS=$'\t' read -r arch os libc linkage suffix <<<"${profile}"
+    stem="$(bta_archive_stem "${target}")" || return 1
     if [[ "${name}" != "${stem}.tar.gz" ]]; then
         bta_err "${name} is not the artifact of the pinned version and commit (${stem}.tar.gz)"
         return 1
@@ -739,7 +779,7 @@ bta_verify_archive() {
     fi
     expected="$(printf '%s\n' "${stem}/" "${stem}/LICENSE" "${stem}/MANIFEST" \
         "${stem}/THIRD-PARTY-LICENSES" "${stem}/${BTA_PACKAGE}")"
-    if ! listing="$(LC_ALL=C tar -tzf "${archive}" 2>/dev/null)" || \
+    if ! listing="$(LC_ALL=C bta_tar -tzf "${archive}" 2>/dev/null)" || \
         [[ "$(LC_ALL=C sort <<<"${listing}")" != "${expected}" ]]; then
         bta_err "${name} does not contain exactly the expected members"
         return 1
@@ -758,14 +798,14 @@ bta_verify_archive() {
             bta_err "${name}: ${path} is not owned by 0/0"
             return 1
         }
-    done < <(LC_ALL=C tar --numeric-owner -tvzf "${archive}")
+    done < <(LC_ALL=C bta_tar --numeric-owner -tvzf "${archive}")
 
     if [[ -e "${extract_dir}" && ( ! -d "${extract_dir}" || -n "$(ls -A -- "${extract_dir}")" ) ]]; then
         bta_err "extraction directory must be new or empty: ${extract_dir}"
         return 1
     fi
     mkdir -p -- "${extract_dir}" || return 1
-    if ! tar -xzf "${archive}" -C "${extract_dir}" --no-same-owner; then
+    if ! bta_tar -xzf "${archive}" -C "${extract_dir}" --no-same-owner; then
         bta_err "could not extract ${name}"
         return 1
     fi
@@ -776,9 +816,9 @@ bta_verify_archive() {
         "${manifest[version]}" != "${BTA_VERSION}" || \
         "${manifest[source_repository]}" != "${BTA_REPOSITORY}" || \
         "${manifest[source_commit]}" != "${BTA_COMMIT}" || \
-        "${manifest[target]}" != "${arch}-unknown-linux-musl" || \
-        "${manifest[arch]}" != "${arch}" || "${manifest[os]}" != "linux" || \
-        "${manifest[libc]}" != "musl" || "${manifest[linkage]}" != "static" || \
+        "${manifest[target]}" != "${target}" || \
+        "${manifest[arch]}" != "${arch}" || "${manifest[os]}" != "${os}" || \
+        "${manifest[libc]}" != "${libc}" || "${manifest[linkage]}" != "${linkage}" || \
         "${manifest[rust_toolchain]}" != "${BTA_RUST_TOOLCHAIN}" || \
         "${manifest[binary]}" != "${BTA_PACKAGE}" ]]; then
         bta_err "${name}: MANIFEST does not describe the pinned artifact"
@@ -793,7 +833,7 @@ bta_verify_archive() {
         bta_err "${name}: LICENSE or THIRD-PARTY-LICENSES is not the expected notice"
         return 1
     fi
-    if [[ "${notices}" != 0 ]] && ! bta_check_notices "${extract_dir}/${stem}/THIRD-PARTY-LICENSES"; then
+    if [[ "${notices}" != 0 ]] && ! bta_check_notices "${extract_dir}/${stem}/THIRD-PARTY-LICENSES" "${extract_dir}/${stem}/LICENSE" "${target}"; then
         bta_err "${name}: THIRD-PARTY-LICENSES lacks required copyright notices"
         return 1
     fi
@@ -807,17 +847,24 @@ bta_verify_archive() {
 # which --version and --help cannot.
 bta_device_smoke() {
     local binary="$1"
-    local name sock log pid response rc=0 i
+    local name sock log pid response rc=0 i system
 
     if [[ "$(id -u)" -ne 0 ]]; then
         bta_err "the device smoke test must run as root: it creates a TUN device"
         return 1
     fi
-    if [[ ! -c /dev/net/tun ]]; then
+    system="$(uname -s)"
+    if [[ "${system}" != Linux && "${system}" != Darwin ]]; then
+        bta_err "device smoke supports Linux TUN or native macOS utun"
+        return 1
+    fi
+    if [[ "${system}" == Linux && ! -c /dev/net/tun ]]; then
         bta_err "/dev/net/tun is not available"
         return 1
     fi
-    for i in ip python3; do
+    local interface_tool=ip
+    [[ "${system}" == Darwin ]] && interface_tool=ifconfig
+    for i in "${interface_tool}" python3; do
         command -v "${i}" >/dev/null 2>&1 || {
             bta_err "${i} is required for the device smoke test"
             return 1
@@ -828,8 +875,11 @@ bta_device_smoke() {
         return 1
     fi
     name="btsmk$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+    if [[ "${system}" == Darwin ]]; then
+        name="utun$(python3 -c 'import secrets; print(1000 + secrets.randbelow(30000))')"
+    fi
     sock="/var/run/wireguard/${name}.sock"
-    if ip link show dev "${name}" >/dev/null 2>&1 || [[ -e "${sock}" ]]; then
+    if bta_interface_exists "${system}" "${name}" || [[ -e "${sock}" ]]; then
         bta_err "interface or socket ${name} already exists"
         return 1
     fi
@@ -837,11 +887,12 @@ bta_device_smoke() {
     "${binary}" --foreground --disable-drop-privileges "${name}" >"${log}" 2>&1 &
     pid=$!
     for ((i = 0; i < 50; i++)); do
-        [[ -S "${sock}" ]] && ip link show dev "${name}" >/dev/null 2>&1 && break
+        [[ -S "${sock}" ]] && bta_interface_exists "${system}" "${name}" && break
         kill -0 "${pid}" 2>/dev/null || break
         sleep 0.2
     done
-    if ! ip -details link show dev "${name}" 2>/dev/null | grep -qw tun; then
+    if ! bta_interface_exists "${system}" "${name}" || \
+        { [[ "${system}" == Linux ]] && ! ip -details link show dev "${name}" 2>/dev/null | grep -qw tun; }; then
         bta_err "boringtun-cli did not create the TUN device ${name}"
         rc=1
     elif ! response="$(python3 - "${sock}" <<'PY'
@@ -867,12 +918,12 @@ PY
     kill "${pid}" 2>/dev/null || true
     wait "${pid}" 2>/dev/null || true
     for ((i = 0; i < 25; i++)); do
-        ip link show dev "${name}" >/dev/null 2>&1 || break
+        bta_interface_exists "${system}" "${name}" || break
         sleep 0.2
     done
-    if ip link show dev "${name}" >/dev/null 2>&1; then
+    if bta_interface_exists "${system}" "${name}"; then
         bta_err "the TUN device ${name} outlived its daemon"
-        ip link delete dev "${name}" >/dev/null 2>&1 || true
+        [[ "${system}" != Linux ]] || ip link delete dev "${name}" >/dev/null 2>&1 || true
         rc=1
     fi
     rm -f -- "${sock}"
@@ -885,29 +936,56 @@ PY
     return "${rc}"
 }
 
+bta_interface_exists() {
+    if [[ "$1" == Darwin ]]; then
+        ifconfig "$2" >/dev/null 2>&1
+    else
+        ip link show dev "$2" >/dev/null 2>&1
+    fi
+}
+
 # Write SHA256SUMS for every artifact archive in a directory, sorted by name.
 bta_checksums() {
-    local dir="$1" name
+    local dir="$1" name digest scratch
     local -a archives=()
 
     if [[ ! -d "${dir}" ]]; then
         bta_err "not a directory: ${dir}"
         return 1
     fi
-    mapfile -t archives < <(find "${dir}" -maxdepth 1 -type f -name 'boringtun-cli-*.tar.gz' -printf '%f\n' | LC_ALL=C sort)
+    mapfile -t archives < <(python3 -c 'from pathlib import Path; import sys; print("\n".join(sorted(p.name for p in Path(sys.argv[1]).glob("boringtun-cli-*.tar.gz") if p.is_file())))' "${dir}")
+    [[ "${archives[*]}" == "" ]] && archives=()
     if (( ${#archives[@]} == 0 )); then
         bta_err "no boringtun-cli archives in ${dir}"
         return 1
     fi
     for name in "${archives[@]}"; do
-        if [[ ! "${name}" =~ ^boringtun-cli-[0-9]+\.[0-9]+\.[0-9]+-g[0-9a-f]{12}-linux-(x86_64|aarch64)-musl\.tar\.gz$ ]]; then
+        if [[ ! "${name}" =~ ^boringtun-cli-[0-9]+\.[0-9]+\.[0-9]+-g[0-9a-f]{12}-(linux-(x86_64|aarch64)-musl|linux-armv7-musleabihf|macos-(x86_64|aarch64))\.tar\.gz$ || -L "${dir}/${name}" ]]; then
             bta_err "unexpected file name in ${dir}: ${name}"
             return 1
         fi
     done
-    (cd "${dir}" && sha256sum -- "${archives[@]}") >"${dir}/SHA256SUMS.tmp" &&
-        mv -- "${dir}/SHA256SUMS.tmp" "${dir}/SHA256SUMS" &&
-        (cd "${dir}" && sha256sum --quiet -c SHA256SUMS)
+    scratch="$(mktemp "${dir}/.SHA256SUMS.XXXXXX")" || return 1
+    if ! (
+        for name in "${archives[@]}"; do
+            digest="$(bta_sha256 "${dir}/${name}")" || {
+                bta_err "failed to hash ${dir}/${name}"
+                exit 1
+            }
+            if [[ ! "${digest}" =~ ^[0-9a-f]{64}$ ]]; then
+                bta_err "invalid SHA-256 digest for ${dir}/${name}"
+                exit 1
+            fi
+            printf '%s  %s\n' "${digest}" "${name}" || exit 1
+        done
+    ) >"${scratch}"; then
+        rm -f -- "${scratch}"
+        return 1
+    fi
+    if ! mv -- "${scratch}" "${dir}/SHA256SUMS"; then
+        rm -f -- "${scratch}"
+        return 1
+    fi
 }
 
 bta_usage() {
@@ -922,12 +1000,13 @@ bta_main() {
     case "${command}:$#" in
         pin:0) bta_print_pin ;;
         build:3) bta_build "$@" ;;
-        licenses:2) bta_licenses "$@" ;;
+        licenses:2 | licenses:3) bta_licenses "$@" ;;
+        verify-binary:2 | verify-binary:3) bta_verify_binary "$@" ;;
         package:4) bta_package "$@" ;;
         verify-archive:2) bta_verify_archive "$@" ;;
         verify-archive-static:2) bta_verify_archive "$1" "$2" 0 ;;
         verify-test-archive:2) bta_verify_archive "$1" "$2" 1 0 ;;
-        check-notices:1) bta_check_notices "$@" ;;
+        check-notices:1 | check-notices:2 | check-notices:3) bta_check_notices "$@" ;;
         device-smoke:1) bta_device_smoke "$@" ;;
         checksums:1) bta_checksums "$@" ;;
         *)

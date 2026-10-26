@@ -1,0 +1,1343 @@
+{
+  "format": 1,
+  "rust_toolchain": "1.98.1",
+  "rust_commit": "48a229ceaefd4985c50990b14116b6d856af0985",
+  "llvm_commit": "52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04",
+  "inputs": {
+    "rust-src-1.98.1.tar.xz": {
+      "url": "https://static.rust-lang.org/dist/2026-09-03/rust-src-1.98.1.tar.xz",
+      "sha256": "5c846ebcebcc7e2e0777a4cdaa12051691593f16a7e94edbae5e6241cc62d98c",
+      "archive": true
+    },
+    "rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz": {
+      "url": "https://static.rust-lang.org/dist/2026-09-03/rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz",
+      "sha256": "e974f036b28565f37c0f3bd92ddefa809bee16c04f9dcf07b9ed96e05aaaf7c4",
+      "archive": true
+    },
+    "rust-std-1.98.1-x86_64-unknown-linux-musl.tar.xz": {
+      "url": "https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-x86_64-unknown-linux-musl.tar.xz",
+      "sha256": "bd9f35880de21dab0e387e84009c00001ae7836a4ba565cb16823f13f75f325f",
+      "archive": true
+    },
+    "rust-std-1.98.1-aarch64-unknown-linux-musl.tar.xz": {
+      "url": "https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-aarch64-unknown-linux-musl.tar.xz",
+      "sha256": "7e0ad2e67817f224b7a6331e48d6397303fc050edaccf81784ed786ffddc884a",
+      "archive": true
+    },
+    "musl-1.2.5.tar.gz": {
+      "url": "https://www.musl-libc.org/releases/musl-1.2.5.tar.gz",
+      "sha256": "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4",
+      "archive": true
+    },
+    "ring-0.17.14.crate": {
+      "url": "https://crates.io/api/v1/crates/ring/0.17.14/download",
+      "sha256": "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7",
+      "archive": true
+    },
+    "rust-musl.sh": {
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/48a229ceaefd4985c50990b14116b6d856af0985/src/ci/docker/scripts/musl.sh",
+      "sha256": "2f218a2dc7b7e73509212bfd4319ebddc2ddac7c651fca142c2b29bd7ea0aa38",
+      "archive": false
+    },
+    "llvm-libunwind-LICENSE.TXT": {
+      "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04/libunwind/LICENSE.TXT",
+      "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d",
+      "archive": false
+    },
+    "llvm-compiler-rt-CREDITS.TXT": {
+      "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04/compiler-rt/CREDITS.TXT",
+      "sha256": "a9901f47a089da41e4690682d00ce4cedaa2baf41fedbe79beee366d43ac2461",
+      "archive": false
+    },
+    "Unicode-3.0.txt": {
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/48a229ceaefd4985c50990b14116b6d856af0985/LICENSES/Unicode-3.0.txt",
+      "sha256": "f5062c9a188d81dfe66b56db4182dcf9e4b17c0d9b0d311a8e20b3a1b075c443",
+      "archive": false
+    },
+    "BSD-2-Clause.txt": {
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/48a229ceaefd4985c50990b14116b6d856af0985/LICENSES/BSD-2-Clause.txt",
+      "sha256": "f32fb3b417a194167cfad068223fc975ba96c5960513a10f66a3c28720aec1df",
+      "archive": false
+    },
+    "llvm-compiler-rt-LICENSE.TXT": {
+      "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04/compiler-rt/LICENSE.TXT",
+      "sha256": "1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d",
+      "archive": false
+    },
+    "llvm-crtbegin.c": {
+      "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04/compiler-rt/lib/builtins/crtbegin.c",
+      "sha256": "ad21b03ddb3f66530ef34394cc1819f5156d536c30efba7486a7834120fba93f",
+      "archive": false
+    },
+    "llvm-crtend.c": {
+      "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04/compiler-rt/lib/builtins/crtend.c",
+      "sha256": "6d5a61b8f2f6fa541a12ec52aea40b5085e40fcf8626984d318523cb30335d06",
+      "archive": false
+    },
+    "rust-bootstrap-compile.rs": {
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/48a229ceaefd4985c50990b14116b6d856af0985/src/bootstrap/src/core/build_steps/compile.rs",
+      "sha256": "ca5c2b96fb81b508f74bd5127c68645a60536e78d144a1ded903d671cef7fd92",
+      "archive": false
+    },
+    "rust-bootstrap-llvm.rs": {
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/48a229ceaefd4985c50990b14116b6d856af0985/src/bootstrap/src/core/build_steps/llvm.rs",
+      "sha256": "d4ea28d878225ff95593b2ae3e4d51eab929722d77cebd88bf6c85234c32bba6",
+      "archive": false
+    },
+    "rust-1.98.1.toml": {
+      "url": "https://static.rust-lang.org/dist/channel-rust-1.98.1.toml",
+      "sha256": "a7c8774a5fd8441c997d94c029776cbc5eb111e9d72ab5d256fa69866644347e",
+      "archive": false
+    },
+    "rust-std-1.98.1-armv7-unknown-linux-musleabihf.tar.xz": {
+      "url": "https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-armv7-unknown-linux-musleabihf.tar.xz",
+      "sha256": "dd0efa4210a6da6350a6b05d8ffa43eae4baecf2397cc00a3b028bdf56cdb1ce",
+      "archive": true
+    },
+    "rust-std-1.98.1-x86_64-apple-darwin.tar.xz": {
+      "url": "https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-x86_64-apple-darwin.tar.xz",
+      "sha256": "48b9835058a8baa4ff5e4387f3772c572a017a2b13393c46e151615c54e322e9",
+      "archive": true
+    },
+    "rust-std-1.98.1-aarch64-apple-darwin.tar.xz": {
+      "url": "https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-aarch64-apple-darwin.tar.xz",
+      "sha256": "2de831ef563ce772519a4d18ba2659f0f7428d497ef66dad24b5a35e8f8cd177",
+      "archive": true
+    }
+  },
+  "library_cargo_lock_sha256": "d1c5dbdf53bfebd7de60f26a171819db3b28ebfd75f3fa99c3286893a5a7b7a6",
+  "linux_runtime_dependencies": {
+    "addr2line": "0.25.1",
+    "adler2": "2.0.1",
+    "cfg-if": "1.0.4",
+    "gimli": "0.32.3",
+    "hashbrown": "0.17.1",
+    "foldhash": "0.2.0",
+    "libc": "0.2.185",
+    "memchr": "2.7.6",
+    "miniz_oxide": "0.8.9",
+    "object": "0.37.3",
+    "rustc-demangle": "0.1.27",
+    "rustc-literal-escaper": "0.0.8"
+  },
+  "target_objects": {
+    "x86_64-unknown-linux-musl": [
+      "x86_64-unknown-linux-musl/lib/libaddr2line-e0771a618e592e99.rlib",
+      "x86_64-unknown-linux-musl/lib/libaddr2line-e0771a618e592e99.rmeta",
+      "x86_64-unknown-linux-musl/lib/libadler2-bc0523200cd65c09.rlib",
+      "x86_64-unknown-linux-musl/lib/libadler2-bc0523200cd65c09.rmeta",
+      "x86_64-unknown-linux-musl/lib/liballoc-924df7cf38fb930e.rlib",
+      "x86_64-unknown-linux-musl/lib/liballoc-924df7cf38fb930e.rmeta",
+      "x86_64-unknown-linux-musl/lib/libcfg_if-975626414d0194b8.rlib",
+      "x86_64-unknown-linux-musl/lib/libcfg_if-975626414d0194b8.rmeta",
+      "x86_64-unknown-linux-musl/lib/libcompiler_builtins-684ebc5246920c3d.rlib",
+      "x86_64-unknown-linux-musl/lib/libcompiler_builtins-684ebc5246920c3d.rmeta",
+      "x86_64-unknown-linux-musl/lib/libcore-5742c2f222531cae.rlib",
+      "x86_64-unknown-linux-musl/lib/libcore-5742c2f222531cae.rmeta",
+      "x86_64-unknown-linux-musl/lib/libgetopts-d01d64705a93387d.rlib",
+      "x86_64-unknown-linux-musl/lib/libgetopts-d01d64705a93387d.rmeta",
+      "x86_64-unknown-linux-musl/lib/libgimli-a10f7ac90fd844b8.rlib",
+      "x86_64-unknown-linux-musl/lib/libgimli-a10f7ac90fd844b8.rmeta",
+      "x86_64-unknown-linux-musl/lib/libhashbrown-7e95459b82b788ce.rlib",
+      "x86_64-unknown-linux-musl/lib/libhashbrown-7e95459b82b788ce.rmeta",
+      "x86_64-unknown-linux-musl/lib/liblibc-ab5c76520c543a52.rlib",
+      "x86_64-unknown-linux-musl/lib/liblibc-ab5c76520c543a52.rmeta",
+      "x86_64-unknown-linux-musl/lib/libmemchr-0dd0ede832fdc973.rlib",
+      "x86_64-unknown-linux-musl/lib/libmemchr-0dd0ede832fdc973.rmeta",
+      "x86_64-unknown-linux-musl/lib/libminiz_oxide-4132cf8e97ece731.rlib",
+      "x86_64-unknown-linux-musl/lib/libminiz_oxide-4132cf8e97ece731.rmeta",
+      "x86_64-unknown-linux-musl/lib/libobject-719635739f933bf7.rlib",
+      "x86_64-unknown-linux-musl/lib/libobject-719635739f933bf7.rmeta",
+      "x86_64-unknown-linux-musl/lib/libpanic_abort-0ae382ce61724e37.rlib",
+      "x86_64-unknown-linux-musl/lib/libpanic_abort-0ae382ce61724e37.rmeta",
+      "x86_64-unknown-linux-musl/lib/libpanic_unwind-dda921a72a56d867.rlib",
+      "x86_64-unknown-linux-musl/lib/libpanic_unwind-dda921a72a56d867.rmeta",
+      "x86_64-unknown-linux-musl/lib/libproc_macro-f63cb96b8458f80f.rlib",
+      "x86_64-unknown-linux-musl/lib/libproc_macro-f63cb96b8458f80f.rmeta",
+      "x86_64-unknown-linux-musl/lib/libprofiler_builtins-e128812af2dc6500.rlib",
+      "x86_64-unknown-linux-musl/lib/libprofiler_builtins-e128812af2dc6500.rmeta",
+      "x86_64-unknown-linux-musl/lib/librustc-stable_rt.asan.a",
+      "x86_64-unknown-linux-musl/lib/librustc-stable_rt.lsan.a",
+      "x86_64-unknown-linux-musl/lib/librustc-stable_rt.msan.a",
+      "x86_64-unknown-linux-musl/lib/librustc-stable_rt.tsan.a",
+      "x86_64-unknown-linux-musl/lib/librustc_demangle-fea8c50f6372cb6b.rlib",
+      "x86_64-unknown-linux-musl/lib/librustc_demangle-fea8c50f6372cb6b.rmeta",
+      "x86_64-unknown-linux-musl/lib/librustc_literal_escaper-c2d873d330ff2018.rlib",
+      "x86_64-unknown-linux-musl/lib/librustc_literal_escaper-c2d873d330ff2018.rmeta",
+      "x86_64-unknown-linux-musl/lib/librustc_std_workspace_alloc-2a3cf12da458bfac.rlib",
+      "x86_64-unknown-linux-musl/lib/librustc_std_workspace_alloc-2a3cf12da458bfac.rmeta",
+      "x86_64-unknown-linux-musl/lib/librustc_std_workspace_core-869274958823946a.rlib",
+      "x86_64-unknown-linux-musl/lib/librustc_std_workspace_core-869274958823946a.rmeta",
+      "x86_64-unknown-linux-musl/lib/librustc_std_workspace_std-f9cdbd6e367f5733.rlib",
+      "x86_64-unknown-linux-musl/lib/librustc_std_workspace_std-f9cdbd6e367f5733.rmeta",
+      "x86_64-unknown-linux-musl/lib/libstd-6907478b6d5e889b.rlib",
+      "x86_64-unknown-linux-musl/lib/libstd-6907478b6d5e889b.rmeta",
+      "x86_64-unknown-linux-musl/lib/libstd-6907478b6d5e889b.so",
+      "x86_64-unknown-linux-musl/lib/libstd_detect-227cf999cd30474a.rlib",
+      "x86_64-unknown-linux-musl/lib/libstd_detect-227cf999cd30474a.rmeta",
+      "x86_64-unknown-linux-musl/lib/libsysroot-6040fb8b7199d8de.rlib",
+      "x86_64-unknown-linux-musl/lib/libsysroot-6040fb8b7199d8de.rmeta",
+      "x86_64-unknown-linux-musl/lib/libtest-1e1461334f7f07f1.rlib",
+      "x86_64-unknown-linux-musl/lib/libtest-1e1461334f7f07f1.rmeta",
+      "x86_64-unknown-linux-musl/lib/libunwind-890b6e0b468265ea.rlib",
+      "x86_64-unknown-linux-musl/lib/libunwind-890b6e0b468265ea.rmeta",
+      "x86_64-unknown-linux-musl/lib/self-contained/Scrt1.o",
+      "x86_64-unknown-linux-musl/lib/self-contained/crt1.o",
+      "x86_64-unknown-linux-musl/lib/self-contained/crtbegin.o",
+      "x86_64-unknown-linux-musl/lib/self-contained/crtbeginS.o",
+      "x86_64-unknown-linux-musl/lib/self-contained/crtend.o",
+      "x86_64-unknown-linux-musl/lib/self-contained/crtendS.o",
+      "x86_64-unknown-linux-musl/lib/self-contained/crti.o",
+      "x86_64-unknown-linux-musl/lib/self-contained/crtn.o",
+      "x86_64-unknown-linux-musl/lib/self-contained/libc.a",
+      "x86_64-unknown-linux-musl/lib/self-contained/libunwind.a",
+      "x86_64-unknown-linux-musl/lib/self-contained/rcrt1.o"
+    ],
+    "aarch64-unknown-linux-musl": [
+      "aarch64-unknown-linux-musl/lib/libaddr2line-abc34f401a5c0184.rlib",
+      "aarch64-unknown-linux-musl/lib/libaddr2line-abc34f401a5c0184.rmeta",
+      "aarch64-unknown-linux-musl/lib/libadler2-366d876161db02d1.rlib",
+      "aarch64-unknown-linux-musl/lib/libadler2-366d876161db02d1.rmeta",
+      "aarch64-unknown-linux-musl/lib/liballoc-33b97f6bdb98e862.rlib",
+      "aarch64-unknown-linux-musl/lib/liballoc-33b97f6bdb98e862.rmeta",
+      "aarch64-unknown-linux-musl/lib/libcfg_if-b5762e6a170ec7f7.rlib",
+      "aarch64-unknown-linux-musl/lib/libcfg_if-b5762e6a170ec7f7.rmeta",
+      "aarch64-unknown-linux-musl/lib/libcompiler_builtins-56820b16468dfc21.rlib",
+      "aarch64-unknown-linux-musl/lib/libcompiler_builtins-56820b16468dfc21.rmeta",
+      "aarch64-unknown-linux-musl/lib/libcore-89491010f55f6617.rlib",
+      "aarch64-unknown-linux-musl/lib/libcore-89491010f55f6617.rmeta",
+      "aarch64-unknown-linux-musl/lib/libgetopts-705d85a606f8d61f.rlib",
+      "aarch64-unknown-linux-musl/lib/libgetopts-705d85a606f8d61f.rmeta",
+      "aarch64-unknown-linux-musl/lib/libgimli-2a3db6a8ab9c50e3.rlib",
+      "aarch64-unknown-linux-musl/lib/libgimli-2a3db6a8ab9c50e3.rmeta",
+      "aarch64-unknown-linux-musl/lib/libhashbrown-201682644b0c3ba1.rlib",
+      "aarch64-unknown-linux-musl/lib/libhashbrown-201682644b0c3ba1.rmeta",
+      "aarch64-unknown-linux-musl/lib/liblibc-b082275d764c83a1.rlib",
+      "aarch64-unknown-linux-musl/lib/liblibc-b082275d764c83a1.rmeta",
+      "aarch64-unknown-linux-musl/lib/libmemchr-b24a9858aeb9a256.rlib",
+      "aarch64-unknown-linux-musl/lib/libmemchr-b24a9858aeb9a256.rmeta",
+      "aarch64-unknown-linux-musl/lib/libminiz_oxide-102d239299204a0c.rlib",
+      "aarch64-unknown-linux-musl/lib/libminiz_oxide-102d239299204a0c.rmeta",
+      "aarch64-unknown-linux-musl/lib/libobject-89469a9315fd3c2d.rlib",
+      "aarch64-unknown-linux-musl/lib/libobject-89469a9315fd3c2d.rmeta",
+      "aarch64-unknown-linux-musl/lib/libpanic_abort-eccf032796dea98a.rlib",
+      "aarch64-unknown-linux-musl/lib/libpanic_abort-eccf032796dea98a.rmeta",
+      "aarch64-unknown-linux-musl/lib/libpanic_unwind-335cd3b3c0a5cd20.rlib",
+      "aarch64-unknown-linux-musl/lib/libpanic_unwind-335cd3b3c0a5cd20.rmeta",
+      "aarch64-unknown-linux-musl/lib/libproc_macro-831a158db7601ea4.rlib",
+      "aarch64-unknown-linux-musl/lib/libproc_macro-831a158db7601ea4.rmeta",
+      "aarch64-unknown-linux-musl/lib/libprofiler_builtins-32af23de7a5fb6a7.rlib",
+      "aarch64-unknown-linux-musl/lib/libprofiler_builtins-32af23de7a5fb6a7.rmeta",
+      "aarch64-unknown-linux-musl/lib/librustc_demangle-5cdc985574fecee9.rlib",
+      "aarch64-unknown-linux-musl/lib/librustc_demangle-5cdc985574fecee9.rmeta",
+      "aarch64-unknown-linux-musl/lib/librustc_literal_escaper-73387b69df31267e.rlib",
+      "aarch64-unknown-linux-musl/lib/librustc_literal_escaper-73387b69df31267e.rmeta",
+      "aarch64-unknown-linux-musl/lib/librustc_std_workspace_alloc-7f2709c6b2b483e4.rlib",
+      "aarch64-unknown-linux-musl/lib/librustc_std_workspace_alloc-7f2709c6b2b483e4.rmeta",
+      "aarch64-unknown-linux-musl/lib/librustc_std_workspace_core-cc6827f8369b7078.rlib",
+      "aarch64-unknown-linux-musl/lib/librustc_std_workspace_core-cc6827f8369b7078.rmeta",
+      "aarch64-unknown-linux-musl/lib/librustc_std_workspace_std-fb768c9dbf5b7e60.rlib",
+      "aarch64-unknown-linux-musl/lib/librustc_std_workspace_std-fb768c9dbf5b7e60.rmeta",
+      "aarch64-unknown-linux-musl/lib/libstd-32d384fccf68bbb7.rlib",
+      "aarch64-unknown-linux-musl/lib/libstd-32d384fccf68bbb7.rmeta",
+      "aarch64-unknown-linux-musl/lib/libstd-32d384fccf68bbb7.so",
+      "aarch64-unknown-linux-musl/lib/libstd_detect-74e5d0a3ec2ead43.rlib",
+      "aarch64-unknown-linux-musl/lib/libstd_detect-74e5d0a3ec2ead43.rmeta",
+      "aarch64-unknown-linux-musl/lib/libsysroot-4d240df81b38a20c.rlib",
+      "aarch64-unknown-linux-musl/lib/libsysroot-4d240df81b38a20c.rmeta",
+      "aarch64-unknown-linux-musl/lib/libtest-756066864610c096.rlib",
+      "aarch64-unknown-linux-musl/lib/libtest-756066864610c096.rmeta",
+      "aarch64-unknown-linux-musl/lib/libunwind-d386394c55d922b1.rlib",
+      "aarch64-unknown-linux-musl/lib/libunwind-d386394c55d922b1.rmeta",
+      "aarch64-unknown-linux-musl/lib/self-contained/Scrt1.o",
+      "aarch64-unknown-linux-musl/lib/self-contained/crt1.o",
+      "aarch64-unknown-linux-musl/lib/self-contained/crtbegin.o",
+      "aarch64-unknown-linux-musl/lib/self-contained/crtbeginS.o",
+      "aarch64-unknown-linux-musl/lib/self-contained/crtend.o",
+      "aarch64-unknown-linux-musl/lib/self-contained/crtendS.o",
+      "aarch64-unknown-linux-musl/lib/self-contained/crti.o",
+      "aarch64-unknown-linux-musl/lib/self-contained/crtn.o",
+      "aarch64-unknown-linux-musl/lib/self-contained/libc.a",
+      "aarch64-unknown-linux-musl/lib/self-contained/libunwind.a",
+      "aarch64-unknown-linux-musl/lib/self-contained/rcrt1.o"
+    ],
+    "armv7-unknown-linux-musleabihf": [
+      "armv7-unknown-linux-musleabihf/lib/libaddr2line-340c3ea5e1e02795.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libaddr2line-340c3ea5e1e02795.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libadler2-a42bff502a54c393.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libadler2-a42bff502a54c393.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/liballoc-9be29d892f1bdc13.rlib",
+      "armv7-unknown-linux-musleabihf/lib/liballoc-9be29d892f1bdc13.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libcfg_if-6cb62cf3fc702e32.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libcfg_if-6cb62cf3fc702e32.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libcompiler_builtins-75b06580af965c3c.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libcompiler_builtins-75b06580af965c3c.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libcore-1f9d2c5da24daf27.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libcore-1f9d2c5da24daf27.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libgetopts-0b9b3206cc3fcad1.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libgetopts-0b9b3206cc3fcad1.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libgimli-e4b9d336214e470b.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libgimli-e4b9d336214e470b.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libhashbrown-c08ddcd94bb62dae.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libhashbrown-c08ddcd94bb62dae.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/liblibc-95ed789cf9606119.rlib",
+      "armv7-unknown-linux-musleabihf/lib/liblibc-95ed789cf9606119.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libmemchr-60b4a2664eaa067e.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libmemchr-60b4a2664eaa067e.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libminiz_oxide-b65d7df2eadda642.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libminiz_oxide-b65d7df2eadda642.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libobject-0d3f82199194a11c.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libobject-0d3f82199194a11c.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libpanic_abort-355efef242ad40ea.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libpanic_abort-355efef242ad40ea.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libpanic_unwind-5d8260d00b976a34.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libpanic_unwind-5d8260d00b976a34.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libproc_macro-ce7ba297fc9b01d8.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libproc_macro-ce7ba297fc9b01d8.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/librustc_demangle-e1f07967b2d3e1b6.rlib",
+      "armv7-unknown-linux-musleabihf/lib/librustc_demangle-e1f07967b2d3e1b6.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/librustc_literal_escaper-3e689a883e088e4e.rlib",
+      "armv7-unknown-linux-musleabihf/lib/librustc_literal_escaper-3e689a883e088e4e.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/librustc_std_workspace_alloc-9743aa510bbd905f.rlib",
+      "armv7-unknown-linux-musleabihf/lib/librustc_std_workspace_alloc-9743aa510bbd905f.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/librustc_std_workspace_core-1b4041af45734c2b.rlib",
+      "armv7-unknown-linux-musleabihf/lib/librustc_std_workspace_core-1b4041af45734c2b.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/librustc_std_workspace_std-1b58497459f6d6a6.rlib",
+      "armv7-unknown-linux-musleabihf/lib/librustc_std_workspace_std-1b58497459f6d6a6.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libstd-a0ce0fff48ed8a7d.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libstd-a0ce0fff48ed8a7d.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libstd_detect-b9971fa2a2a2182a.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libstd_detect-b9971fa2a2a2182a.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libsysroot-36cfd596a9beefaa.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libsysroot-36cfd596a9beefaa.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libtest-4583844e7ab7ed5c.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libtest-4583844e7ab7ed5c.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/libunwind-81e68c65420dc2c8.rlib",
+      "armv7-unknown-linux-musleabihf/lib/libunwind-81e68c65420dc2c8.rmeta",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/Scrt1.o",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crt1.o",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crtbegin.o",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crtbeginS.o",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crtend.o",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crtendS.o",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crti.o",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crtn.o",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/libc.a",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/libunwind.a",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/rcrt1.o"
+    ],
+    "x86_64-apple-darwin": [
+      "x86_64-apple-darwin/lib/libaddr2line-9684bb964f1dcfeb.rlib",
+      "x86_64-apple-darwin/lib/libaddr2line-9684bb964f1dcfeb.rmeta",
+      "x86_64-apple-darwin/lib/libadler2-ce82b8457b0d62cf.rlib",
+      "x86_64-apple-darwin/lib/libadler2-ce82b8457b0d62cf.rmeta",
+      "x86_64-apple-darwin/lib/liballoc-9dfb932996702d52.rlib",
+      "x86_64-apple-darwin/lib/liballoc-9dfb932996702d52.rmeta",
+      "x86_64-apple-darwin/lib/libcfg_if-08411893b961a173.rlib",
+      "x86_64-apple-darwin/lib/libcfg_if-08411893b961a173.rmeta",
+      "x86_64-apple-darwin/lib/libcompiler_builtins-61f62886d21d43fa.rlib",
+      "x86_64-apple-darwin/lib/libcompiler_builtins-61f62886d21d43fa.rmeta",
+      "x86_64-apple-darwin/lib/libcore-68779ac4ab5af248.rlib",
+      "x86_64-apple-darwin/lib/libcore-68779ac4ab5af248.rmeta",
+      "x86_64-apple-darwin/lib/libgetopts-2de2bec0f71e4743.rlib",
+      "x86_64-apple-darwin/lib/libgetopts-2de2bec0f71e4743.rmeta",
+      "x86_64-apple-darwin/lib/libgimli-460a23ff6bbeabe2.rlib",
+      "x86_64-apple-darwin/lib/libgimli-460a23ff6bbeabe2.rmeta",
+      "x86_64-apple-darwin/lib/libhashbrown-95aa8454464c7fe4.rlib",
+      "x86_64-apple-darwin/lib/libhashbrown-95aa8454464c7fe4.rmeta",
+      "x86_64-apple-darwin/lib/liblibc-2411db95a292c07d.rlib",
+      "x86_64-apple-darwin/lib/liblibc-2411db95a292c07d.rmeta",
+      "x86_64-apple-darwin/lib/libmemchr-3db2833c7ffc1474.rlib",
+      "x86_64-apple-darwin/lib/libmemchr-3db2833c7ffc1474.rmeta",
+      "x86_64-apple-darwin/lib/libminiz_oxide-28a8783e1d60f65c.rlib",
+      "x86_64-apple-darwin/lib/libminiz_oxide-28a8783e1d60f65c.rmeta",
+      "x86_64-apple-darwin/lib/libobject-06e34eeb4eb73dc0.rlib",
+      "x86_64-apple-darwin/lib/libobject-06e34eeb4eb73dc0.rmeta",
+      "x86_64-apple-darwin/lib/libpanic_abort-6c90ce3461bec009.rlib",
+      "x86_64-apple-darwin/lib/libpanic_abort-6c90ce3461bec009.rmeta",
+      "x86_64-apple-darwin/lib/libpanic_unwind-bb2d4a9c83662d5d.rlib",
+      "x86_64-apple-darwin/lib/libpanic_unwind-bb2d4a9c83662d5d.rmeta",
+      "x86_64-apple-darwin/lib/libproc_macro-8a64226070378cbf.rlib",
+      "x86_64-apple-darwin/lib/libproc_macro-8a64226070378cbf.rmeta",
+      "x86_64-apple-darwin/lib/libprofiler_builtins-72682143f589d718.rlib",
+      "x86_64-apple-darwin/lib/libprofiler_builtins-72682143f589d718.rmeta",
+      "x86_64-apple-darwin/lib/librustc-stable_rt.asan.dylib",
+      "x86_64-apple-darwin/lib/librustc-stable_rt.lsan.dylib",
+      "x86_64-apple-darwin/lib/librustc-stable_rt.rtsan.dylib",
+      "x86_64-apple-darwin/lib/librustc-stable_rt.tsan.dylib",
+      "x86_64-apple-darwin/lib/librustc_demangle-41c7380fef7dd4f3.rlib",
+      "x86_64-apple-darwin/lib/librustc_demangle-41c7380fef7dd4f3.rmeta",
+      "x86_64-apple-darwin/lib/librustc_literal_escaper-1f79a6ddb2b54b35.rlib",
+      "x86_64-apple-darwin/lib/librustc_literal_escaper-1f79a6ddb2b54b35.rmeta",
+      "x86_64-apple-darwin/lib/librustc_std_workspace_alloc-6e5920faa921c164.rlib",
+      "x86_64-apple-darwin/lib/librustc_std_workspace_alloc-6e5920faa921c164.rmeta",
+      "x86_64-apple-darwin/lib/librustc_std_workspace_core-bd6a8ef50e9e69c9.rlib",
+      "x86_64-apple-darwin/lib/librustc_std_workspace_core-bd6a8ef50e9e69c9.rmeta",
+      "x86_64-apple-darwin/lib/librustc_std_workspace_std-941d577b1f711476.rlib",
+      "x86_64-apple-darwin/lib/librustc_std_workspace_std-941d577b1f711476.rmeta",
+      "x86_64-apple-darwin/lib/libstd-62092c68b9eb1b56.dylib",
+      "x86_64-apple-darwin/lib/libstd-62092c68b9eb1b56.rlib",
+      "x86_64-apple-darwin/lib/libstd-62092c68b9eb1b56.rmeta",
+      "x86_64-apple-darwin/lib/libstd_detect-512ada365c7d3af2.rlib",
+      "x86_64-apple-darwin/lib/libstd_detect-512ada365c7d3af2.rmeta",
+      "x86_64-apple-darwin/lib/libsysroot-0baff65aabad7ea6.rlib",
+      "x86_64-apple-darwin/lib/libsysroot-0baff65aabad7ea6.rmeta",
+      "x86_64-apple-darwin/lib/libtest-ea0d7115e9b93e40.rlib",
+      "x86_64-apple-darwin/lib/libtest-ea0d7115e9b93e40.rmeta",
+      "x86_64-apple-darwin/lib/libunwind-696ddcf0cce35199.rlib",
+      "x86_64-apple-darwin/lib/libunwind-696ddcf0cce35199.rmeta"
+    ],
+    "aarch64-apple-darwin": [
+      "aarch64-apple-darwin/lib/libaddr2line-79bed969f69e54c6.rlib",
+      "aarch64-apple-darwin/lib/libaddr2line-79bed969f69e54c6.rmeta",
+      "aarch64-apple-darwin/lib/libadler2-0bb5203eaf32e446.rlib",
+      "aarch64-apple-darwin/lib/libadler2-0bb5203eaf32e446.rmeta",
+      "aarch64-apple-darwin/lib/liballoc-3daa19367295a846.rlib",
+      "aarch64-apple-darwin/lib/liballoc-3daa19367295a846.rmeta",
+      "aarch64-apple-darwin/lib/libcfg_if-17d31a5f5c373bf9.rlib",
+      "aarch64-apple-darwin/lib/libcfg_if-17d31a5f5c373bf9.rmeta",
+      "aarch64-apple-darwin/lib/libcompiler_builtins-51dc6f60309b0c2f.rlib",
+      "aarch64-apple-darwin/lib/libcompiler_builtins-51dc6f60309b0c2f.rmeta",
+      "aarch64-apple-darwin/lib/libcore-4a1205c3dacb37e1.rlib",
+      "aarch64-apple-darwin/lib/libcore-4a1205c3dacb37e1.rmeta",
+      "aarch64-apple-darwin/lib/libgetopts-0da3068421b19f83.rlib",
+      "aarch64-apple-darwin/lib/libgetopts-0da3068421b19f83.rmeta",
+      "aarch64-apple-darwin/lib/libgimli-757741385d9265ec.rlib",
+      "aarch64-apple-darwin/lib/libgimli-757741385d9265ec.rmeta",
+      "aarch64-apple-darwin/lib/libhashbrown-e7a46a0b87cff2e7.rlib",
+      "aarch64-apple-darwin/lib/libhashbrown-e7a46a0b87cff2e7.rmeta",
+      "aarch64-apple-darwin/lib/liblibc-dd3054cc665f826f.rlib",
+      "aarch64-apple-darwin/lib/liblibc-dd3054cc665f826f.rmeta",
+      "aarch64-apple-darwin/lib/libmemchr-80762f8d0fa6ca39.rlib",
+      "aarch64-apple-darwin/lib/libmemchr-80762f8d0fa6ca39.rmeta",
+      "aarch64-apple-darwin/lib/libminiz_oxide-816d0fb2e9cd4f45.rlib",
+      "aarch64-apple-darwin/lib/libminiz_oxide-816d0fb2e9cd4f45.rmeta",
+      "aarch64-apple-darwin/lib/libobject-b14cfe590d6e1067.rlib",
+      "aarch64-apple-darwin/lib/libobject-b14cfe590d6e1067.rmeta",
+      "aarch64-apple-darwin/lib/libpanic_abort-15d0fd7df55de83d.rlib",
+      "aarch64-apple-darwin/lib/libpanic_abort-15d0fd7df55de83d.rmeta",
+      "aarch64-apple-darwin/lib/libpanic_unwind-869827fb9cf0d68e.rlib",
+      "aarch64-apple-darwin/lib/libpanic_unwind-869827fb9cf0d68e.rmeta",
+      "aarch64-apple-darwin/lib/libproc_macro-af799fdc497a9fad.rlib",
+      "aarch64-apple-darwin/lib/libproc_macro-af799fdc497a9fad.rmeta",
+      "aarch64-apple-darwin/lib/libprofiler_builtins-972c00d4cc78cddc.rlib",
+      "aarch64-apple-darwin/lib/libprofiler_builtins-972c00d4cc78cddc.rmeta",
+      "aarch64-apple-darwin/lib/librustc-stable_rt.asan.dylib",
+      "aarch64-apple-darwin/lib/librustc-stable_rt.lsan.dylib",
+      "aarch64-apple-darwin/lib/librustc-stable_rt.rtsan.dylib",
+      "aarch64-apple-darwin/lib/librustc-stable_rt.tsan.dylib",
+      "aarch64-apple-darwin/lib/librustc_demangle-8b283a422a84bedc.rlib",
+      "aarch64-apple-darwin/lib/librustc_demangle-8b283a422a84bedc.rmeta",
+      "aarch64-apple-darwin/lib/librustc_literal_escaper-78238be959776074.rlib",
+      "aarch64-apple-darwin/lib/librustc_literal_escaper-78238be959776074.rmeta",
+      "aarch64-apple-darwin/lib/librustc_std_workspace_alloc-21146b8e88a1242e.rlib",
+      "aarch64-apple-darwin/lib/librustc_std_workspace_alloc-21146b8e88a1242e.rmeta",
+      "aarch64-apple-darwin/lib/librustc_std_workspace_core-c8f303c496e8a8f4.rlib",
+      "aarch64-apple-darwin/lib/librustc_std_workspace_core-c8f303c496e8a8f4.rmeta",
+      "aarch64-apple-darwin/lib/librustc_std_workspace_std-aecd8334fda288d0.rlib",
+      "aarch64-apple-darwin/lib/librustc_std_workspace_std-aecd8334fda288d0.rmeta",
+      "aarch64-apple-darwin/lib/libstd-3f21d70fba8f3088.dylib",
+      "aarch64-apple-darwin/lib/libstd-3f21d70fba8f3088.rlib",
+      "aarch64-apple-darwin/lib/libstd-3f21d70fba8f3088.rmeta",
+      "aarch64-apple-darwin/lib/libstd_detect-fdc68db09217c677.rlib",
+      "aarch64-apple-darwin/lib/libstd_detect-fdc68db09217c677.rmeta",
+      "aarch64-apple-darwin/lib/libsysroot-c504f35aa074ff27.rlib",
+      "aarch64-apple-darwin/lib/libsysroot-c504f35aa074ff27.rmeta",
+      "aarch64-apple-darwin/lib/libtest-a810ff0ae3d57288.rlib",
+      "aarch64-apple-darwin/lib/libtest-a810ff0ae3d57288.rmeta",
+      "aarch64-apple-darwin/lib/libunwind-58e461b855dc6118.rlib",
+      "aarch64-apple-darwin/lib/libunwind-58e461b855dc6118.rmeta"
+    ]
+  },
+  "texts": [
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/COPYRIGHT",
+      "label": "Rust COPYRIGHT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/LICENSE-MIT",
+      "label": "Rust LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/LICENSE-APACHE",
+      "label": "Rust LICENSE-APACHE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/LICENSE.txt",
+      "label": "Rust library/compiler-builtins/LICENSE.txt",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/libm/LICENSE.txt",
+      "label": "Rust library/compiler-builtins/libm/LICENSE.txt",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/backtrace/LICENSE-MIT",
+      "label": "Rust library/backtrace/LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/backtrace/LICENSE-APACHE",
+      "label": "Rust library/backtrace/LICENSE-APACHE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/LICENSE-MIT",
+      "label": "Rust library/stdarch/LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/LICENSE-APACHE",
+      "label": "Rust library/stdarch/LICENSE-APACHE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "musl-1.2.5.tar.gz",
+      "path": "musl-1.2.5/COPYRIGHT",
+      "label": "musl 1.2.5 COPYRIGHT (including bundled notices)",
+      "components": [
+        "musl 1.2.5"
+      ],
+      "profiles": [
+        "linux-musl"
+      ]
+    },
+    {
+      "input": "llvm-libunwind-LICENSE.TXT",
+      "path": "",
+      "label": "llvm-libunwind-LICENSE.TXT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ],
+      "profiles": [
+        "linux-musl"
+      ]
+    },
+    {
+      "input": "llvm-compiler-rt-CREDITS.TXT",
+      "path": "",
+      "label": "llvm-compiler-rt-CREDITS.TXT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ],
+      "profiles": [
+        "linux-musl"
+      ]
+    },
+    {
+      "input": "Unicode-3.0.txt",
+      "path": "",
+      "label": "Unicode-3.0.txt",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "BSD-2-Clause.txt",
+      "path": "",
+      "label": "BSD-2-Clause.txt",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "ring-0.17.14.crate",
+      "path": "ring-0.17.14/LICENSE",
+      "label": "ring license map",
+      "components": [
+        "ring-native 0.17.14"
+      ]
+    },
+    {
+      "input": "ring-0.17.14.crate",
+      "path": "ring-0.17.14/LICENSE-BoringSSL",
+      "label": "ring ring-0.17.14/LICENSE-BoringSSL",
+      "components": [
+        "ring-native 0.17.14"
+      ]
+    },
+    {
+      "input": "ring-0.17.14.crate",
+      "path": "ring-0.17.14/LICENSE-other-bits",
+      "label": "ring ring-0.17.14/LICENSE-other-bits",
+      "components": [
+        "ring-native 0.17.14"
+      ]
+    },
+    {
+      "input": "ring-0.17.14.crate",
+      "path": "ring-0.17.14/src/polyfill/once_cell/LICENSE-APACHE",
+      "label": "ring ring-0.17.14/src/polyfill/once_cell/LICENSE-APACHE",
+      "components": [
+        "ring-native 0.17.14"
+      ]
+    },
+    {
+      "input": "ring-0.17.14.crate",
+      "path": "ring-0.17.14/src/polyfill/once_cell/LICENSE-MIT",
+      "label": "ring ring-0.17.14/src/polyfill/once_cell/LICENSE-MIT",
+      "components": [
+        "ring-native 0.17.14"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/addr2line-0.25.1/LICENSE-APACHE",
+      "label": "addr2line-0.25.1/LICENSE-APACHE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/addr2line-0.25.1/LICENSE-MIT",
+      "label": "addr2line-0.25.1/LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/adler2-2.0.1/LICENSE-0BSD",
+      "label": "adler2-2.0.1/LICENSE-0BSD",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/adler2-2.0.1/LICENSE-APACHE",
+      "label": "adler2-2.0.1/LICENSE-APACHE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/adler2-2.0.1/LICENSE-MIT",
+      "label": "adler2-2.0.1/LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/cfg-if-1.0.4/LICENSE-APACHE",
+      "label": "cfg-if-1.0.4/LICENSE-APACHE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/cfg-if-1.0.4/LICENSE-MIT",
+      "label": "cfg-if-1.0.4/LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/gimli-0.32.3/LICENSE-APACHE",
+      "label": "gimli-0.32.3/LICENSE-APACHE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/gimli-0.32.3/LICENSE-MIT",
+      "label": "gimli-0.32.3/LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/hashbrown-0.17.1/LICENSE-APACHE",
+      "label": "hashbrown-0.17.1/LICENSE-APACHE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/hashbrown-0.17.1/LICENSE-MIT",
+      "label": "hashbrown-0.17.1/LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/foldhash-0.2.0/LICENSE",
+      "label": "foldhash-0.2.0/LICENSE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/libc-0.2.185/LICENSE-APACHE",
+      "label": "libc-0.2.185/LICENSE-APACHE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/libc-0.2.185/LICENSE-MIT",
+      "label": "libc-0.2.185/LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/memchr-2.7.6/COPYING",
+      "label": "memchr-2.7.6/COPYING",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/memchr-2.7.6/LICENSE-MIT",
+      "label": "memchr-2.7.6/LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/miniz_oxide-0.8.9/LICENSE",
+      "label": "miniz_oxide-0.8.9/LICENSE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/miniz_oxide-0.8.9/LICENSE-APACHE.md",
+      "label": "miniz_oxide-0.8.9/LICENSE-APACHE.md",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/miniz_oxide-0.8.9/LICENSE-MIT.md",
+      "label": "miniz_oxide-0.8.9/LICENSE-MIT.md",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/miniz_oxide-0.8.9/LICENSE-ZLIB.md",
+      "label": "miniz_oxide-0.8.9/LICENSE-ZLIB.md",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/object-0.37.3/LICENSE-APACHE",
+      "label": "object-0.37.3/LICENSE-APACHE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/object-0.37.3/LICENSE-MIT",
+      "label": "object-0.37.3/LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/rustc-demangle-0.1.27/LICENSE-APACHE",
+      "label": "rustc-demangle-0.1.27/LICENSE-APACHE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/rustc-demangle-0.1.27/LICENSE-MIT",
+      "label": "rustc-demangle-0.1.27/LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/rustc-literal-escaper-0.0.8/LICENSE-APACHE",
+      "label": "rustc-literal-escaper-0.0.8/LICENSE-APACHE",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "path": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/vendor/rustc-literal-escaper-0.0.8/LICENSE-MIT",
+      "label": "rustc-literal-escaper-0.0.8/LICENSE-MIT",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "llvm-compiler-rt-LICENSE.TXT",
+      "path": "",
+      "label": "LLVM compiler-rt LICENSE.TXT (including CRT objects)",
+      "components": [
+        "rust-runtime 1.98.1"
+      ],
+      "profiles": [
+        "linux-musl"
+      ]
+    }
+  ],
+  "rust_inventory": {
+    "input": "rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz",
+    "path": "rustc-1.98.1-x86_64-unknown-linux-gnu/rustc/share/doc/rust/COPYRIGHT-library.html"
+  },
+  "source_notices": [
+    {
+      "input": "musl-1.2.5.tar.gz",
+      "prefix": "musl-1.2.5/",
+      "label": "musl per-file notice",
+      "components": [
+        "musl 1.2.5"
+      ],
+      "profiles": [
+        "linux-musl"
+      ]
+    },
+    {
+      "input": "ring-0.17.14.crate",
+      "prefix": "ring-0.17.14/",
+      "label": "ring native/source notice",
+      "components": [
+        "ring-native 0.17.14"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "prefix": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/core/",
+      "label": "Rust in-tree source notice",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "prefix": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/alloc/",
+      "label": "Rust in-tree source notice",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "prefix": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std/",
+      "label": "Rust in-tree source notice",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "prefix": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/std_detect/",
+      "label": "Rust in-tree source notice",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "prefix": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/panic_abort/",
+      "label": "Rust in-tree source notice",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "prefix": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/panic_unwind/",
+      "label": "Rust in-tree source notice",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "prefix": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/unwind/",
+      "label": "Rust in-tree source notice",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "prefix": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/compiler-builtins/",
+      "label": "Rust in-tree source notice",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "prefix": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/backtrace/",
+      "label": "Rust in-tree source notice",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "rust-src-1.98.1.tar.xz",
+      "prefix": "rust-src-1.98.1/rust-src/lib/rustlib/src/rust/library/stdarch/",
+      "label": "Rust in-tree source notice",
+      "components": [
+        "rust-runtime 1.98.1"
+      ]
+    },
+    {
+      "input": "llvm-crtbegin.c",
+      "prefix": "",
+      "label": "LLVM compiler-rt CRT source notice",
+      "components": [
+        "rust-runtime 1.98.1"
+      ],
+      "profiles": [
+        "linux-musl"
+      ]
+    },
+    {
+      "input": "llvm-crtend.c",
+      "prefix": "",
+      "label": "LLVM compiler-rt CRT source notice",
+      "components": [
+        "rust-runtime 1.98.1"
+      ],
+      "profiles": [
+        "linux-musl"
+      ]
+    }
+  ],
+  "native_object_provenance": {
+    "crtbegin.o,crtbeginS.o,crtend.o,crtendS.o": {
+      "sources": [
+        "llvm-crtbegin.c",
+        "llvm-crtend.c"
+      ],
+      "build_evidence": "rust-bootstrap-llvm.rs: CrtBeginEnd builds compiler-rt/lib/builtins sources",
+      "distribution_evidence": "rust-bootstrap-compile.rs: copy_self_contained_objects adds CrtBeginEnd outputs for musl",
+      "license": "llvm-compiler-rt-LICENSE.TXT",
+      "profiles": [
+        "linux-musl"
+      ]
+    },
+    "crt1.o,Scrt1.o,rcrt1.o,crti.o,crtn.o,libc.a": {
+      "source": "musl-1.2.5.tar.gz",
+      "build_evidence": "rust-musl.sh: MUSL_VERSION=1.2.5 with explicitly named patches",
+      "distribution_evidence": "rust-bootstrap-compile.rs: copy_self_contained_objects copies musl CRT objects",
+      "license": "musl-1.2.5/COPYRIGHT",
+      "profiles": [
+        "linux-musl"
+      ]
+    },
+    "libunwind.a": {
+      "source_commit": "52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04",
+      "license": "llvm-libunwind-LICENSE.TXT",
+      "profiles": [
+        "linux-musl"
+      ]
+    }
+  },
+  "profiles": {
+    "linux-musl": {
+      "targets": [
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+        "armv7-unknown-linux-musleabihf"
+      ],
+      "runtime_file": "runtime-notices.txt",
+      "sections_file": "runtime-sections.json"
+    },
+    "macos-system": {
+      "targets": [
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin"
+      ],
+      "runtime_file": "runtime-notices-macos.txt",
+      "sections_file": "runtime-sections-macos.json"
+    }
+  },
+  "target_object_sha256": {
+    "x86_64-unknown-linux-musl": {
+      "x86_64-unknown-linux-musl/lib/libaddr2line-e0771a618e592e99.rlib": "3a34d0d911a74dd133efa79cf9bcc2300d036b3e9c1fdd45f2d32fb3ee4f3993",
+      "x86_64-unknown-linux-musl/lib/libaddr2line-e0771a618e592e99.rmeta": "14357f810ec188fb6e4f92da40e52ca68439b0b1c44f6e5c74f369f84a903253",
+      "x86_64-unknown-linux-musl/lib/libadler2-bc0523200cd65c09.rlib": "48585d9e0949013ebf6a92b5f1b9c15f82e2370a07fa62e74f8826655301a052",
+      "x86_64-unknown-linux-musl/lib/libadler2-bc0523200cd65c09.rmeta": "20b81d07d5f43d63f7fc1663a0ede1e336765af6b3d22ba347b11129acab6491",
+      "x86_64-unknown-linux-musl/lib/liballoc-924df7cf38fb930e.rlib": "aeb29319a1b98ecdedd545e614b6867b01f4c7a4017f402ba3a86018e0e71a94",
+      "x86_64-unknown-linux-musl/lib/liballoc-924df7cf38fb930e.rmeta": "6f886cc2c5b86cba0eae09dba26bf6c02c4ea44cb6cfe6f2c0a23b4db786309a",
+      "x86_64-unknown-linux-musl/lib/libcfg_if-975626414d0194b8.rlib": "a7822d70c6cc1d1d7335f4e9075be18a9ef8f3f7557e3122b8a23dc773c61bc4",
+      "x86_64-unknown-linux-musl/lib/libcfg_if-975626414d0194b8.rmeta": "f878cfdd70be40d6a9f1b81fb3ccfb56fec5b652307deb48574b251a71b64501",
+      "x86_64-unknown-linux-musl/lib/libcompiler_builtins-684ebc5246920c3d.rlib": "e9d357e69681a78ff669af24182102ab6e41fee14b09d08555aed27dba0c6e17",
+      "x86_64-unknown-linux-musl/lib/libcompiler_builtins-684ebc5246920c3d.rmeta": "efbd1cf1069043d13002b09f8a762cb101322ebcce31f64deb14616bd0450313",
+      "x86_64-unknown-linux-musl/lib/libcore-5742c2f222531cae.rlib": "644a8a494a20e8aa9812ad15f7516decf5578c0fa9d44675ca66c8a4c9cb7feb",
+      "x86_64-unknown-linux-musl/lib/libcore-5742c2f222531cae.rmeta": "57450115d7850c08ebc5732f6cd0dab8a53637abda51051f38bf5a729fbd9065",
+      "x86_64-unknown-linux-musl/lib/libgetopts-d01d64705a93387d.rlib": "618858393f89ca6551145e9fe9ab687a38c2f281aa3aad6400ca772f0e5849b9",
+      "x86_64-unknown-linux-musl/lib/libgetopts-d01d64705a93387d.rmeta": "ad0ec7c15cf97706c2a45dc8f5d074d878728aa3bc9f26fd9b3e0229b01db89d",
+      "x86_64-unknown-linux-musl/lib/libgimli-a10f7ac90fd844b8.rlib": "085e4dac94cfb5943b547edaa25ab56f45b51b8f5de8aa8c701816b23d8560be",
+      "x86_64-unknown-linux-musl/lib/libgimli-a10f7ac90fd844b8.rmeta": "317c2906382e2be12a9d32b4f1734aaed8da4638e05c160b060b91e9597c583f",
+      "x86_64-unknown-linux-musl/lib/libhashbrown-7e95459b82b788ce.rlib": "df6d53c079df60a8686890beed9b32fcc49bd28b77ea4c4b9db7723608f3b828",
+      "x86_64-unknown-linux-musl/lib/libhashbrown-7e95459b82b788ce.rmeta": "ecbab99788aae722fe90ae788c3de7bb789becf6d3dbe20e7a6fcae4db959af7",
+      "x86_64-unknown-linux-musl/lib/liblibc-ab5c76520c543a52.rlib": "6184018d24863f74b0efc2ffde1ad0215ac19952fe88c98a079c54f1168da5d7",
+      "x86_64-unknown-linux-musl/lib/liblibc-ab5c76520c543a52.rmeta": "3570c6c210870ac86229a941ee4f63c1c342969eccde4592fb335bbf031713d1",
+      "x86_64-unknown-linux-musl/lib/libmemchr-0dd0ede832fdc973.rlib": "20de0681b08ba6060d1bca0a4f5c5390bd3e7d4d11be99293fa65bdc4dda7345",
+      "x86_64-unknown-linux-musl/lib/libmemchr-0dd0ede832fdc973.rmeta": "b124c71cd940497ea9b3b18a53d4f73dc0078dcb53ad4196781101b76fecf131",
+      "x86_64-unknown-linux-musl/lib/libminiz_oxide-4132cf8e97ece731.rlib": "5c145daa2179493ad95b31c8692b76aea79b3f4b47a66d6409c450b88e76278b",
+      "x86_64-unknown-linux-musl/lib/libminiz_oxide-4132cf8e97ece731.rmeta": "7f289bcf2d82165dd74ff46877bfe199b4687e165a82eaed5afb633ea5bb593d",
+      "x86_64-unknown-linux-musl/lib/libobject-719635739f933bf7.rlib": "d684c9df790bb39cfdec4dfa22a98dce54bfedf1715a45ee778f862b2ea5c348",
+      "x86_64-unknown-linux-musl/lib/libobject-719635739f933bf7.rmeta": "0e8d0a5d2d6b1750aadeb1b349723568673246a87a22031adb6ad4ed58c34c8f",
+      "x86_64-unknown-linux-musl/lib/libpanic_abort-0ae382ce61724e37.rlib": "f1cd0977de343072a0e982084325f0bac50c12738df600094130e8deb8badc86",
+      "x86_64-unknown-linux-musl/lib/libpanic_abort-0ae382ce61724e37.rmeta": "2d62757617cc0247d1c65738e396dd7bfce371ae9892e8f97cc971db7a950ea9",
+      "x86_64-unknown-linux-musl/lib/libpanic_unwind-dda921a72a56d867.rlib": "6d70130dae9581e628e7a2f380d376b9573e44ab4d0cec98e0b3ddd3fc591440",
+      "x86_64-unknown-linux-musl/lib/libpanic_unwind-dda921a72a56d867.rmeta": "433471a29f12308dbbb33f391d1a1c5a4097ed744094c63b50cdbc9a3f60318a",
+      "x86_64-unknown-linux-musl/lib/libproc_macro-f63cb96b8458f80f.rlib": "e617afde3a52f86dc0f0c77fb0a9ad2f88d4ba814df9239e83a9eceaf3f317cb",
+      "x86_64-unknown-linux-musl/lib/libproc_macro-f63cb96b8458f80f.rmeta": "60c07d1eff6780480bf66cd1ef4882ca84facc5e205fefcdc23fe7fef7c8ee18",
+      "x86_64-unknown-linux-musl/lib/libprofiler_builtins-e128812af2dc6500.rlib": "634ffd1e41d4fc80ffbb174845d6f0405999ca1e93f63bac1baf5adbccd49452",
+      "x86_64-unknown-linux-musl/lib/libprofiler_builtins-e128812af2dc6500.rmeta": "9fb184e69e920bf73b799309894f04d581b1c855d17a5fdd5100d7bb7791944b",
+      "x86_64-unknown-linux-musl/lib/librustc-stable_rt.asan.a": "92dae576bf2b34d04fbf95ea3c79cdae29cadbceb1dcdaff9f60bd53f9f7383a",
+      "x86_64-unknown-linux-musl/lib/librustc-stable_rt.lsan.a": "b7b55e00a5ae461d39f4fd49e32d86a3aae1d9356b9bb4fea071e5328f1d11d3",
+      "x86_64-unknown-linux-musl/lib/librustc-stable_rt.msan.a": "22d435ca5c4c811bb38dde0e48273593c69d203489c1152c5f6811bd0d85f2ce",
+      "x86_64-unknown-linux-musl/lib/librustc-stable_rt.tsan.a": "7092055b91c78a4e7631b8b7438fb833c006e30a0acd6a2db0bd5335517570cc",
+      "x86_64-unknown-linux-musl/lib/librustc_demangle-fea8c50f6372cb6b.rlib": "2a27acac21047dcadd885c72cd9f715902ea670093ddb3283f886e82fac3c7f7",
+      "x86_64-unknown-linux-musl/lib/librustc_demangle-fea8c50f6372cb6b.rmeta": "9f5512cc8b0d269a2b3e3a581d9c4a574a6d68206eca1fdd3a6ca7b8f6ade5b9",
+      "x86_64-unknown-linux-musl/lib/librustc_literal_escaper-c2d873d330ff2018.rlib": "33aa88b0f98a56e061028cc4b838d345d6cc18482f6584281ca7be7834a01c09",
+      "x86_64-unknown-linux-musl/lib/librustc_literal_escaper-c2d873d330ff2018.rmeta": "4b4161bb47f6a9e61f8e945c3e87040ab7b1a75df6131a524f4a72ad652d044f",
+      "x86_64-unknown-linux-musl/lib/librustc_std_workspace_alloc-2a3cf12da458bfac.rlib": "d62caa2f589e60fb70fca4dfb2b5d45a17719cd6af67f8274a145366a525fbdf",
+      "x86_64-unknown-linux-musl/lib/librustc_std_workspace_alloc-2a3cf12da458bfac.rmeta": "32b7dc6b9f99beb7a1082977f1d3cbb9de0b6e221aa1e1071ce1abefed1217c4",
+      "x86_64-unknown-linux-musl/lib/librustc_std_workspace_core-869274958823946a.rlib": "e1ac918727af24ec45e0f31230fe57433bddbfa0d8f11ebef823d53a40f1b0b5",
+      "x86_64-unknown-linux-musl/lib/librustc_std_workspace_core-869274958823946a.rmeta": "9bec7ba10fb4b9be3dcd31237bce0d0c669ecac509083dbed734b0604e9cab1c",
+      "x86_64-unknown-linux-musl/lib/librustc_std_workspace_std-f9cdbd6e367f5733.rlib": "214d3a8fcf2fb5f9c745cf99f6f0640d706d9ac84f15702fe2ad66ea741ad4ff",
+      "x86_64-unknown-linux-musl/lib/librustc_std_workspace_std-f9cdbd6e367f5733.rmeta": "89a9ed1ce5e532171c47d035ade2ea7120ab0de2ae907d7238c16c5b39a78e68",
+      "x86_64-unknown-linux-musl/lib/libstd-6907478b6d5e889b.rlib": "a7e3e28667b1bf1fca3e3dfe65255df824c56316e05ddfd12af58db02d9fcfcf",
+      "x86_64-unknown-linux-musl/lib/libstd-6907478b6d5e889b.rmeta": "de4f119c9da10c29015825f8d3607d82fb6c50ee650c153af9e92b5888d039c1",
+      "x86_64-unknown-linux-musl/lib/libstd-6907478b6d5e889b.so": "7891c57e63026d1b9c74128af7d7334bc87b1a3d4f5c07b95748f1f8606ab68d",
+      "x86_64-unknown-linux-musl/lib/libstd_detect-227cf999cd30474a.rlib": "0a38e41f932df23cb2a3b11efee921007d5730d25347195d9245be2ec0a9f600",
+      "x86_64-unknown-linux-musl/lib/libstd_detect-227cf999cd30474a.rmeta": "1248e552284517c9cb12d9070fbc161e99b046a65a9839c1ea10f7e916a6e85d",
+      "x86_64-unknown-linux-musl/lib/libsysroot-6040fb8b7199d8de.rlib": "bdfd43e6e8e3f84440e7c1b346e0f6b4d1e935eeebc23efabf4869de0d76623e",
+      "x86_64-unknown-linux-musl/lib/libsysroot-6040fb8b7199d8de.rmeta": "1ab0b9a1254a862d3492ba170780ad7f8db3c63af2a450b4f35ad91a41bb1b75",
+      "x86_64-unknown-linux-musl/lib/libtest-1e1461334f7f07f1.rlib": "2391b3d68a4744f42a4d5c4415e8bd9f0b55331cb778eb7adc1e7c26e50463f4",
+      "x86_64-unknown-linux-musl/lib/libtest-1e1461334f7f07f1.rmeta": "e01ccb73145b354013b592b06c998045e8470b7513a41d07ac9433b49bc01047",
+      "x86_64-unknown-linux-musl/lib/libunwind-890b6e0b468265ea.rlib": "6b64abca5922ee0020d5dcaed12d45366a274dc15ad8884b26784994f3fe210c",
+      "x86_64-unknown-linux-musl/lib/libunwind-890b6e0b468265ea.rmeta": "21dad10509b56996d4d0de4407f58798186379059241ea01ff1a01358d3072d3",
+      "x86_64-unknown-linux-musl/lib/self-contained/Scrt1.o": "cfb5b001408261d562d809eea6af636cf7ac10a233895a611ef79bbe4f8c60de",
+      "x86_64-unknown-linux-musl/lib/self-contained/crt1.o": "03c4111a1bc81580c7388e4227a889cebe978faa46c965bbdde4f2d8de1fc3a2",
+      "x86_64-unknown-linux-musl/lib/self-contained/crtbegin.o": "297960e338581a38bbfcbee45169a847bcdc5527ccaf68abe95b72b3b0856bed",
+      "x86_64-unknown-linux-musl/lib/self-contained/crtbeginS.o": "297960e338581a38bbfcbee45169a847bcdc5527ccaf68abe95b72b3b0856bed",
+      "x86_64-unknown-linux-musl/lib/self-contained/crtend.o": "0d11009c048ae289cdf184d726b767debc2972321e143838d28d7b6802b69c7c",
+      "x86_64-unknown-linux-musl/lib/self-contained/crtendS.o": "0d11009c048ae289cdf184d726b767debc2972321e143838d28d7b6802b69c7c",
+      "x86_64-unknown-linux-musl/lib/self-contained/crti.o": "5343749d306ea3578a4ae5c796be362100273f3314cec283be621bbe4a8ec720",
+      "x86_64-unknown-linux-musl/lib/self-contained/crtn.o": "794abd4b28db5de5f993b1445460d90fa3191cc9556a8b8881d5d34a5e8dfa87",
+      "x86_64-unknown-linux-musl/lib/self-contained/libc.a": "e699c64b0c6b427d89ad5bf767bf78beb30c19930c5dedff635951636e8f9f70",
+      "x86_64-unknown-linux-musl/lib/self-contained/libunwind.a": "eb16569e611a5d6cdda2e7604fd6402a3ad810817dd8d63ed50baa2ce8070aaa",
+      "x86_64-unknown-linux-musl/lib/self-contained/rcrt1.o": "7998a49f23b463b1bf59aecd8fde59df5d0f0bf819d1272d92c6f00ae81fc429"
+    },
+    "aarch64-unknown-linux-musl": {
+      "aarch64-unknown-linux-musl/lib/libaddr2line-abc34f401a5c0184.rlib": "69038e6cff967ae65849ecc82015bdca5dbef4446c57c401f60d32b99a141d98",
+      "aarch64-unknown-linux-musl/lib/libaddr2line-abc34f401a5c0184.rmeta": "ba75ec2a99b1b629509196a64bef78a4f4905a39924b2cf6a9c4443b5c81ae5f",
+      "aarch64-unknown-linux-musl/lib/libadler2-366d876161db02d1.rlib": "450a356381c7880ac1450eaca4ef5bcb31d63b69fc7977632b757bbe8bc5b088",
+      "aarch64-unknown-linux-musl/lib/libadler2-366d876161db02d1.rmeta": "24d21cc03a7796681d67e0b14ad429744752852f5583021ed60d754ca4ae58b5",
+      "aarch64-unknown-linux-musl/lib/liballoc-33b97f6bdb98e862.rlib": "963b439cd8b6e922258cab604c3b8f0dfc0757fa8552911ddcb3127369422451",
+      "aarch64-unknown-linux-musl/lib/liballoc-33b97f6bdb98e862.rmeta": "c745ebcccd2cf2402b7b905a0352b76f33757e0a7a5ef42b23ebf70e59ee0e6e",
+      "aarch64-unknown-linux-musl/lib/libcfg_if-b5762e6a170ec7f7.rlib": "2f949b128dbd8f41459699194b87ed94cbb68d13acdac612305132bddeff805a",
+      "aarch64-unknown-linux-musl/lib/libcfg_if-b5762e6a170ec7f7.rmeta": "99ccd4745689965dbc37b56571066812487ac058d1c14f1060b4aea7bb6f6d7c",
+      "aarch64-unknown-linux-musl/lib/libcompiler_builtins-56820b16468dfc21.rlib": "7b015e56a3a44661ab9c20a48efe4b8a638a311a1811644a2ed994019c98b080",
+      "aarch64-unknown-linux-musl/lib/libcompiler_builtins-56820b16468dfc21.rmeta": "bfa7d5c9bc4eb643980e0f1246aea17214332b1fe1a4c5fc3e24231fecef5394",
+      "aarch64-unknown-linux-musl/lib/libcore-89491010f55f6617.rlib": "3397f27434f891334ee2e29352a2fbab8de590e93b496379ee8bc1ab4b17cca9",
+      "aarch64-unknown-linux-musl/lib/libcore-89491010f55f6617.rmeta": "00fa21938e85db7c475e302122f0630218e15e129eaba33fb15ed8e527e8c61b",
+      "aarch64-unknown-linux-musl/lib/libgetopts-705d85a606f8d61f.rlib": "343773d652980ee89ebbb6628e3e956da7b8d709830d0a8f04de66ae3148b7a8",
+      "aarch64-unknown-linux-musl/lib/libgetopts-705d85a606f8d61f.rmeta": "29950b406f58a6e607e68e7093454bd198bcc3021c1f5221489627866d924e9a",
+      "aarch64-unknown-linux-musl/lib/libgimli-2a3db6a8ab9c50e3.rlib": "3795514a869616979864e30a314d04f0917ef4bee083699cd90ad01ada785402",
+      "aarch64-unknown-linux-musl/lib/libgimli-2a3db6a8ab9c50e3.rmeta": "b3f0f35812c7fb85cc9fd957add6d1e43da36eeae4f1214e568fcae61e0e982b",
+      "aarch64-unknown-linux-musl/lib/libhashbrown-201682644b0c3ba1.rlib": "75527a7cf4ad41fce6dd20498391d50b232a1fc6a8b2309df77d67fabfe3495e",
+      "aarch64-unknown-linux-musl/lib/libhashbrown-201682644b0c3ba1.rmeta": "d7c45e895d022b4a2cbaef0ff70c75f7965cfae4431a2d0d89daaf451f0a4336",
+      "aarch64-unknown-linux-musl/lib/liblibc-b082275d764c83a1.rlib": "210f880d654e357f8cc3d7a5ba54c0e965f2d3c7f0a48b64803baec31e6a4ede",
+      "aarch64-unknown-linux-musl/lib/liblibc-b082275d764c83a1.rmeta": "15dc392df3b207507e424412ae5b508525d30f9748a9d368e9d2dabc4443b0f6",
+      "aarch64-unknown-linux-musl/lib/libmemchr-b24a9858aeb9a256.rlib": "b2b76fa29bf2ff25e5ab5391c603d623d6f27a44da5cfcae59418b495558e1de",
+      "aarch64-unknown-linux-musl/lib/libmemchr-b24a9858aeb9a256.rmeta": "90630a111d107b02ba8133f3806707f0b8a9acbfc17a56ff4eeb2982c7b933eb",
+      "aarch64-unknown-linux-musl/lib/libminiz_oxide-102d239299204a0c.rlib": "d55a25cf2ae20fd4ffca66f7844930fd78622816d09711128f62bce2b86bce93",
+      "aarch64-unknown-linux-musl/lib/libminiz_oxide-102d239299204a0c.rmeta": "ff3b8a1023e0c4e859269bceb4d287bcfce318d193adb92b4083145e97bd813b",
+      "aarch64-unknown-linux-musl/lib/libobject-89469a9315fd3c2d.rlib": "be5570eeaac525d2eaf05850c2df1cf009670ca6c1679a5cc4bd5aa10ec045fc",
+      "aarch64-unknown-linux-musl/lib/libobject-89469a9315fd3c2d.rmeta": "984480e02d6ac0b1f260d52f50735ed3d256db52c4239922b60e0d02b4eec9c3",
+      "aarch64-unknown-linux-musl/lib/libpanic_abort-eccf032796dea98a.rlib": "371005d81102604c7d481c2c8b7afe9617dcc9e1c5477972032ca5d7983ad10a",
+      "aarch64-unknown-linux-musl/lib/libpanic_abort-eccf032796dea98a.rmeta": "b539fb6614745d1dec506f0ded05f81961c7f7d3f9c66afa7ccb5c53c18439b0",
+      "aarch64-unknown-linux-musl/lib/libpanic_unwind-335cd3b3c0a5cd20.rlib": "fb74be65bdf3a6130b8b0eba8542fb161a7f5a3cdb0538a9a1150fb89d887822",
+      "aarch64-unknown-linux-musl/lib/libpanic_unwind-335cd3b3c0a5cd20.rmeta": "ea2d091a03d8fbf329a55fab17c544303ce5fff583e12e292deca02e915eeb19",
+      "aarch64-unknown-linux-musl/lib/libproc_macro-831a158db7601ea4.rlib": "586fd52feb8e1fdac0a618ce258819d7b3aab7821d39632e19510f9fb7dcc8ad",
+      "aarch64-unknown-linux-musl/lib/libproc_macro-831a158db7601ea4.rmeta": "38cbcbab2f2962dcd377562365061145c039df251ad1355e7d938638bfa88dbe",
+      "aarch64-unknown-linux-musl/lib/libprofiler_builtins-32af23de7a5fb6a7.rlib": "e4f497ea63ecf965949028c36c9fa7adfffaa3a185b807008be74314811fdde0",
+      "aarch64-unknown-linux-musl/lib/libprofiler_builtins-32af23de7a5fb6a7.rmeta": "d2e40a8021d3ab3281f5a95038a6525a2b9778300cfab238a4cff70fa96a53ee",
+      "aarch64-unknown-linux-musl/lib/librustc_demangle-5cdc985574fecee9.rlib": "0f76c6735216fb4ba3666044bc5458e115a798c1fa7f273e4da3acf3969a549d",
+      "aarch64-unknown-linux-musl/lib/librustc_demangle-5cdc985574fecee9.rmeta": "adcd80001d1ee82ad2be5ee823cdaa83b375631b70752d77730d28807ad2b6ee",
+      "aarch64-unknown-linux-musl/lib/librustc_literal_escaper-73387b69df31267e.rlib": "a6854d54186a86029920b9372d844fd8eb44aedb4170c7954cb1c80c1f728cc8",
+      "aarch64-unknown-linux-musl/lib/librustc_literal_escaper-73387b69df31267e.rmeta": "5aad389a5860c5a1fcd3618786c8e44db78d09e2f7eb2903581195f883b74784",
+      "aarch64-unknown-linux-musl/lib/librustc_std_workspace_alloc-7f2709c6b2b483e4.rlib": "f2c4325b275627dfee92d105afba5e922f406d1c791f5dded96a64833a1317c9",
+      "aarch64-unknown-linux-musl/lib/librustc_std_workspace_alloc-7f2709c6b2b483e4.rmeta": "d02792e7904fef5eb62157ccccb2702302f90702e13ec274c8963dbece4fd014",
+      "aarch64-unknown-linux-musl/lib/librustc_std_workspace_core-cc6827f8369b7078.rlib": "64ebded8c95d2beb7de4494e99c211c3cbfb134772228567d2f792802d14eff4",
+      "aarch64-unknown-linux-musl/lib/librustc_std_workspace_core-cc6827f8369b7078.rmeta": "a8b6d73452ab2a2060a6d78756820a6d14bde366cf90a0a1635ee8502749960e",
+      "aarch64-unknown-linux-musl/lib/librustc_std_workspace_std-fb768c9dbf5b7e60.rlib": "9d3a3e8fd22da2b3197c5abb52a29c6e009defc889b770dc3da1b0c6362d6df2",
+      "aarch64-unknown-linux-musl/lib/librustc_std_workspace_std-fb768c9dbf5b7e60.rmeta": "3dad7e29fb6c5d0f263288ea16ce45a1c54a3ba4c78f518c098e88f83941722a",
+      "aarch64-unknown-linux-musl/lib/libstd-32d384fccf68bbb7.rlib": "0ab6dccc7d4304f3a0848dadb8820964d86747b75af12f3921f1d48a1d185579",
+      "aarch64-unknown-linux-musl/lib/libstd-32d384fccf68bbb7.rmeta": "52ac618873c2c96457c956acd4eace2c659991c5a1e80003094c81dd2ef0d645",
+      "aarch64-unknown-linux-musl/lib/libstd-32d384fccf68bbb7.so": "cd0f2822eb42ca47a2f94332a629afaaccc043796194e1b489860e82741a0ba1",
+      "aarch64-unknown-linux-musl/lib/libstd_detect-74e5d0a3ec2ead43.rlib": "e4e23b4f0245391a188c3bd2ce68486e9cad2af7b049489b20fba997f9a935f4",
+      "aarch64-unknown-linux-musl/lib/libstd_detect-74e5d0a3ec2ead43.rmeta": "e34290698125b1fc16a886e35dfe961dd7c79d76c3c89cc5cf24e5a1f712cc7d",
+      "aarch64-unknown-linux-musl/lib/libsysroot-4d240df81b38a20c.rlib": "3cb537c4699c52f79a174472659a63dd17f8c6522cc3a78afdeb259771e2c10e",
+      "aarch64-unknown-linux-musl/lib/libsysroot-4d240df81b38a20c.rmeta": "88432809098f53a2053bc6001d4ddd5ca50413d103cbed638a4c6e706c19b962",
+      "aarch64-unknown-linux-musl/lib/libtest-756066864610c096.rlib": "be4882eb2e9e17576e0b4c5d7c6207cfec577d2d5e593e0f1b9d337a6708c0f1",
+      "aarch64-unknown-linux-musl/lib/libtest-756066864610c096.rmeta": "5ee76933132de235ed293ecda220fb0c066b71c8f596d4ef0f6f3adc645c3b15",
+      "aarch64-unknown-linux-musl/lib/libunwind-d386394c55d922b1.rlib": "dc1698ae6fa281d36027c6a239ccb4e2516360880990db91c5d6abb7d7ee24d4",
+      "aarch64-unknown-linux-musl/lib/libunwind-d386394c55d922b1.rmeta": "040f1c82903c69d887a801dedcabe188db1cccbd9926550663f30421b6606870",
+      "aarch64-unknown-linux-musl/lib/self-contained/Scrt1.o": "8bb3021de91cbf0132042a13851deec579519b3b4644ad5f1c6ddbb4ff3be4ef",
+      "aarch64-unknown-linux-musl/lib/self-contained/crt1.o": "2c8595cff75b182ad59c0278d5f81bed2cf1e51b5bf9324db52142c89dd6479f",
+      "aarch64-unknown-linux-musl/lib/self-contained/crtbegin.o": "522c4ac7628b80df407f1873be18b6b9b398db5be7f9f5586835cdfd189f6a9e",
+      "aarch64-unknown-linux-musl/lib/self-contained/crtbeginS.o": "522c4ac7628b80df407f1873be18b6b9b398db5be7f9f5586835cdfd189f6a9e",
+      "aarch64-unknown-linux-musl/lib/self-contained/crtend.o": "9fd9518f8a0ba537a77c5d5c638ec30efa388a9458c21ad84f5607c535547adb",
+      "aarch64-unknown-linux-musl/lib/self-contained/crtendS.o": "9fd9518f8a0ba537a77c5d5c638ec30efa388a9458c21ad84f5607c535547adb",
+      "aarch64-unknown-linux-musl/lib/self-contained/crti.o": "b49a67e2e36eed4836023fc26ff9da617e2020a2317aadfeb7971e4cbe612bf7",
+      "aarch64-unknown-linux-musl/lib/self-contained/crtn.o": "b2f52a98df83f38814f34f7477aeb629d5e1fb1c1379ef2739cad91ab9ab8734",
+      "aarch64-unknown-linux-musl/lib/self-contained/libc.a": "b03473b6f1efb72f700f561b4407a88885b37e0edb5cdb2a64de0df5499e813f",
+      "aarch64-unknown-linux-musl/lib/self-contained/libunwind.a": "06977ce3e033cf2c06fcbac9b25b7c9213c7b4aa09f2a4d4b4427fb809b9f203",
+      "aarch64-unknown-linux-musl/lib/self-contained/rcrt1.o": "e65dadc816775ab1d8d915f7f6fc4baa5080c1bea633b4372ff73e3b7b2df81c"
+    },
+    "armv7-unknown-linux-musleabihf": {
+      "armv7-unknown-linux-musleabihf/lib/libaddr2line-340c3ea5e1e02795.rlib": "1eb71065edc52f6d7a8ffc34c8022e86eb929f6c3fa300087dd2d4d10bcdbb3a",
+      "armv7-unknown-linux-musleabihf/lib/libaddr2line-340c3ea5e1e02795.rmeta": "b844b290307b81a8970cc96e16f9b37e529acc5cf2fab00d5d0938042d7f1aeb",
+      "armv7-unknown-linux-musleabihf/lib/libadler2-a42bff502a54c393.rlib": "88f08924c1b65eafbcf82b3d35e4aa9407432eb90a65753e80849b977a57fd51",
+      "armv7-unknown-linux-musleabihf/lib/libadler2-a42bff502a54c393.rmeta": "3a082ae827428fd88b6f72c97980e8d0237b018cf411b88165f1e6626e1fc3d9",
+      "armv7-unknown-linux-musleabihf/lib/liballoc-9be29d892f1bdc13.rlib": "fc0a6fadc90e6758fa87d863524370b4d4f4cf9805ed325efc09b8a001ebc5d2",
+      "armv7-unknown-linux-musleabihf/lib/liballoc-9be29d892f1bdc13.rmeta": "867b7a2ed3a1d33eb917b10095a6b84bc0a7814f3568a716a38154562bbdbc75",
+      "armv7-unknown-linux-musleabihf/lib/libcfg_if-6cb62cf3fc702e32.rlib": "f9d912414e8342e3c34f4ab157a8eefa9c562339660f3ae507dc7385bc0a6fa8",
+      "armv7-unknown-linux-musleabihf/lib/libcfg_if-6cb62cf3fc702e32.rmeta": "1379677cfa7cc21f634116e80a8c25434a17c289a860173969db2d89b69e0ea5",
+      "armv7-unknown-linux-musleabihf/lib/libcompiler_builtins-75b06580af965c3c.rlib": "3cc33b8c171c91f33c6509a764a59be617864f145c67a77fc174f3ba868678d5",
+      "armv7-unknown-linux-musleabihf/lib/libcompiler_builtins-75b06580af965c3c.rmeta": "bf572e6018cff862bed70a59587550a1fc846ab812d1dfcfb37b1039a15fa9df",
+      "armv7-unknown-linux-musleabihf/lib/libcore-1f9d2c5da24daf27.rlib": "985aed6abdf10f399a084345ebb8b01ee8c688db3d81b74e6d89b9a647e5b2e4",
+      "armv7-unknown-linux-musleabihf/lib/libcore-1f9d2c5da24daf27.rmeta": "0cff0878492be3bfe364a2d8f82d80a4a6374e4fb1abf971ff953416981ead73",
+      "armv7-unknown-linux-musleabihf/lib/libgetopts-0b9b3206cc3fcad1.rlib": "6f0e619da8ff748ad38bf65a0d7dd4401a15f99b2943a13b00aa21e20d7d104d",
+      "armv7-unknown-linux-musleabihf/lib/libgetopts-0b9b3206cc3fcad1.rmeta": "d9f747519964f8fac4545820ec38c8e2d6e5e0f4dfcba29174f8b40643d0657d",
+      "armv7-unknown-linux-musleabihf/lib/libgimli-e4b9d336214e470b.rlib": "4b114a1003ae5d9a359932025cec15acfa4b0a69b30c86ad7066c54752cd2f6b",
+      "armv7-unknown-linux-musleabihf/lib/libgimli-e4b9d336214e470b.rmeta": "eb55692e23abd9fbb3e2a38e7cdc4406ba7ef55d6ba757193aae06efead273cf",
+      "armv7-unknown-linux-musleabihf/lib/libhashbrown-c08ddcd94bb62dae.rlib": "e7299870d6220d84f753795cf7f25b8c262d34771f0564fffa6723f15ae78a27",
+      "armv7-unknown-linux-musleabihf/lib/libhashbrown-c08ddcd94bb62dae.rmeta": "ad65920d783727930b2f62af2a468caa380ec82226e3ef9fde73d7f2cb5ad391",
+      "armv7-unknown-linux-musleabihf/lib/liblibc-95ed789cf9606119.rlib": "e63122c21ac4559dae6c8e5c9665da25be441c4bdb9d0f71acffe49f7ad2e541",
+      "armv7-unknown-linux-musleabihf/lib/liblibc-95ed789cf9606119.rmeta": "834e7f34273517384a292d717b3ce14a0150f4c2ab23be97fdcd39cf2a3762dc",
+      "armv7-unknown-linux-musleabihf/lib/libmemchr-60b4a2664eaa067e.rlib": "3d3ee55937bf27723dba71d42746221ee2250d3465a6ec1d7eb8c8c34533ff8a",
+      "armv7-unknown-linux-musleabihf/lib/libmemchr-60b4a2664eaa067e.rmeta": "0dcb6037c7281cf37cf95ecf8a618fadcc73c8c88355c0bc4960c6971a510cb1",
+      "armv7-unknown-linux-musleabihf/lib/libminiz_oxide-b65d7df2eadda642.rlib": "fe03ec7cb595478726b718dde7b00da1f492fa211cb8151185415473390b586d",
+      "armv7-unknown-linux-musleabihf/lib/libminiz_oxide-b65d7df2eadda642.rmeta": "44f97bd9c5654539c2377b15e7ad3692826c4ecfd84db391b2ac8d630df08b0f",
+      "armv7-unknown-linux-musleabihf/lib/libobject-0d3f82199194a11c.rlib": "eabff18d07010ae41c6e18325a175c92dc0438383efe7c514306b9f81589ceb3",
+      "armv7-unknown-linux-musleabihf/lib/libobject-0d3f82199194a11c.rmeta": "110391cb394a609cef4e9d60b1e476ae1eec99a077837aa6fa91017ee5a695ac",
+      "armv7-unknown-linux-musleabihf/lib/libpanic_abort-355efef242ad40ea.rlib": "be2ff8f0c0b3d0220e9fa6b2e2fa57afef5efaedb5dc54fb9debfae7777497a9",
+      "armv7-unknown-linux-musleabihf/lib/libpanic_abort-355efef242ad40ea.rmeta": "65172b8550f17187a5677d943cdd92facb7b4630aac71058aa7b5d664bb36b90",
+      "armv7-unknown-linux-musleabihf/lib/libpanic_unwind-5d8260d00b976a34.rlib": "3c95fe14dde61aa52f71fdf81e84bd1c81a07c2d457d052cd28a576d60f04196",
+      "armv7-unknown-linux-musleabihf/lib/libpanic_unwind-5d8260d00b976a34.rmeta": "97977d73e3f2384369ca27171f49dc061c52f4bcf34f74cead74b9dffa282d5f",
+      "armv7-unknown-linux-musleabihf/lib/libproc_macro-ce7ba297fc9b01d8.rlib": "4a9b30c2ca350821dbea9ff257fe751ce18c53ef38ceb66c33262c386a3ffe24",
+      "armv7-unknown-linux-musleabihf/lib/libproc_macro-ce7ba297fc9b01d8.rmeta": "7225b8e5c0c7cc4d16679ff49a84c847776f3c0d7802ad68ebb5928f5f6606ed",
+      "armv7-unknown-linux-musleabihf/lib/librustc_demangle-e1f07967b2d3e1b6.rlib": "ae6e131903f472e97caf76bfa48f14b593872e4cdb5c8345b9b515e0da51f89e",
+      "armv7-unknown-linux-musleabihf/lib/librustc_demangle-e1f07967b2d3e1b6.rmeta": "269665407a559a97dbb0a5363932e7cb1304d79c7d096209fd1a1ad3eb173800",
+      "armv7-unknown-linux-musleabihf/lib/librustc_literal_escaper-3e689a883e088e4e.rlib": "9fbf1a0d486697350a4edbd117e384bf0de0e7edbf30b4f01cf6210c2d01e359",
+      "armv7-unknown-linux-musleabihf/lib/librustc_literal_escaper-3e689a883e088e4e.rmeta": "d8d05f32dc88aba9a77a97e7748f5f02c1a852a73432f632b0be8c7c3eaef403",
+      "armv7-unknown-linux-musleabihf/lib/librustc_std_workspace_alloc-9743aa510bbd905f.rlib": "2585270b499d5e62ed3da06a9b66f9739307c56e177e6391f2a12ea8234095fb",
+      "armv7-unknown-linux-musleabihf/lib/librustc_std_workspace_alloc-9743aa510bbd905f.rmeta": "93f7e4983e557e7e866d3c63dead5b4fbaba6cb46d5f7d9279da6c7a3584593e",
+      "armv7-unknown-linux-musleabihf/lib/librustc_std_workspace_core-1b4041af45734c2b.rlib": "5dc9d14e8b43accf5997c9f8fb5c92e841305c23386b13da5e95d1deb71e04fa",
+      "armv7-unknown-linux-musleabihf/lib/librustc_std_workspace_core-1b4041af45734c2b.rmeta": "df84559a770ac84e9de9d90cd2394b9c1ca8c2367ac023ab944b76d6cfdd7459",
+      "armv7-unknown-linux-musleabihf/lib/librustc_std_workspace_std-1b58497459f6d6a6.rlib": "752455edbaaf4bcf7a7aa0e9bcfadc7065ad26ccd5c0f8857b8efaa33a509a4e",
+      "armv7-unknown-linux-musleabihf/lib/librustc_std_workspace_std-1b58497459f6d6a6.rmeta": "013a5b5024f9d36ac36e8f1414f834d1d195cd8c2a075383b0031f3eb88e71c1",
+      "armv7-unknown-linux-musleabihf/lib/libstd-a0ce0fff48ed8a7d.rlib": "03a4bc3a8a1e34a166a9498bcc8e884bc3d96c792c1cf99708bf3f5214a8c9de",
+      "armv7-unknown-linux-musleabihf/lib/libstd-a0ce0fff48ed8a7d.rmeta": "d449ac4ca8d5efd27000f0e4358dab3f18c87b22adbfdf1d4f85688f9cfde854",
+      "armv7-unknown-linux-musleabihf/lib/libstd_detect-b9971fa2a2a2182a.rlib": "397fc2dd1e9e46de73109fe6db4237a870f0601059da17222e5ee5b36eb82c06",
+      "armv7-unknown-linux-musleabihf/lib/libstd_detect-b9971fa2a2a2182a.rmeta": "ae0556c563d54ff579a41358ea5414e1c80290f45ff3db61c3014b93554dc2a0",
+      "armv7-unknown-linux-musleabihf/lib/libsysroot-36cfd596a9beefaa.rlib": "23c0113cb549919db1e957439898ed5c462272907fd83d679edf717f3f120db0",
+      "armv7-unknown-linux-musleabihf/lib/libsysroot-36cfd596a9beefaa.rmeta": "c67273c04467021ab6a57b62b8fc9245565f7fcde8d65933322c7108224bbb63",
+      "armv7-unknown-linux-musleabihf/lib/libtest-4583844e7ab7ed5c.rlib": "7d37d4ebaa996c95cad6efa1583f7ceb9dfc576f52900b6e08ef5deba51273b3",
+      "armv7-unknown-linux-musleabihf/lib/libtest-4583844e7ab7ed5c.rmeta": "56fc7bdef8651b060b6b7f8efd0506f21295c7080cff691a9075b5e645f553c0",
+      "armv7-unknown-linux-musleabihf/lib/libunwind-81e68c65420dc2c8.rlib": "5e5bc494d20fa29733832500ceed8aaf85ba394711844fcf359025adf4a204fc",
+      "armv7-unknown-linux-musleabihf/lib/libunwind-81e68c65420dc2c8.rmeta": "287cde33f325d403c4d7a63423b3b3f6a75d9421c24d3895e71bd5fe01ee0f4c",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/Scrt1.o": "96e6632ec43f4bf3bb53e5bf7b4537aafc2dba0d143427a9811b134d2d43ffb8",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crt1.o": "a885ef3c659235dcf2a50585117eb190d1f1697fd2b6271708a605dd3e70d5a3",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crtbegin.o": "e9c79486a30dc26c4cac6a0928e26439c444b40715aa58a63b96c458c994e499",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crtbeginS.o": "e9c79486a30dc26c4cac6a0928e26439c444b40715aa58a63b96c458c994e499",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crtend.o": "6e7db48ecae78b5c9b46ff736e8f71ea12694d92625ae15da849e75b7be60b73",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crtendS.o": "6e7db48ecae78b5c9b46ff736e8f71ea12694d92625ae15da849e75b7be60b73",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crti.o": "650fdd1acc1b4fbfbccebf5c643888b6b8d1e38ad40b1dfc999daec6bfd611fe",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/crtn.o": "f667e1871e8587614ff12ddc20d53f2a9c57933aa689bdfdc020ed1ed2a34eef",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/libc.a": "3717d9084d0df0dc2a425f21ba82c8eeca7569e33f86fe1be3b7523cf46ad480",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/libunwind.a": "820e3aafb8e3d2f74c24102ec86f6fcebd3f238c52d0e2d5b79442b827c71a47",
+      "armv7-unknown-linux-musleabihf/lib/self-contained/rcrt1.o": "9525c1a43da274ce98321cdeffecd5ea4afd6a973bc47344155c563e065e3c46"
+    },
+    "x86_64-apple-darwin": {
+      "x86_64-apple-darwin/lib/libaddr2line-9684bb964f1dcfeb.rlib": "6a84fe848c5314e53198222b4bc93789201791fe0cf73e7d8f326d320856446e",
+      "x86_64-apple-darwin/lib/libaddr2line-9684bb964f1dcfeb.rmeta": "e701bbc606032921e5d912c921963a402b29c0501e4c45632755ee45517072bb",
+      "x86_64-apple-darwin/lib/libadler2-ce82b8457b0d62cf.rlib": "57bffa7a6e2b1f9dc1b02416fdb286ca6e9e8612cc18039dfff5485379f33a23",
+      "x86_64-apple-darwin/lib/libadler2-ce82b8457b0d62cf.rmeta": "2f744815744a0b976eaa3e62bf2732b5a0a5989c02d38a6028e91a93da4640d8",
+      "x86_64-apple-darwin/lib/liballoc-9dfb932996702d52.rlib": "efb17fd5e72d340c0832f372aea9e8457d2c853e098ff467dc7e83865ed05cdc",
+      "x86_64-apple-darwin/lib/liballoc-9dfb932996702d52.rmeta": "93f507c005ce8cb40f6b701cb626e508a3da3a3b05afec49934e699ace3d1599",
+      "x86_64-apple-darwin/lib/libcfg_if-08411893b961a173.rlib": "397e4d3c95c33035e1bbd7e5906b86aeb62e8154380163bcbb3ec5db9cb18ff3",
+      "x86_64-apple-darwin/lib/libcfg_if-08411893b961a173.rmeta": "5229015f5f009e6fd24ef5cf4dfb8db562d709792b262edb049ac650b25f3a0f",
+      "x86_64-apple-darwin/lib/libcompiler_builtins-61f62886d21d43fa.rlib": "d3811e93f6b64b5754097412a5a34f7f7353549906f0a13c8db81a3978fe968d",
+      "x86_64-apple-darwin/lib/libcompiler_builtins-61f62886d21d43fa.rmeta": "f1e7cb777eb36c8f06e8463e5627a02d66dccd2f5d3a8021c9058b514d8da2e2",
+      "x86_64-apple-darwin/lib/libcore-68779ac4ab5af248.rlib": "79bb9bb9ac66beba68bf43a97f2caed852b0cc1d6a0633569d006505734a5448",
+      "x86_64-apple-darwin/lib/libcore-68779ac4ab5af248.rmeta": "dc1fed49c80f4084e10d0b2e955c6a8ccbec757c20e239ab41017e11c66f45d5",
+      "x86_64-apple-darwin/lib/libgetopts-2de2bec0f71e4743.rlib": "f750290e941f8b82d88c4ec15c889689fbdf4094950805736b3df3a9d3eaf022",
+      "x86_64-apple-darwin/lib/libgetopts-2de2bec0f71e4743.rmeta": "e1075b7965d6127a08d31b5e71ca7a15458712227de0e9271afc9f2ffc40ab27",
+      "x86_64-apple-darwin/lib/libgimli-460a23ff6bbeabe2.rlib": "c8243de353a7afa19973d3351e86e321c9d59258db4f03fa6bfc9c624c199b2c",
+      "x86_64-apple-darwin/lib/libgimli-460a23ff6bbeabe2.rmeta": "2170797461875b219fd9893ba963bea7e287371c24e10f29d183dbc82d2ea738",
+      "x86_64-apple-darwin/lib/libhashbrown-95aa8454464c7fe4.rlib": "13512c9f471d84a0820bb4793b2a5b33cb8bdd9e36bb4705a198ce7d48cada3a",
+      "x86_64-apple-darwin/lib/libhashbrown-95aa8454464c7fe4.rmeta": "56d918e9a2ad717ca23081f524b5a464126ba4f0f1605ea94bcad3448ac7806b",
+      "x86_64-apple-darwin/lib/liblibc-2411db95a292c07d.rlib": "d644ef41d4279e580f3ba0b57225e7e7c657baefda0b12eb66d16bbeff1c5d0c",
+      "x86_64-apple-darwin/lib/liblibc-2411db95a292c07d.rmeta": "9cb543cc55d217c5306e4bc7eb395712c0eb8c58e0399f8eb5f98334b363b692",
+      "x86_64-apple-darwin/lib/libmemchr-3db2833c7ffc1474.rlib": "01c2d1d3309023d5abf5a8b892ba75b65d40187fe3a2651e666e19f8b82d32b5",
+      "x86_64-apple-darwin/lib/libmemchr-3db2833c7ffc1474.rmeta": "29278bc4ae10e6a60ad9b0c10556211aaf0fa024a6949f0252037a69e2db08b0",
+      "x86_64-apple-darwin/lib/libminiz_oxide-28a8783e1d60f65c.rlib": "72dce335874aae03f8894733b23e91ce66cffd56d7728e284b40a05e2e618037",
+      "x86_64-apple-darwin/lib/libminiz_oxide-28a8783e1d60f65c.rmeta": "097451f7ef86a51d07402b5b12d1e7e38028a7411fed89731b74ee542b72c6f1",
+      "x86_64-apple-darwin/lib/libobject-06e34eeb4eb73dc0.rlib": "cb7c0760bb6aa9bda75b3bf823032f51d8a3e307d7bcc3dc468118186a434ac8",
+      "x86_64-apple-darwin/lib/libobject-06e34eeb4eb73dc0.rmeta": "81a7f0d507cd0bd8158d048e71666b2a0730ebbedc82189285b4924cba7e3d31",
+      "x86_64-apple-darwin/lib/libpanic_abort-6c90ce3461bec009.rlib": "625b22e3ee45f56eb51dabb38cd3a999485d0a9eb2c0721e4a2dccda0e4de749",
+      "x86_64-apple-darwin/lib/libpanic_abort-6c90ce3461bec009.rmeta": "e3893773d57259b4c5c09358655994aa537ff5d723e5d189e0124bd790832b62",
+      "x86_64-apple-darwin/lib/libpanic_unwind-bb2d4a9c83662d5d.rlib": "d3efffdfcb2269416c0c70d92423c489cc1cb50745951a35f9994473b33e0e61",
+      "x86_64-apple-darwin/lib/libpanic_unwind-bb2d4a9c83662d5d.rmeta": "aa7307e54f08e436b1865f7c6dd9631b4309921f6e931fcf44262137b93be883",
+      "x86_64-apple-darwin/lib/libproc_macro-8a64226070378cbf.rlib": "912153113464c2f536d1513bd4a011bb37d0723e02e23a40a03e1811ebdfdbf9",
+      "x86_64-apple-darwin/lib/libproc_macro-8a64226070378cbf.rmeta": "2716da0e5eff656ed9d4012805fd612788730fc082aa2e309f3e1576eebf23c0",
+      "x86_64-apple-darwin/lib/libprofiler_builtins-72682143f589d718.rlib": "c3a739140b57c2b84ecfe7b6e8ef615953bbb57e6ff3010a2d1530532703f222",
+      "x86_64-apple-darwin/lib/libprofiler_builtins-72682143f589d718.rmeta": "4813dbf0b006722bf568c2036b8391a29c71b65c51568208638fc28d973499b1",
+      "x86_64-apple-darwin/lib/librustc-stable_rt.asan.dylib": "2497e3ee8f37bf5d35b9c15f5220ff7df14c2ba70d2fa9e87a019b8d3eb31df8",
+      "x86_64-apple-darwin/lib/librustc-stable_rt.lsan.dylib": "24e5933ebc34f396e18ebbfda102e73760172d5ba88670f590a74687feeeff1d",
+      "x86_64-apple-darwin/lib/librustc-stable_rt.rtsan.dylib": "f4f3ea9c7839c4fd3b90b0b4d6eb60db90cd4ff9fe03ad67ac84adfa4d907467",
+      "x86_64-apple-darwin/lib/librustc-stable_rt.tsan.dylib": "9830671a240e0de90296fd276b6b7577f4141ed13785c56e677c4a2987cec374",
+      "x86_64-apple-darwin/lib/librustc_demangle-41c7380fef7dd4f3.rlib": "c9e25609001b9ea25200bfffc42f22842946d8a16061063793da04d301a1e0ae",
+      "x86_64-apple-darwin/lib/librustc_demangle-41c7380fef7dd4f3.rmeta": "0f41f722c5317de4fe6c271664ad61f1001e75f14270e2c61645e918d7141e65",
+      "x86_64-apple-darwin/lib/librustc_literal_escaper-1f79a6ddb2b54b35.rlib": "aa19b15579bfb70b59da898660216c0de15c3f1d55505d8bb83bc546819eaf7c",
+      "x86_64-apple-darwin/lib/librustc_literal_escaper-1f79a6ddb2b54b35.rmeta": "44c37713061e176c6e5d314363d6b2aa474b93e0862cf38f68a60e5f36451760",
+      "x86_64-apple-darwin/lib/librustc_std_workspace_alloc-6e5920faa921c164.rlib": "f35ffc2ce056bbf386021fa31846b5aeb4885ef72468e005ca8bb0a444a8e6dc",
+      "x86_64-apple-darwin/lib/librustc_std_workspace_alloc-6e5920faa921c164.rmeta": "c7e06268c43de02b1bed9e552a14c325eef8bf673b07242b5e1ff1f7a93675f4",
+      "x86_64-apple-darwin/lib/librustc_std_workspace_core-bd6a8ef50e9e69c9.rlib": "15b5c1a97c4ef1766f5b46b05e12fdfe478f54fa766e56b0c31951eeb946ee86",
+      "x86_64-apple-darwin/lib/librustc_std_workspace_core-bd6a8ef50e9e69c9.rmeta": "9333dac5681cfeccb0ffa0f909d18dbe69ae3ecf31c1213b24462fb79b88cec4",
+      "x86_64-apple-darwin/lib/librustc_std_workspace_std-941d577b1f711476.rlib": "4590bcd2298e9e6e988e7a8f85339d81835410ad9c572243b3b4361644475c04",
+      "x86_64-apple-darwin/lib/librustc_std_workspace_std-941d577b1f711476.rmeta": "90f64355307cc804075bc1c39daa8c3c1aee6afa6b5ea8757566bce026a7de78",
+      "x86_64-apple-darwin/lib/libstd-62092c68b9eb1b56.dylib": "1cab997f5855c6ca803cad73478108c207180b91c84247960f7c52c6f243c150",
+      "x86_64-apple-darwin/lib/libstd-62092c68b9eb1b56.rlib": "dad51408889e9846dfecf0f124ba58a13d1c600f5fe5964ea3aa338296eb88e4",
+      "x86_64-apple-darwin/lib/libstd-62092c68b9eb1b56.rmeta": "124c320b3b656679a2dbac4727c6d5b8d29fde98280ef65d3d25f93906ff7e85",
+      "x86_64-apple-darwin/lib/libstd_detect-512ada365c7d3af2.rlib": "e7d56bd1733a3a3e6cc2ce5b49b09e6647b79d175ba37c6813f970ea2814cfc2",
+      "x86_64-apple-darwin/lib/libstd_detect-512ada365c7d3af2.rmeta": "7335013b1119d281344206ad06fc004048db21f766be1d64cf281d0586f66b58",
+      "x86_64-apple-darwin/lib/libsysroot-0baff65aabad7ea6.rlib": "cb632b3ea460636ba6f711a0164bed4e02126cf945a6768bb39a1224c617d48e",
+      "x86_64-apple-darwin/lib/libsysroot-0baff65aabad7ea6.rmeta": "5d8c4b2b6fe73201d3a58a23ef0b44bf220e535c31b74ff3ac87af3712fcdae9",
+      "x86_64-apple-darwin/lib/libtest-ea0d7115e9b93e40.rlib": "882343c1f0cb58a75cef17dc3d961c015330ca0482e6d380acc6c21697ff2e00",
+      "x86_64-apple-darwin/lib/libtest-ea0d7115e9b93e40.rmeta": "8066d05073f92d43f79911ce3d19620727d49f281a0d9bb4130c4256fd1a6752",
+      "x86_64-apple-darwin/lib/libunwind-696ddcf0cce35199.rlib": "07b9011c2a936eef89c7bbfdb37a71fb1ee5ff8a8e124f877050ee621e61f0c7",
+      "x86_64-apple-darwin/lib/libunwind-696ddcf0cce35199.rmeta": "5e530d097126a76871a6dfce9b23ff649f781e404384d8eccb42a90e2461b610"
+    },
+    "aarch64-apple-darwin": {
+      "aarch64-apple-darwin/lib/libaddr2line-79bed969f69e54c6.rlib": "6dbbd1d894508fb647e65c8b5010eca8f5529e41383fa0732238143dfc18a93c",
+      "aarch64-apple-darwin/lib/libaddr2line-79bed969f69e54c6.rmeta": "a9d05cde78d3d5b91b8507f185e0d508f5a13a897cfeb0336ff32ffd26c1b3c5",
+      "aarch64-apple-darwin/lib/libadler2-0bb5203eaf32e446.rlib": "0660d8a956723aced4b56cb5a2647e40773a848e996bdfeb3c6b62d5a5d049e3",
+      "aarch64-apple-darwin/lib/libadler2-0bb5203eaf32e446.rmeta": "7b01fba1dbf03889a4bb24e621dc7a03d7ce305d4b54cae29a4c6ce853727b1a",
+      "aarch64-apple-darwin/lib/liballoc-3daa19367295a846.rlib": "6f4509e01156444621aed1b68b5ff48c95e5607c694a2f41f0253caccbb450d3",
+      "aarch64-apple-darwin/lib/liballoc-3daa19367295a846.rmeta": "8c36b7f501cb55078181697917daf4cad47663ee0509e75a3ac9fdbb34d65f77",
+      "aarch64-apple-darwin/lib/libcfg_if-17d31a5f5c373bf9.rlib": "52e246cf4c1e2f2890a952c4f097bfe1fb98ee4ee10ebd33546c85d5f589aefa",
+      "aarch64-apple-darwin/lib/libcfg_if-17d31a5f5c373bf9.rmeta": "a8a5df9e1154b954d18100cf3a7596b2aa2c64131d7c8ec9deebc834e1b64694",
+      "aarch64-apple-darwin/lib/libcompiler_builtins-51dc6f60309b0c2f.rlib": "8e07ba800b56538a0a7ead28347c09bf59621dd8fb8f0d91a0f753de2754f595",
+      "aarch64-apple-darwin/lib/libcompiler_builtins-51dc6f60309b0c2f.rmeta": "4de1ecfccd1f240def646cc66ad17b26761c44f42ab121dcac44be98cb91d2be",
+      "aarch64-apple-darwin/lib/libcore-4a1205c3dacb37e1.rlib": "66fcb84e1d046f173000db089827bb03eea75609b632b6fe8f877302596852c9",
+      "aarch64-apple-darwin/lib/libcore-4a1205c3dacb37e1.rmeta": "8f8068fd0c96959596351cc2528cac5414347150e123db33421cd1afe047706a",
+      "aarch64-apple-darwin/lib/libgetopts-0da3068421b19f83.rlib": "42cf7d24b02347423136049841f08603fd19b465524767f7aca1f286c2e77408",
+      "aarch64-apple-darwin/lib/libgetopts-0da3068421b19f83.rmeta": "4384358b292a31f5c9e6681074cef4f4c12d3e6bf19f50a33ff07e6906acff36",
+      "aarch64-apple-darwin/lib/libgimli-757741385d9265ec.rlib": "bd365ab0b35964c0fc22cde743961d08e757aca590527458b8f9b1cd35221586",
+      "aarch64-apple-darwin/lib/libgimli-757741385d9265ec.rmeta": "29a3d8d776688156474b6384e4194aca5f81831346f449fb46b646d3acc701b1",
+      "aarch64-apple-darwin/lib/libhashbrown-e7a46a0b87cff2e7.rlib": "fb6c7028dbba3149d1cb5a9d3f049b0e3879619df7bc6752656d6356656aa712",
+      "aarch64-apple-darwin/lib/libhashbrown-e7a46a0b87cff2e7.rmeta": "033dc12c82097d79de5d01788542afcd939ad976fa9f3dff7200eeffa4bf1e4d",
+      "aarch64-apple-darwin/lib/liblibc-dd3054cc665f826f.rlib": "2aa69ff5c7820e65c5b041e06819cb42db83e482332a7635b677f1f8df386b52",
+      "aarch64-apple-darwin/lib/liblibc-dd3054cc665f826f.rmeta": "4f526c28fa20b56b4432b67e3c7c8cb02a677dd7bf33992915c8651fe99981c5",
+      "aarch64-apple-darwin/lib/libmemchr-80762f8d0fa6ca39.rlib": "b36e1fe65ac7be447dad78cc81f6540ed8d41b7ca6ead0129034014b50f7847a",
+      "aarch64-apple-darwin/lib/libmemchr-80762f8d0fa6ca39.rmeta": "00ecfde6cddeb858e6917f3ab3d97bbd7fc7ab221ab3bd0ba7085eb2b8ed3bc0",
+      "aarch64-apple-darwin/lib/libminiz_oxide-816d0fb2e9cd4f45.rlib": "33e78207d02a41fb99c4d3c0e481ee233d24675069f59f43b64275a8c1a2fdf3",
+      "aarch64-apple-darwin/lib/libminiz_oxide-816d0fb2e9cd4f45.rmeta": "e9aafab238396bbd7e8c402a28150384e6025c6cb66b542a219dafc79d90532f",
+      "aarch64-apple-darwin/lib/libobject-b14cfe590d6e1067.rlib": "68c6d530c48df3c24c28e71d08d1e5a47c049439199823d6d419615a78ff6aa2",
+      "aarch64-apple-darwin/lib/libobject-b14cfe590d6e1067.rmeta": "9d143c68d5dbeaa1c11cfa7fbfcdd1566fa2d17ca1cd97c77f7426f0aa83a248",
+      "aarch64-apple-darwin/lib/libpanic_abort-15d0fd7df55de83d.rlib": "bd134fe1f1be4b5176214386764ae8679c65a3fa2e276dd427b78fef390e83dc",
+      "aarch64-apple-darwin/lib/libpanic_abort-15d0fd7df55de83d.rmeta": "367b8936b3f08529681d4adb5d18a04c1a90428877feb654f194f422696f5982",
+      "aarch64-apple-darwin/lib/libpanic_unwind-869827fb9cf0d68e.rlib": "2996b3ecd8a19a6761214e02f7c6a9164f065e8a60a78c8fa494786b740cd30b",
+      "aarch64-apple-darwin/lib/libpanic_unwind-869827fb9cf0d68e.rmeta": "708bf72500b8462fa2e13dbbd5b51764f9ec8900acb144f5ffd55536c3eb4b5d",
+      "aarch64-apple-darwin/lib/libproc_macro-af799fdc497a9fad.rlib": "1c1a94e7093e02c8e8437ec432424765ed839ae5096de92cc8294181ff1e7dcd",
+      "aarch64-apple-darwin/lib/libproc_macro-af799fdc497a9fad.rmeta": "b766670fce0238f4b6392b0dfcafc718c880bd35f2ba8afbfebca92c0500e763",
+      "aarch64-apple-darwin/lib/libprofiler_builtins-972c00d4cc78cddc.rlib": "a85c5d9c2a4597d6f65c234fa936b30ed490bd9293ae932123c07195241c199e",
+      "aarch64-apple-darwin/lib/libprofiler_builtins-972c00d4cc78cddc.rmeta": "23cbfe838d6e32d14fed28f30e7b979194db23e6c80b3d6ca4a64be9de0dca1f",
+      "aarch64-apple-darwin/lib/librustc-stable_rt.asan.dylib": "f88ed8a7b627ebf1514bbe9039b3e20825ccb242e0e9ecec137d8fe3c1a8465e",
+      "aarch64-apple-darwin/lib/librustc-stable_rt.lsan.dylib": "9126ad13b82d6414cbca70908ebc9fee48b47460c0ceeb76baa7fe6e7e4ba91e",
+      "aarch64-apple-darwin/lib/librustc-stable_rt.rtsan.dylib": "9e1e6c095f5710a5da856b90169e04b20200fc9a6a9eb5dd6863e76154893637",
+      "aarch64-apple-darwin/lib/librustc-stable_rt.tsan.dylib": "6ac9c67e8e2a13fbc55370bec176376a5bb2b597a18a46ee746870a2d47b3ca1",
+      "aarch64-apple-darwin/lib/librustc_demangle-8b283a422a84bedc.rlib": "093aead47ad3bffedcdae5841607336a8b17f7f131083e13a12d9d2161119515",
+      "aarch64-apple-darwin/lib/librustc_demangle-8b283a422a84bedc.rmeta": "bfe6ea2c7467a508753592df24898143a308606d88bdfb7ef39f11e9e759c696",
+      "aarch64-apple-darwin/lib/librustc_literal_escaper-78238be959776074.rlib": "1f26d3853d4c447f9f32bf9b97a044ae267dfcda74a00c27fed9ba5d7c58c1cf",
+      "aarch64-apple-darwin/lib/librustc_literal_escaper-78238be959776074.rmeta": "5cb49ec4e6118a01593ce862fa701be7ed2b102c2a467c8bb705c7f68e7ea49e",
+      "aarch64-apple-darwin/lib/librustc_std_workspace_alloc-21146b8e88a1242e.rlib": "7c045b29fd96f221f0ad7dacfa94565a4c1525ec52a0a4d6208f51039b71ba0d",
+      "aarch64-apple-darwin/lib/librustc_std_workspace_alloc-21146b8e88a1242e.rmeta": "1726cc3f0f7c7497243b3c5a21af72ec29f51fa928e99e8bd294534130bb7f84",
+      "aarch64-apple-darwin/lib/librustc_std_workspace_core-c8f303c496e8a8f4.rlib": "27edd0a14ef4e5d823d58a00cd85ed8597057ae060d1d7ea6139219d7598d4cf",
+      "aarch64-apple-darwin/lib/librustc_std_workspace_core-c8f303c496e8a8f4.rmeta": "cc08d94f3ff532e2c95cefd0be9e746b171edcd99e148dc800c94ad07d266472",
+      "aarch64-apple-darwin/lib/librustc_std_workspace_std-aecd8334fda288d0.rlib": "6d5fb36b752228f8c00670e6b9908f239e3a37721275a16b44278991aa9720ae",
+      "aarch64-apple-darwin/lib/librustc_std_workspace_std-aecd8334fda288d0.rmeta": "893d30484f1a1d2977c68c5c2ae5c63a7ea09f066a04b4b4aa515d5a1836d567",
+      "aarch64-apple-darwin/lib/libstd-3f21d70fba8f3088.dylib": "ab86de210fe61dc6817a24e6d4ee3ce078fe63093b969db870d59d369d33dffd",
+      "aarch64-apple-darwin/lib/libstd-3f21d70fba8f3088.rlib": "52a9e34583f133cfd144e046de74d9447840fb15a01773cbe47aff2bdbc78c36",
+      "aarch64-apple-darwin/lib/libstd-3f21d70fba8f3088.rmeta": "75f2db5ad4d3ff74fc261e1d2e26faebbaa63b0adb01b1ce57185119f987026f",
+      "aarch64-apple-darwin/lib/libstd_detect-fdc68db09217c677.rlib": "597e7cc3675e4c7c7eacadf972023d9c9a1053c71b80f5bd91137f8bfc148b19",
+      "aarch64-apple-darwin/lib/libstd_detect-fdc68db09217c677.rmeta": "c8ebd8689e66f01e3ffadfcd436f6aa5de358f0af28c038a62146d9102374709",
+      "aarch64-apple-darwin/lib/libsysroot-c504f35aa074ff27.rlib": "a68855942559e88c5e87e648b1e2cad4bec5bc7fa5711f57b064174d348e8bbf",
+      "aarch64-apple-darwin/lib/libsysroot-c504f35aa074ff27.rmeta": "1439eff113cfbb66dc104e4c0b6eb54672e9c9272d8d324035b7974b11cc6d5b",
+      "aarch64-apple-darwin/lib/libtest-a810ff0ae3d57288.rlib": "18f929a9c6e4b67588656de607348a5d6e0c5ed07c064d90aa69164437eb41b8",
+      "aarch64-apple-darwin/lib/libtest-a810ff0ae3d57288.rmeta": "8e580bfa401b58d6ceab9c9d2504e6b8dd652af9a9dbcab738a3e9b31beeb94f",
+      "aarch64-apple-darwin/lib/libunwind-58e461b855dc6118.rlib": "9cea1837d1f8a53be7d2c91c2b2fa736d9d45a0867d460ba0b6b239dc89ba277",
+      "aarch64-apple-darwin/lib/libunwind-58e461b855dc6118.rmeta": "0f08ad08e827f687d2a7ae470104449c7c449f1c52d4ebbaccde5d81ba90a49b"
+    }
+  },
+  "profile_scope": {
+    "linux-musl": "Rust target runtime plus static musl, LLVM libunwind and CRT objects; native ring source notices retained as a conservative superset.",
+    "macos-system": "Rust target runtime and native ring source notices; macOS system libraries are dynamically linked and not redistributed. Linux musl, libunwind.a and musl CRT notices are not assigned to Apple artifacts. Native SDK/link-map acceptance is a separate release gate."
+  }
+}

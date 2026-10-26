@@ -1,7 +1,14 @@
 .gitattributes text eol=lf
 *.sh text eol=lf
+LICENSES/*.txt text eol=lf
 amneziawg-web/scripts/amneziawg-web-privileged text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
 *.md text eol=auto
 packaging/boringtun/** text eol=lf
+# Preserve verbatim upstream whitespace in checksum-bound license texts.
+packaging/boringtun/runtime-notices.txt whitespace=-blank-at-eol
+packaging/boringtun/runtime-notices-macos.txt whitespace=-blank-at-eol
+LICENSES/LicenseRef-BoringTun-Runtime-Notices.txt whitespace=-blank-at-eol
+LICENSES/LicenseRef-BoringTun-Runtime-Notices-macOS.txt whitespace=-blank-at-eol
+LICENSES/BSD-3-Clause.txt whitespace=-blank-at-eol
