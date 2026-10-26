@@ -153,6 +153,7 @@ class FakeGitHub:
         self.deleted_head = False
         self.retained_head = True
         self.association_head = "a" * 40
+        self.empty_associations = False
         self.calls = []
 
     def rebuild(self):
@@ -164,6 +165,10 @@ class FakeGitHub:
 
     def api(self, endpoint):
         self.calls.append(endpoint)
+        if endpoint == f"repos/{REPO}/commits/{C}/pulls?per_page=100&page=1":
+            return [self.api(f"repos/{REPO}/pulls/42")]
+        if endpoint == f"repos/{REPO}/compare/{C}...master":
+            return {"status": "ahead", "merge_base_commit": {"sha": C}}
         if endpoint == f"repos/{REPO}/pulls/42":
             return {"number":42,"state":"closed","merged":True,"merge_commit_sha":C,"merged_at":"2026-10-25T12:00:00Z",
                     "base":{"ref":"master","repo":repository(REPO,1234)},"head":{"sha":"a"*40,"repo":None if self.deleted_head else repository("contributor/fork",6789)}}
@@ -171,10 +176,10 @@ class FakeGitHub:
             return {"id": 200, "path": policy.BUILD_WORKFLOW}
         if endpoint == f"repos/{REPO}/actions/runs/100/attempts/2":
             return {"id": 100, "run_attempt": 2, "workflow_id": 200,
-                    "path": policy.BUILD_WORKFLOW, "event": "pull_request",
+                    "path": policy.BUILD_WORKFLOW, "event": "push", "head_branch": "master",
                     "status": "completed", "conclusion": self.build_status, "head_sha": C,
                     "repository": {"id": 1234, "full_name": REPO}, "created_at": self.build_created,
-                    "pull_requests": [{"number":42,"base":{"ref":"master","repo":repository(REPO,1234,True)},
+                    "pull_requests": [] if self.empty_associations else [{"number":42,"base":{"ref":"master","repo":repository(REPO,1234,True)},
                                        "head":{"sha":self.association_head,"repo":repository("contributor/fork",6789,True) if self.retained_head else None}}]}
         if endpoint == f"repos/{REPO}/actions/workflows/boringtun-release.yml":
             return {"id": 400, "path": policy.PUBLISH_WORKFLOW}
@@ -225,6 +230,65 @@ class AdoptionTests(unittest.TestCase):
         self.assertEqual(before, (ROOT / "amneziawg-install.sh").read_bytes())
         self.assertTrue((self.out / "candidate-pin.env").is_file())
         self.assertEqual(json.loads((self.out / "verification.json").read_text())["gh_version"], "2.100.0")
+
+    def test_empty_push_associations_use_independent_commit_lookup(self):
+        self.gh.empty_associations = True
+        self.assertTrue(self.run_adoption().is_file())
+        proof = json.loads((self.out / 'verification.json').read_text())['run_evidence']
+        self.assertEqual(proof['build_attempt']['pull_requests'], [])
+        self.assertIsNone(proof['retained_head_repository'])
+        self.assertEqual(proof['current_head_repository']['id'], 6789)
+
+    def test_commit_discovery_paginates_past_unrelated_prs(self):
+        original = self.gh.api
+        pr = original(f'repos/{REPO}/pulls/42')
+        def paged(endpoint):
+            if f'/commits/{C}/pulls?' in endpoint:
+                if endpoint.endswith('page=1'):
+                    return [dict(pr, number=n, merge_commit_sha='d'*40) for n in range(100, 200)]
+                self.assertTrue(endpoint.endswith('page=2'))
+                return [pr]
+            return original(endpoint)
+        self.gh.api = paged
+        self.gh.empty_associations = True
+        self.assertTrue(self.run_adoption().is_file())
+
+    def test_commit_discovery_rejects_missing_ambiguous_and_duplicate_matches(self):
+        original = self.gh.api
+        pr = original(f'repos/{REPO}/pulls/42')
+        for entries in ([], [dict(pr, merged_at=None)], [dict(pr, merge_commit_sha='d'*40)],
+                        [pr, dict(pr, number=43)], [pr, pr], [dict(pr, base=None)]):
+            def changed(endpoint):
+                return entries if f'/commits/{C}/pulls?' in endpoint else original(endpoint)
+            self.gh.api = changed
+            with self.subTest(entries=len(entries)), self.assertRaises(policy.PolicyError):
+                adopt.check_run_metadata(self.gh, self.gh.descriptor, {'id': 1234})
+
+    def test_push_build_rejects_wrong_event_branch_and_source(self):
+        original = self.gh.api
+        for key, value in [('event', 'pull_request'), ('event', 'workflow_dispatch'),
+                           ('head_branch', 'other'), ('head_sha', 'a'*40)]:
+            def changed(endpoint):
+                result = original(endpoint)
+                if endpoint.endswith('/actions/runs/100/attempts/2'):
+                    result[key] = value
+                return result
+            self.gh.api = changed
+            with self.subTest(key=key), self.assertRaises(policy.PolicyError):
+                adopt.check_run_metadata(self.gh, self.gh.descriptor, {'id': 1234})
+
+    def test_empty_associations_and_deleted_head_require_retained_evidence(self):
+        self.gh.empty_associations = self.gh.deleted_head = True
+        with self.assertRaises(policy.PolicyError):
+            self.run_adoption()
+
+    def test_commit_pr_pagination_rejects_repetition_and_truncation(self):
+        pr = self.gh.api(f'repos/{REPO}/pulls/42')
+        class Pages:
+            def api(self, _endpoint):
+                return [dict(pr, number=n) for n in range(1, 101)]
+        with self.assertRaises(policy.PolicyError):
+            adopt.commit_prs(Pages(), C)
 
     def test_combined_six_subject_attestation_accepted(self):
         self.gh.combined = True
