@@ -231,8 +231,12 @@ checks that:
   versions need review. A crate under any other license, or with no license
   metadata, fails the check until it is reviewed.
 
-The BoringTun license gate keeps running in the BoringTun Artifacts workflow
-with its own policy.
+AWG's BoringTun Artifacts workflow checks consumer contracts, archive fixtures
+and the pinned published release. Source dependency auditing and notice
+generation belong to the fork's BoringTun merged PR artifacts workflow and its
+read-only candidate platform validation workflow, using
+`packaging/boringtun/deny.toml`. The fork publisher remains disabled pending
+the activation gates in [BORINGTUN_MIGRATION.md](BORINGTUN_MIGRATION.md).
 
 To run the checks locally, install the tools at the versions the workflow pins
 and run the script from the repository root:

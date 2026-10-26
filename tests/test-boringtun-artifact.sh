@@ -664,6 +664,12 @@ assert_fails_with "not the artifact of the pinned version and commit" "an archiv
 
 echo "=== SHA256SUMS ==="
 
+if python3 "${SCRIPT_DIR}/test_artifact_checksums.py"; then
+	ok "checksum writer preserves complete output when hashing fails"
+else
+	not_ok "checksum writer preserves complete output when hashing fails"
+fi
+
 mkdir -p "${TEST_ROOT}/sums"
 cp "${ARCHIVE}" "${TEST_ROOT}/sums/"
 cp "${ARCHIVE}" "${TEST_ROOT}/sums/boringtun-cli-0.7.1-g${SOURCE_COMMIT:0:12}-linux-aarch64-musl.tar.gz"

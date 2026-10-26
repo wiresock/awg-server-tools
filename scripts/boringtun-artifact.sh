@@ -946,7 +946,7 @@ bta_interface_exists() {
 
 # Write SHA256SUMS for every artifact archive in a directory, sorted by name.
 bta_checksums() {
-    local dir="$1" name
+    local dir="$1" name digest scratch
     local -a archives=()
 
     if [[ ! -d "${dir}" ]]; then
@@ -965,8 +965,27 @@ bta_checksums() {
             return 1
         fi
     done
-    (for name in "${archives[@]}"; do printf '%s  %s\n' "$(bta_sha256 "${dir}/${name}")" "${name}" || exit 1; done) >"${dir}/SHA256SUMS.tmp" &&
-        mv -- "${dir}/SHA256SUMS.tmp" "${dir}/SHA256SUMS"
+    scratch="$(mktemp "${dir}/.SHA256SUMS.XXXXXX")" || return 1
+    if ! (
+        for name in "${archives[@]}"; do
+            digest="$(bta_sha256 "${dir}/${name}")" || {
+                bta_err "failed to hash ${dir}/${name}"
+                exit 1
+            }
+            if [[ ! "${digest}" =~ ^[0-9a-f]{64}$ ]]; then
+                bta_err "invalid SHA-256 digest for ${dir}/${name}"
+                exit 1
+            fi
+            printf '%s  %s\n' "${digest}" "${name}" || exit 1
+        done
+    ) >"${scratch}"; then
+        rm -f -- "${scratch}"
+        return 1
+    fi
+    if ! mv -- "${scratch}" "${dir}/SHA256SUMS"; then
+        rm -f -- "${scratch}"
+        return 1
+    fi
 }
 
 bta_usage() {
