@@ -66,6 +66,12 @@ jobs:
         working-directory: amneziawg-web
         run: cargo test
 
+      - name: Run web-panel browser behavior fixtures
+        run: |
+          node tests/test-web-vpn-uri-ui.cjs
+          node tests/test-web-delivery-ui.cjs
+          node tests/test-web-email-native.cjs
+
   proxy-rust-msrv:
     name: Proxy Rust Tests (MSRV 1.75)
     runs-on: ubuntu-latest

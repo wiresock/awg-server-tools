@@ -10,6 +10,7 @@ mod auth;
 mod awg;
 mod config_store;
 mod db;
+mod delivery;
 mod domain;
 mod imitation;
 mod managed_interface;
@@ -26,7 +27,7 @@ use crate::auth::AuthConfig;
 use crate::db::Database;
 use crate::managed_interface::InterfaceSelector;
 use crate::poller::Poller;
-use crate::web::{normalize_base_path, router_with_base_path};
+use crate::web::{normalize_base_path, router_with_delivery};
 
 /// CLI arguments / environment variable configuration.
 #[derive(Parser, Debug)]
@@ -278,6 +279,29 @@ async fn main() -> anyhow::Result<()> {
     }
     info!(path = %lifecycle_lock_dir.display(), "lifecycle lock directory validated");
 
+    // Core DB/migration/lifecycle failures above remain fatal. Only email's
+    // private-storage refusal is quarantined before any secret/transport load.
+    let delivery = delivery::bootstrap::initialize(
+        delivery::exports::ExportSource {
+            db: db.clone(),
+            directory: config.config_dir.clone(),
+            lock_directory: lifecycle_lock_dir.clone(),
+            ownership: std::sync::Arc::new(delivery::exports::ServerOwnership {
+                override_name: interface.override_name().map(str::to_owned),
+            }),
+        },
+        auth.enabled,
+        &base_path,
+        || delivery::config::Settings::from_env(auth.enabled),
+        std::sync::Arc::new(delivery::runtime::SmtpFactory),
+    )
+    .await?;
+    if let Some(reason) = delivery.startup_blocked {
+        tracing::warn!(reason, "Email unavailable; repair its prerequisites and restart the panel. Peer management remains available.");
+    } else {
+        tokio::spawn(delivery.clone().run());
+    }
+
     // --- Background poller --------------------------------------------------
     let config_dir = config.config_dir.clone();
     let poller = Poller::new_full(
@@ -293,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // --- HTTP server --------------------------------------------------------
-    let app = router_with_base_path(
+    let app = router_with_delivery(
         db,
         auth,
         config_dir,
@@ -301,15 +325,19 @@ async fn main() -> anyhow::Result<()> {
         config.proxy_sessions_file,
         interface,
         &base_path,
+        delivery,
     )
     .map_err(|err| anyhow::anyhow!("invalid AWG_WEB_BASE_PATH '{}': {err}", base_path))?;
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .context("failed to bind TCP listener")?;
     info!(addr = %config.listen, "HTTP server listening");
-    axum::serve(listener, app)
-        .await
-        .context("HTTP server error")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .context("HTTP server error")?;
 
     Ok(())
 }

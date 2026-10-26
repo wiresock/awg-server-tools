@@ -1,5 +1,7 @@
 # AmneziaWG Server Tools
 
+The web panel supports optional, explicit [email delivery of client exports or expiring links](amneziawg-web/docs/EMAIL_DELIVERY.md), with recipient preview and a separately configured public HTTPS endpoint.
+
 Install and manage AmneziaWG servers, clients, and protocol imitation. By [WireSock](https://www.wiresock.net/).
 
 Set up an [AmneziaWG](https://docs.amnezia.org/documentation/amnezia-wg/) obfuscated VPN on a supported Linux server using the default kernel backend or the experimental **BoringTun userspace backend**. Fresh installs use AWG 2.0; AWG 3.1, a web panel, and protocol imitation are optional.

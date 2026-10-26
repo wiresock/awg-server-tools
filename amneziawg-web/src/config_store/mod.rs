@@ -23,6 +23,8 @@ use tracing::warn;
 
 use crate::domain::PublicKey;
 
+pub mod export;
+
 #[derive(Debug, Error)]
 pub enum ConfigStoreError {
     #[error("failed to read config directory {path}: {source}")]

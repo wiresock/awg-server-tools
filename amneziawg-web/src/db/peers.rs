@@ -675,6 +675,24 @@ pub async fn mark_removal_pending(pool: &SqlitePool, id: i64) -> Result<bool, sq
     Ok(result.rows_affected() > 0)
 }
 
+/// Claim removal only while the selected row still represents the reviewed key.
+/// This UPDATE also invokes the existing delivery-revocation triggers.
+pub async fn mark_removal_pending_matching(
+    pool: &SqlitePool,
+    id: i64,
+    public_key: &str,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE peers SET removal_pending = 1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND public_key = ? AND archived = 0",
+    )
+    .bind(id)
+    .bind(public_key)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Result of attempting to purge and archive a peer record.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ArchivePeerOutcome {

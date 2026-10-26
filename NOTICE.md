@@ -132,6 +132,13 @@ Apache-2.0, BSD-3-Clause, ISC, Unicode-3.0 or Zlib, many as alternatives), as
 checked by cargo-deny with `.github/licensing/deny.toml`. `amneziawg-web`
 includes SQLite (public domain) through `libsqlite3-sys`.
 
+The email feature also uses `quoted_printable` 0.5.2 under 0BSD (its upstream
+notice names Kartikaya Gupta, 2019) and `webpki-roots` 1.0.11 under
+CDLA-Permissive-2.0, through Lettre. The policy permits only those reviewed
+versions. A distributor of a binary containing the bundled trust-anchor data
+must include the complete CDLA agreement text from `webpki-roots`' `LICENSE`.
+See [the web/proxy binary guidance](docs/LICENSING.md#distributing-binaries-of-the-web-panel-or-the-proxy).
+
 ### Installed by the system package manager: AmneziaWG
 
 The kernel backend uses the [AmneziaWG](https://docs.amnezia.org/documentation/amnezia-wg/)

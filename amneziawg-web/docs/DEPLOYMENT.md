@@ -1,5 +1,9 @@
 # Deployment Guide
 
+For optional SMTP and an isolated public download hostname, follow
+[Email delivery](EMAIL_DELIVERY.md). Configuring its public base URL does not
+expose the admin panel or configure a proxy/firewall automatically.
+
 This document describes how to run `amneziawg-web` in production as a
 private self-hosted service.
 

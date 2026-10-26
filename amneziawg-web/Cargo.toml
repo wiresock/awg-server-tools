@@ -31,7 +31,11 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 futures-util = "0.3.32"
 base64 = "0.22"
 flate2 = "1"
+sha2 = "0.10"
+url = "2"
+lettre = { version = "=0.11.19", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "ring", "webpki-roots"] }
 
 [dev-dependencies]
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"

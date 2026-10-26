@@ -34,3 +34,16 @@ confidence-threshold = 0.93
 # One policy serves both crates, so an allowance one of them does not use is
 # expected and not reported.
 unused-allowed-license = "allow"
+
+# Lettre's MIME encoder and bundled trust anchors. Reviewed against the exact
+# locked crates' LICENSE files; notice requirements are in docs/LICENSING.md.
+# Keep these allowances package- and version-specific so upgrades are reviewed.
+[[licenses.exceptions]]
+name = "quoted_printable"
+version = "=0.5.2"
+allow = ["0BSD"]
+
+[[licenses.exceptions]]
+name = "webpki-roots"
+version = "=1.0.11"
+allow = ["CDLA-Permissive-2.0"]
