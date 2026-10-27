@@ -136,6 +136,7 @@ if declare -F patchAwgDkmsUdpTunnelCompat >/dev/null; then
 		AWG_BACKEND="$2"
 		# Preserve the scenario outside the patch helper's positional arguments.
 		local PATCH_RESULT="$3"
+		local TEST_S4="${4:-128}"
 		patchAwgDkmsUdpTunnelCompat() {
 			echo patch >>"${WORK}/calls"
 			[[ "${PATCH_RESULT}" != fail ]] || return 73
@@ -144,7 +145,13 @@ if declare -F patchAwgDkmsUdpTunnelCompat >/dev/null; then
 		ensureSupportedInstallDistro() { :; }
 		selectFreshInstallBackend() { :; }
 		selectFreshInstallImitation() { :; }
-		installQuestions() { :; }
+		# Supply the candidate state that the real questions produce. Keep the
+		# actual MTU admission guard active before reaching package recovery.
+		installQuestions() {
+			# shellcheck disable=SC2034 # consumed by sourced validateFreshInstallMtu
+			SERVER_AWG_S4="${TEST_S4}"; CLIENT_MTU=''; SERVER_PUB_NIC=mock0
+		}
+		uplinkMtu() { printf '%s' 1500; }
 		installBoringtunHost() { echo boringtun >>"${WORK}/calls"; }
 		amneziaPpaSourceEntriesExist() { return 1; }
 		configureUbuntuAmneziaPpa() { :; }
@@ -178,6 +185,12 @@ if declare -F patchAwgDkmsUdpTunnelCompat >/dev/null; then
 	run_interrupted_install ubuntu kernel fail >"${WORK}/output" 2>&1 || rc=$?
 	check 'early patch failure stops kernel installation' test "${rc}" != 0
 	check 'early patch failure runs no package commands' test "$(cat "${WORK}/calls")" = patch
+	: >"${WORK}/calls"
+	rc=0
+	run_interrupted_install ubuntu kernel ok 148 >"${WORK}/output" 2>&1 || rc=$?
+	check 'unsafe MTU stops before DKMS recovery' test "${rc}" = 1
+	check 'unsafe MTU runs no patch or package commands' test ! -s "${WORK}/calls"
+	check 'unsafe MTU explains the actual 1272-byte budget' grep -q 'effective MTU 1272' "${WORK}/output"
 	: >"${WORK}/calls"
 	rc=0
 	run_interrupted_install ubuntu "${AWG_BACKEND_BORINGTUN}" fail >"${WORK}/output" 2>&1 || rc=$?
