@@ -3058,8 +3058,8 @@ function removeFromWebPanelDir() {
 # small handshake and cookie packets). awg-quick's automatic MTU, the uplink
 # MTU minus 80 bytes of IPv6, UDP and WireGuard overhead, does not allow for
 # them, so full-size transport packets exceed the path MTU and fragment. The
-# recommended MTU takes S4 off as well and never goes below 1280, the IPv6
-# minimum. Client configs assume a 1500-byte path, 1420 minus S4; the server
+# recommended MTU takes S4 off as well and refuses a budget below 1280, the
+# IPv6 minimum. Client configs assume a 1500-byte path, 1420 minus S4; the server
 # interface starts from the MTU of its uplink instead.
 AWG_DEFAULT_PATH_MTU=1500
 AWG_QUICK_MTU_OVERHEAD=80
@@ -3070,25 +3070,53 @@ AWG_MIN_MTU=1280
 # endpoint it is 80, which leaves nothing.
 AWG_S4_AUTOMATIC_MTU_LIMIT_IPV4=20
 AWG_S4_AUTOMATIC_MTU_LIMIT_IPV6=0
-# The largest S4 a fresh install draws or accepts: 150, the protocol range,
-# behind an IPv4 endpoint; 140 behind one that may be IPv6, where even the
-# 1280 minimum MTU plus 80 bytes of overhead and S4 must fit a 1500-byte path.
-AWG_S4_MAX=150
+# The automatic WireSock client uses the conservative 1420 pre-S4 baseline
+# even for an IPv4 endpoint. Keep at least 1280 after S4 for every family.
+# The protocol's syntax limit remains 150 for loading existing configurations.
+AWG_S4_MAX=140
 AWG_S4_MAX_IPV6=140
 
 function recommendedMtuForS4() { # <S4> [path MTU, default 1500]
 	local S4="${1:-}" PATH_MTU="${2:-${AWG_DEFAULT_PATH_MTU}}" MTU
-	if ! [[ "${S4}" =~ ^[0-9]+$ ]]; then
+	if ! [[ "${S4}" =~ ^0*[0-9]{1,5}$ ]] || (( 10#${S4} > 65535 )); then
 		echo "ERROR: recommendedMtuForS4 needs a decimal S4, got '${S4}'." >&2
 		return 1
 	fi
-	if ! [[ "${PATH_MTU}" =~ ^[0-9]+$ ]]; then
+	# Linux loopback has MTU 65536; subtracting framing still fits an IP packet.
+	if ! [[ "${PATH_MTU}" =~ ^0*[0-9]{1,5}$ ]] || (( 10#${PATH_MTU} > 65536 )); then
 		echo "ERROR: recommendedMtuForS4 needs a decimal path MTU, got '${PATH_MTU}'." >&2
 		return 1
 	fi
 	MTU=$((10#${PATH_MTU} - AWG_QUICK_MTU_OVERHEAD - 10#${S4}))
-	(( MTU >= AWG_MIN_MTU )) || MTU=${AWG_MIN_MTU}
+	if (( MTU < AWG_MIN_MTU )); then
+		echo "ERROR: outer budget ${PATH_MTU} minus 80 bytes of framing and S4=${S4} leaves effective MTU ${MTU}, below 1280. Reduce S4 or supply a supported path budget; rounding up cannot make the packet fit." >&2
+		return 1
+	fi
 	printf '%s' "${MTU}"
+}
+
+# Separate admission from syntax parsing: old params must stay readable for
+# status, removal, recovery and upgrades. The confirmed automatic WireSock
+# path deducts S4 from the pre-S4 baseline. Explicit client MTU interpretation
+# is not inferred here; preserve its existing export pending client evidence.
+function validateAutomaticClientMtu() {
+	[[ -z "${CLIENT_MTU:-}" ]] || return 0
+	recommendedMtuForS4 "${SERVER_AWG_S4:-0}" >/dev/null
+}
+
+function validateFreshInstallMtu() {
+	validateClientMtu && validateAutomaticClientMtu || return 1
+	recommendedMtuForS4 "${SERVER_AWG_S4}" "$(uplinkMtu "${SERVER_PUB_NIC:-}")" >/dev/null
+}
+
+function warnIfAutomaticClientMtuUnsafe() {
+	if ! validateAutomaticClientMtu 2>/dev/null; then
+		echo "WARNING: existing automatic client MTU cannot accommodate a 1280-byte IP packet under the assumed 1500-byte outer budget (1420 before S4). Existing settings were preserved. Coordinate S4 and effective MTU with every client before regenerating profiles; do not deduct S4 twice from an explicit MTU." >&2
+	fi
+	if [[ "${AWG_RANDOM_TRAILERS:-}" == on ]]; then
+		echo "NOTE: RandomTrailers uses a learned packet-size window. Changing MTU does not reset it; coordinate fresh tunnel state on server and clients. The configured budget does not verify remote PMTU." >&2
+	fi
+	return 0
 }
 
 # Preserve explicit default-route MTUs before falling back to the NIC MTU.
@@ -3161,6 +3189,7 @@ function validateClientMtu() {
 # Append to the DNS line so an unset MTU leaves the generated file unchanged.
 function renderClientMtu() {
 	validateClientMtu || return 1
+	validateAutomaticClientMtu || return 1
 	if [[ -n "${CLIENT_MTU:-}" ]]; then
 		printf '\nMTU = %s' "${CLIENT_MTU}"
 	fi
@@ -7884,7 +7913,8 @@ function installBoringtunHost() {
 		echo -e "${RED}Nothing was installed.${NC}" >&2
 		exit 1
 	fi
-	installQuestions
+	installQuestions || return 1
+	validateFreshInstallMtu || return 1
 
 	enable_apt_ipv4
 	installBoringtunHostPackages
@@ -7905,7 +7935,7 @@ function installBoringtunHost() {
 		exit 1
 	fi
 
-	writeAwgServerInstallState
+	writeAwgServerInstallState || return 1
 
 	if ! _awgBtInstallServiceFiles "${SERVER_AWG_NIC}"; then
 		echo -e "${RED}ERROR: could not write the BoringTun service files for awg-quick@${SERVER_AWG_NIC}.${NC}" >&2
@@ -8242,8 +8272,8 @@ function readS1AndS2() {
 	done
 }
 
-# S4 pads every transport packet, so behind an endpoint that may be IPv6 it
-# stays at or below 140 (s4MaxForEndpoint); S3 pads only cookie replies.
+# S4 pads every transport packet and stays at or below 140 for the automatic
+# client's conservative baseline; S3 pads only cookie replies.
 function generateS3AndS4() {
 	RANDOM_AWG_S3=$(shuf -i15-150 -n1)
 	RANDOM_AWG_S4=$(shuf -i15-"$(s4MaxForEndpoint "${SERVER_PUB_IP:-}")" -n1)
@@ -8261,8 +8291,8 @@ function readS3AndS4() {
 	done
 	until [[ ${SERVER_AWG_S4} =~ ^0*[0-9]{1,3}$ ]] && (( 10#${SERVER_AWG_S4} >= 15 )) && (( 10#${SERVER_AWG_S4} <= S4_MAX )); do
 		read -rp "Server AmneziaWG S4 [15-${S4_MAX}]: " -e -i "${RANDOM_AWG_S4}" SERVER_AWG_S4
-		if [[ ${SERVER_AWG_S4} =~ ^0*[0-9]{1,3}$ ]] && (( 10#${SERVER_AWG_S4} > S4_MAX && 10#${SERVER_AWG_S4} <= AWG_S4_MAX )); then
-			echo "S4 stays at or below ${S4_MAX} behind an IPv6 endpoint or a hostname: even at the 1280 minimum MTU, a larger S4 pushes full-size transport packets past 1500 bytes on the wire."
+		if [[ ${SERVER_AWG_S4} =~ ^0*[0-9]{1,3}$ ]] && (( 10#${SERVER_AWG_S4} > S4_MAX && 10#${SERVER_AWG_S4} <= 150 )); then
+			echo "S4 stays at or below ${S4_MAX}: the automatic client's 1420-byte baseline minus S4 must leave at least 1280 bytes, including behind an IPv4 endpoint."
 		fi
 	done
 	SERVER_AWG_S3=$((10#${SERVER_AWG_S3}))
@@ -8734,7 +8764,7 @@ function askClientMtu() {
 	echo "The recommended client MTU for S4 = ${SERVER_AWG_S4} on a 1500-byte path is ${RECOMMENDED_MTU}; the server interface gets the same, derived from the MTU of its uplink."
 	while true; do
 		IFS= read -rp "Client MTU (1280-65535, empty for automatic): " -e -i "${CLIENT_MTU:-${RECOMMENDED_MTU}}" CLIENT_MTU || exit 1
-		validateClientMtu && break
+		if validateClientMtu && validateAutomaticClientMtu; then break; fi
 	done
 	if [[ -z "${CLIENT_MTU}" ]] && (( 10#${SERVER_AWG_S4} > S4_LIMIT )); then
 		echo -e "${ORANGE}WARNING: with S4 = ${SERVER_AWG_S4} and an automatic MTU, full-size transport packets exceed 1500 bytes on the wire and fragment: the automatic MTU tolerates S4 up to ${AWG_S4_AUTOMATIC_MTU_LIMIT_IPV4} behind an IPv4 endpoint and none behind an IPv6 endpoint or a hostname.${NC}"
@@ -9502,6 +9532,8 @@ ${AWG_PROTOCOL_FIELDS}"
 # keys, params, the server configuration with its firewall hooks, and the
 # forwarding sysctls.
 function writeAwgServerInstallState() {
+	# Refuse an impossible candidate before creating directories, keys or params.
+	validateFreshInstallMtu || return 1
 	# Ensure configuration directory exists
 	mkdir -p "${AMNEZIAWG_DIR}"
 	chmod 700 "${AMNEZIAWG_DIR}"
@@ -9568,7 +9600,8 @@ function installAmneziaWG() {
 	fi
 
 	# Run setup questions first
-	installQuestions
+	installQuestions || return 1
+	validateFreshInstallMtu || return 1
 
 	# A previous failed DKMS build can leave a half-configured package whose
 	# postinst runs again during prerequisite installs, before the module install.
@@ -9692,7 +9725,7 @@ function installAmneziaWG() {
 	fi
 	chmod 644 /etc/modules-load.d/amneziawg.conf
 
-	writeAwgServerInstallState
+	writeAwgServerInstallState || return 1
 
 	# Add a systemd drop-in override that:
 	#  - Ensures the amneziawg module is loaded before awg-quick starts (ExecStartPre)
@@ -11723,6 +11756,7 @@ function loadParams() {
 		echo -e "${RED}Failed to validate params file. Aborting parameter loading.${NC}" >&2
 		exit 1
 	fi
+	warnIfAutomaticClientMtuUnsafe
 	# The explicit AWG 2.0 recovery path must not mutate params or configs before
 	# the protocol transaction has captured its backups. Any legacy normalization
 	# can run on a later ordinary management invocation after the downgrade.

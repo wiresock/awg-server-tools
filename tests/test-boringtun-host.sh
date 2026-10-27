@@ -1084,7 +1084,7 @@ echo "=== Fresh install order and failure semantics ==="
 # made to fail. The kernel implementation logs KERNEL if anything reaches it.
 install_flow() {
 	local STEP
-	for STEP in checkBoringtunHostSupport installQuestions enable_apt_ipv4 disable_apt_ipv4 installBoringtunHostPackages \
+	for STEP in checkBoringtunHostSupport installQuestions validateFreshInstallMtu enable_apt_ipv4 disable_apt_ipv4 installBoringtunHostPackages \
 		installBoringtunRelease installBoringtunModprobeOverride _awgBtInstallHelpers boringtunHostPreflight \
 		writeAwgServerInstallState _awgBtInstallServiceFiles _awgBtCheckServedByBoringtun newClient; do
 		eval "${STEP}() { echo '${STEP}' \"\$*\" >>'${S}/flow'; [[ \"\${FAIL_STEP:-}\" != '${STEP}' ]]; }"
@@ -1110,6 +1110,7 @@ run install_flow
 assert_rc 0 "${RC}" "a fresh BoringTun install completes"
 assert_eq "checkBoringtunHostSupport
 installQuestions
+validateFreshInstallMtu
 enable_apt_ipv4
 installBoringtunHostPackages
 installBoringtunRelease
@@ -1131,13 +1132,18 @@ assert_eq "disable_apt_ipv4
 installBoringtunModprobeOverride
 _awgBtInstallHelpers" "$(flow | sed -n '/^disable_apt_ipv4$/,/^_awgBtInstallHelpers$/p')" \
 	"an accepted module block is written after the packages and before the helpers and preflight"
-for STEP in checkBoringtunHostSupport installBoringtunRelease installBoringtunModprobeOverride _awgBtInstallHelpers boringtunHostPreflight; do
+for STEP in checkBoringtunHostSupport installQuestions validateFreshInstallMtu installBoringtunRelease installBoringtunModprobeOverride _awgBtInstallHelpers boringtunHostPreflight; do
 	: >"${S}/flow"
 	WRITE_OVERRIDE=1 FAIL_STEP="${STEP}" run install_flow
 	assert_rc 1 "${RC}" "a failure of ${STEP} aborts the install"
 	assert_not_contains "writeAwgServerInstallState" "$(flow)" "  before any VPN state is written"
 	assert_not_contains "systemctl" "$(flow)" "  and before any service is touched"
 done
+: >"${S}/flow"
+FAIL_STEP=writeAwgServerInstallState run install_flow
+assert_rc 1 "${RC}" "a failure writing validated state aborts the install"
+assert_not_contains "_awgBtInstallServiceFiles" "$(flow)" "  before writing services"
+assert_not_contains "systemctl" "$(flow)" "  before starting or enabling services"
 : >"${S}/flow"
 FAIL_START=1 run install_flow
 assert_rc 1 "${RC}" "a service start failure fails the install"

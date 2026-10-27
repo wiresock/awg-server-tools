@@ -30,6 +30,7 @@ jobs:
       - name: Run unit tests
         run: |
           bash tests/test-functions.sh
+          bash tests/test-mtu-budget.sh
           bash tests/test-dkms-compat.sh
           bash tests/test-awg3.sh
           bash tests/test-backend.sh

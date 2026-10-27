@@ -503,15 +503,21 @@ rm -f "${SERIALIZE_TMP}"
 
 echo "=== recommendedMtuForS4 ==="
 # awg-quick's automatic MTU is the path MTU minus 80 (1420 on a 1500-byte
-# path) and ignores the S4 junk bytes, so they come off it too, down to the
-# 1280 IPv6 minimum.
-for MTU_CASE in 15:1405 20:1400 21:1399 100:1320 140:1280 141:1280 150:1280 0:1420 200:1280 0120:1300 08:1412 09:1411; do
+# path) and ignores the S4 junk bytes, so they come off it too. Impossible
+# budgets must fail rather than rounding a packet up past the path budget.
+for MTU_CASE in 15:1405 20:1400 21:1399 100:1320 140:1280 0:1420 0120:1300 08:1412 09:1411; do
 	assert_eq "${MTU_CASE#*:}" "$(recommendedMtuForS4 "${MTU_CASE%%:*}")" "recommended MTU for S4=${MTU_CASE%%:*}"
 done
 # An explicit path MTU, as the server interface passes its uplink's.
-for MTU_CASE in 15:1500:1405 15:1400:1305 100:1400:1280 120:1450:1280 15:9000:8905 15:1280:1280 0120:01500:1300; do
+for MTU_CASE in 15:1500:1405 15:1400:1305 60:1420:1280 90:1450:1280 15:9000:8905 0120:01500:1300; do
 	IFS=: read -r MTU_S4 MTU_PATH MTU_WANT <<<"${MTU_CASE}"
 	assert_eq "${MTU_WANT}" "$(recommendedMtuForS4 "${MTU_S4}" "${MTU_PATH}")" "recommended MTU for S4=${MTU_S4} on a ${MTU_PATH}-byte path"
+done
+for MTU_CASE in 141:1500 150:1500 200:1500 100:1400 120:1450 15:1280; do
+	IFS=: read -r MTU_S4 MTU_PATH <<<"${MTU_CASE}"
+	MTU_RC=0
+	MTU_BAD_OUT="$(recommendedMtuForS4 "${MTU_S4}" "${MTU_PATH}" 2>/dev/null)" || MTU_RC=$?
+	assert_eq '1|' "${MTU_RC}|${MTU_BAD_OUT}" "S4=${MTU_S4} on ${MTU_PATH} refuses an impossible budget without output"
 done
 for MTU_BAD_S4 in '' abc -5 1.5 ' 15' '15 ' 0x10; do
 	MTU_RC=0
@@ -543,7 +549,7 @@ echo "=== S4 limits by endpoint family ==="
 # keeps S4 at or below 140 there, so that even the 1280 minimum MTU fits.
 for S4_ENDPOINT in 198.51.100.1 10.66.66.1 '2001:db8::1' '[2001:db8::1]' vpn.example.com '' '198.51.100.1 ' 300.1.1.1; do
 	case "${S4_ENDPOINT}" in
-		198.51.100.1|10.66.66.1) S4_WANT="20|150";;
+		198.51.100.1|10.66.66.1) S4_WANT="20|140";;
 		*) S4_WANT="0|140";;
 	esac
 	assert_eq "${S4_WANT}" "$(s4LimitForAutomaticMtu "${S4_ENDPOINT}")|$(s4MaxForEndpoint "${S4_ENDPOINT}")" "S4 limits behind endpoint '${S4_ENDPOINT}'"
@@ -556,7 +562,7 @@ _s4_draw_range() ( # <SERVER_PUB_IP>
 	generateS3AndS4
 	printf '%s|%s' "${RANDOM_AWG_S3}" "${RANDOM_AWG_S4}"
 )
-assert_eq '-i15-150 -n1|-i15-150 -n1' "$(_s4_draw_range 198.51.100.1)" "S3 and S4 are drawn from 15-150 behind an IPv4 endpoint"
+assert_eq '-i15-150 -n1|-i15-140 -n1' "$(_s4_draw_range 198.51.100.1)" "IPv4 endpoints also retain the automatic client's 1280 minimum"
 assert_eq '-i15-150 -n1|-i15-140 -n1' "$(_s4_draw_range 2001:db8::1)" "S4 is drawn from 15-140 behind an IPv6 endpoint"
 assert_eq '-i15-150 -n1|-i15-140 -n1' "$(_s4_draw_range vpn.example.com)" "S4 is drawn from 15-140 behind a hostname"
 _read_s3s4() ( # <SERVER_PUB_IP> <answers>
@@ -566,9 +572,9 @@ _read_s3s4() ( # <SERVER_PUB_IP> <answers>
 	# A rejected final answer must fail the fixture instead of looping at EOF.
 	read() { builtin read "$@" || exit 1; }
 	readS3AndS4 >"${dir}/stdout" 2>/dev/null <<<"$2" || exit 1
-	printf '%s|%s|%s' "${SERVER_AWG_S3}" "${SERVER_AWG_S4}" "$(grep -c '^S4 stays at or below 140 behind an IPv6 endpoint or a hostname' "${dir}/stdout" || true)"
+	printf '%s|%s|%s' "${SERVER_AWG_S3}" "${SERVER_AWG_S4}" "$(grep -c '^S4 stays at or below 140: the automatic client' "${dir}/stdout" || true)"
 )
-assert_eq '45|150|0' "$(_read_s3s4 198.51.100.1 $'45\n150')" "S4 150 is accepted behind an IPv4 endpoint"
+assert_eq '45|140|1' "$(_read_s3s4 198.51.100.1 $'45\n150\n140')" "S4 150 is refused behind an IPv4 endpoint"
 assert_eq '45|140|1' "$(_read_s3s4 2001:db8::1 $'45\n150\n140')" "S4 150 is refused with the reason behind an IPv6 endpoint and 140 accepted"
 assert_eq '45|140|1' "$(_read_s3s4 2001:db8::1 $'45\n141\n140')" "S4 141 is refused behind an IPv6 endpoint"
 assert_eq '45|140|1' "$(_read_s3s4 vpn.example.com $'45\n150\n140')" "S4 150 is refused behind a hostname"
@@ -578,7 +584,7 @@ assert_eq '45|120|0' "$(_read_s3s4 2001:db8::1 $'045\n0120')" "zero-prefixed S3 
 assert_eq '45|19|0' "$(_read_s3s4 2001:db8::1 $'45\n019')" "S4 containing 9 is accepted without octal arithmetic"
 assert_eq '45|140|1' "$(_read_s3s4 2001:db8::1 $'45\n0141\n140')" "zero-prefixed S4 cannot bypass the IPv6 maximum"
 assert_eq '45|140|1' "$(_read_s3s4 vpn.example.com $'45\n0150\n140')" "zero-prefixed S4 cannot bypass the hostname maximum"
-assert_eq '45|150|0' "$(_read_s3s4 198.51.100.1 $'45\n0151\n150')" "zero-prefixed S4 cannot bypass the protocol maximum"
+assert_eq '45|140|0' "$(_read_s3s4 198.51.100.1 $'45\n0151\n140')" "zero-prefixed S4 cannot bypass the protocol maximum"
 assert_eq '45|120|0' "$(_read_s3s4 198.51.100.1 $'45\n18446744073709551736\n120')" "overflowing S4 cannot wrap into the accepted range"
 assert_eq 1 "$(SERVER_PUB_IP=198.51.100.1; SERVER_AWG_S4=021; CLIENT_MTU=''; askClientMtu <<<'' | grep -c 'WARNING: with S4')" "automatic client MTU warns for decimal S4 021 above the IPv4 limit"
 
@@ -612,9 +618,14 @@ H1 = 5-10
 H2 = 11-20
 H3 = 21-30
 H4 = 31-40" "$(_render_server_interface 120 y)" "the server interface carries the S4-aware MTU"
-assert_eq "MTU = 1280" "$(_render_server_interface 150 n | grep '^MTU')" "the server MTU never goes below 1280"
+_refused_server_interface() (
+	local rc=0 out
+	out="$(_render_server_interface "$@" 2>/dev/null)" || rc=$?
+	printf '%s|%s' "${rc}" "${out}"
+)
+assert_eq '1|' "$(_refused_server_interface 150 n)" "an impossible server budget fails before rendering any configuration"
 assert_eq "MTU = 1305" "$(_render_server_interface 15 y 1400 | grep '^MTU')" "the server MTU starts from a smaller uplink MTU"
-assert_eq "MTU = 1280" "$(_render_server_interface 120 y 1400 | grep '^MTU')" "a small uplink with a large S4 stops at 1280"
+assert_eq '1|' "$(_refused_server_interface 120 y 1400)" "a small uplink with a large S4 cannot be rounded up"
 assert_eq "MTU = 1385" "$(_render_server_interface 15 y 1480 | grep '^MTU')" "the server MTU follows the uplink MTU exactly"
 assert_eq "MTU = 1300" "$(_render_server_interface 0120 y | grep '^MTU')" "the server MTU subtracts decimal S4 even with leading zeros"
 _render_server_with_routes() ( # <IPv4 default routes> <IPv6 default routes>
@@ -634,10 +645,12 @@ assert_eq 'MTU = 1305' "$(_render_server_with_routes 'default via 192.0.2.254 de
 assert_eq 'MTU = 1305' "$(_render_server_with_routes '' 'default via fe80::1 dev lo proto ra metric 1024 mtu 1400 pref medium')" "IPv6 route MTU takes precedence over the larger NIC MTU"
 assert_eq 'MTU = 1305' "$(_render_server_with_routes 'default via 192.0.2.254 dev lo mtu 1500' 'default via fe80::1 dev lo mtu lock 1400')" "dual-stack uplink uses its smaller route MTU, including locked MTUs"
 assert_eq 'MTU = 1305' "$(_render_server_with_routes $'default via 192.0.2.1 dev lo mtu 1450\ndefault via 192.0.2.2 dev lo mtu 1400' '')" "multiple default routes keep the smallest explicit MTU"
-assert_eq 'MTU = 1280' "$(_render_server_with_routes 'default via 192.0.2.254 dev lo mtu 1200' '')" "a route below the tunnel minimum retains the existing 1280 clamp"
+MTU_RC=0
+MTU_RENDER_OUT="$(_render_server_with_routes 'default via 192.0.2.254 dev lo mtu 1200' '' 2>/dev/null)" || MTU_RC=$?
+assert_eq '1|' "${MTU_RC}|${MTU_RENDER_OUT}" "a route below the tunnel minimum fails without rendering"
 assert_eq "MTU = $(($(cat /sys/class/net/lo/mtu) - 95))" "$(_render_server_with_routes 'default via 192.0.2.254 dev lo' '')" "a default route without an MTU falls back to the NIC"
 assert_eq "MTU = $(($(cat /sys/class/net/lo/mtu) - 95))" "$(_render_server_with_routes 'default via 192.0.2.254 dev lo mtu invalid' 'default via fe80::1 dev lo mtu 0')" "unusable route MTUs fall back to the NIC"
-assert_eq "Address = 10.66.66.1/24" "$(_render_server_interface 150 n | grep '^Address')" "an IPv4-only server keeps its IPv4-only address"
+assert_eq "Address = 10.66.66.1/24" "$(_render_server_interface 140 n | grep '^Address')" "an IPv4-only server keeps its IPv4-only address"
 MTU_RC=0
 MTU_RENDER_OUT="$(_render_server_interface '' y 2>/dev/null)" || MTU_RC=$?
 assert_eq "1|" "${MTU_RC}|${MTU_RENDER_OUT}" "an unusable S4 fails the server render without output"
@@ -898,7 +911,7 @@ assert_eq '1380|0|0|0|120' "$(_check_install_mtu y 1380)" "automatic install per
 assert_eq '|0|0|0|120' "$(_check_install_mtu y '')" "automatic install keeps an explicitly empty MTU automatic"
 assert_eq '1300|0|0|0|120' "$(_check_install_mtu unset '')" "automatic install defaults the MTU to 1420 minus S4"
 assert_eq '1400|0|0|0|20' "$(_check_install_mtu unset '' 20)" "automatic install default follows S4"
-assert_eq '1280|0|0|0|150' "$(_check_install_mtu unset '' 150)" "automatic install default stays at the 1280 floor"
+assert_eq '1280|0|0|0|140' "$(_check_install_mtu unset '' 140)" "automatic install reaches 1280 only when it fits"
 assert_eq '1380|0|0|1|120' "$(_check_install_mtu n 1380)" "interactive install accepts valid MTU on first attempt"
 assert_eq '1300|0|0|1|120' "$(_check_install_mtu n 1300)" "interactive install accepts the recommended MTU without warning"
 assert_eq '|0|1|1|120' "$(_check_install_mtu n '')" "interactive install accepts omitted MTU and warns for S4 above 20"
