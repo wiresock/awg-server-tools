@@ -147,8 +147,8 @@ if declare -F patchAwgDkmsUdpTunnelCompat >/dev/null; then
 		selectFreshInstallImitation() { :; }
 		# Supply the candidate state that the real questions produce. Keep the
 		# actual MTU admission guard active before reaching package recovery.
+		# shellcheck disable=SC2034 # all three values feed sourced validateFreshInstallMtu
 		installQuestions() {
-			# shellcheck disable=SC2034 # consumed by sourced validateFreshInstallMtu
 			SERVER_AWG_S4="${TEST_S4}"; CLIENT_MTU=''; SERVER_PUB_NIC=mock0
 		}
 		uplinkMtu() { printf '%s' 1500; }
