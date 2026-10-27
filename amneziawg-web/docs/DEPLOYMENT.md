@@ -37,6 +37,7 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin awg-web
 # Database directory
 sudo mkdir -p /var/lib/amneziawg-web
 sudo chown awg-web:awg-web /var/lib/amneziawg-web
+sudo chmod 0700 /var/lib/amneziawg-web
 
 # Config directory for environment variables (keep secrets here)
 sudo mkdir -p /etc/amneziawg-web

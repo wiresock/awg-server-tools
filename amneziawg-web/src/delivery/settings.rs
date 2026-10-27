@@ -539,8 +539,52 @@ mod tests {
             );
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(verify_private_database(&db.pool).is_err());
+        for mode in [0o750, 0o755] {
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(verify_private_database(&db.pool).is_err());
+        }
+    }
+
+    #[test]
+    fn panel_private_deployment_umask_creates_save_ready_database_and_sidecars() {
+        // Set a process-wide umask only in a separate child; parallel tests
+        // must not change one another's file creation policy.
+        const CHILD: &str = "AWG_TEST_PRIVATE_STORAGE_UMASK";
+        if std::env::var_os(CHILD).is_none() {
+            use std::os::unix::process::CommandExt;
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "delivery::settings::tests::panel_private_deployment_umask_creates_save_ready_database_and_sidecars",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1");
+            unsafe {
+                child.pre_exec(|| {
+                    libc::umask(0o077);
+                    Ok(())
+                });
+            }
+            assert!(child.status().unwrap().success());
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("panel.sqlite3");
+            let db = Database::connect(path.to_str().unwrap()).await.unwrap();
+            db.migrate().await.unwrap();
+            // No chmod normalization: exercise SQLx creation as deployed.
+            verify_private_database(&db.pool).unwrap();
+            assert!(dir.path().join("panel.sqlite3-wal").is_file());
+            assert!(dir.path().join("panel.sqlite3-shm").is_file());
+            save(&db, 0, &env()).await.unwrap();
+            db.pool.close().await;
+            let reopened = Database::connect(path.to_str().unwrap()).await.unwrap();
+            let stored = load_saved(&reopened.pool, true).await.unwrap().unwrap();
+            assert_eq!(stored.revision, 1);
+            assert_eq!(stored.settings.password, "old-secret-canary");
+        });
     }
     #[tokio::test]
     async fn panel_private_storage_rejects_symlink_and_hardlinked_database() {

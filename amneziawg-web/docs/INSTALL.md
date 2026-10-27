@@ -115,6 +115,7 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin awg-web
 # Database directory (writable by service user)
 sudo mkdir -p /var/lib/amneziawg-web
 sudo chown awg-web:awg-web /var/lib/amneziawg-web
+sudo chmod 0700 /var/lib/amneziawg-web
 
 # Config directory for the environment file (root-owned, mode 700)
 sudo mkdir -p /etc/amneziawg-web
@@ -508,7 +509,7 @@ sudo ./amneziawg-web.sh install \
 
 1. **Preflight checks** – verifies root, systemd, AWG binary, and application binary (or source)
 2. **Build** – *(source mode only)* verifies Rust toolchain and runs `cargo build --release`
-3. **User + directories** – creates `awg-web` system user, data dir (`0750`), env dir (`0700`)
+3. **User + directories** – creates `awg-web` system user, data dir (`0700`), env dir (`0700`)
 4. **Binary install** – copies binary to `--install-dir`
 5. **Privileged helper** – installs `/usr/local/libexec/amneziawg-web-privileged` as `0755 root:root`
 6. **Sudoers** – installs `/etc/sudoers.d/amneziawg-web` (`0440 root:root`) granting `awg-web` passwordless sudo for only the exact helper path
