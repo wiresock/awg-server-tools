@@ -111,6 +111,7 @@ struct ProtocolFailure {
 struct PageNotice<'a> {
     message: Option<&'a str>,
     protocol_failure: Option<&'a ProtocolFailure>,
+    mtu_warning: Option<&'a str>,
 }
 
 #[derive(Clone)]
@@ -392,6 +393,8 @@ fn create_user_diagnostic_message(
         CreateClientError::IpInUse(ip) => {
             format!("Failed to create user: IP address already in use: {ip}")
         }
+        CreateClientError::UnsafeTransportBudget { .. }
+        | CreateClientError::ExcessiveTransportBudget { .. } => error.to_string(),
         // The following variants may contain raw stderr/paths from sudo
         // commands or OS errors; use fixed messages and log details server-side.
         CreateClientError::ParamsRead(_) => {
@@ -2691,6 +2694,7 @@ async fn page_peer_list(
                 .and_then(imitation_notice_message)
         });
     let monitoring_only = monitoring_only_notice(&state).await;
+    let mtu_warning = current_mtu_budget_warning().await;
     let protocol_failure = if query.protocol_notice.as_deref() == Some(PROTOCOL_NOTICE_FAILED) {
         state.protocol_failure.read().await.clone()
     } else {
@@ -2704,6 +2708,7 @@ async fn page_peer_list(
         PageNotice {
             message: notice,
             protocol_failure: protocol_failure.as_ref(),
+            mtu_warning: mtu_warning.as_deref(),
         },
         show_archived,
         monitoring_only.as_deref(),
@@ -3532,6 +3537,10 @@ async fn api_create_user(
             )
                 .into_response())
         }
+        Err(e @ (crate::admin::client_manager::CreateClientError::UnsafeTransportBudget { .. }
+            | crate::admin::client_manager::CreateClientError::ExcessiveTransportBudget { .. })) => {
+            Ok((StatusCode::CONFLICT, Json(json!({ "error": create_user_diagnostic_message(&e) }))).into_response())
+        }
         Err(e) => {
             tracing::error!(error = %e, "failed to create user");
             Ok((
@@ -4079,6 +4088,17 @@ async fn monitoring_only_notice(state: &AppState) -> Option<String> {
         Ok(mode) => mode.management_unavailable(),
         Err(e) => Some(format!("cannot determine the managed AWG interface: {e}")),
     }
+}
+
+async fn current_mtu_budget_warning() -> Option<String> {
+    tokio::task::spawn_blocking(|| {
+        let content = crate::awg::read_params_via_sudo().ok()?;
+        let params = crate::admin::client_manager::parse_params(&content).ok()?;
+        crate::admin::client_manager::mtu_budget_warning(&params)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 fn management_unavailable_json(reason: &str) -> Response {
@@ -4987,6 +5007,12 @@ fn render_peer_list_inner(
         count = peers.len(),
     ));
     buf.push_str(&render_system_status(system_status, online));
+    if let Some(warning) = notice.mtu_warning {
+        buf.push_str(&format!(
+            "<p class=\"creation-warning mtu-warning\" role=\"status\">{}</p>\n",
+            esc(warning)
+        ));
+    }
     if let Some(message) = notice.message {
         buf.push_str(&format!(
             "<p class=\"creation-warning\" role=\"status\">{}</p>\n",
@@ -9897,6 +9923,42 @@ mod tests {
         assert!(html.contains("name=\"confirm\" value=\"yes\" required"));
         assert!(html.contains("No proxy is required"));
         assert_eq!(imitation_notice_message("<script>"), None);
+    }
+
+    #[test]
+    fn mtu_warning_is_escaped_and_does_not_disable_legacy_management() {
+        let now = Utc::now();
+        let status = SystemStatusDto {
+            system_time: now,
+            system_booted_at: None,
+            system_uptime_seconds: None,
+            server_time: now,
+            server_booted_at: None,
+            server_uptime_seconds: None,
+            statistics_note: String::new(),
+        };
+        let warning = "Existing MTU 1272 < 1280; coordinate every device";
+        let html = render_peer_list_inner(
+            &[],
+            "test-csrf",
+            &status,
+            None,
+            PageNotice {
+                mtu_warning: Some(warning),
+                ..PageNotice::default()
+            },
+            None,
+            false,
+            None,
+            "",
+            false,
+        );
+        assert!(html.contains("mtu-warning"));
+        assert!(html.contains("1272 &lt; 1280"));
+        assert!(!html.contains("Monitoring-only mode"));
+        assert!(html.contains("/admin/protocol/disable-awg3"));
+        assert!(html.contains("/api/peers"));
+        assert!(html.contains("test-csrf"));
     }
 
     #[test]

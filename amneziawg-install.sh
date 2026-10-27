@@ -3058,8 +3058,8 @@ function removeFromWebPanelDir() {
 # small handshake and cookie packets). awg-quick's automatic MTU, the uplink
 # MTU minus 80 bytes of IPv6, UDP and WireGuard overhead, does not allow for
 # them, so full-size transport packets exceed the path MTU and fragment. The
-# recommended MTU takes S4 off as well and never goes below 1280, the IPv6
-# minimum. Client configs assume a 1500-byte path, 1420 minus S4; the server
+# recommended MTU takes S4 off as well and refuses a budget below 1280, the
+# IPv6 minimum. Client configs assume a 1500-byte path, 1420 minus S4; the server
 # interface starts from the MTU of its uplink instead.
 AWG_DEFAULT_PATH_MTU=1500
 AWG_QUICK_MTU_OVERHEAD=80
@@ -3070,25 +3070,85 @@ AWG_MIN_MTU=1280
 # endpoint it is 80, which leaves nothing.
 AWG_S4_AUTOMATIC_MTU_LIMIT_IPV4=20
 AWG_S4_AUTOMATIC_MTU_LIMIT_IPV6=0
-# The largest S4 a fresh install draws or accepts: 150, the protocol range,
-# behind an IPv4 endpoint; 140 behind one that may be IPv6, where even the
-# 1280 minimum MTU plus 80 bytes of overhead and S4 must fit a 1500-byte path.
-AWG_S4_MAX=150
+# Keep at least1280 from the1420 pre-S4 baseline. Generated values leave
+# additional headroom; an operator may explicitly select the hard boundary.
+# The protocol's syntax limit remains 150 for loading existing configurations.
+AWG_S4_MAX=140
 AWG_S4_MAX_IPV6=140
+AWG_S4_GENERATED_MAX=128
 
 function recommendedMtuForS4() { # <S4> [path MTU, default 1500]
 	local S4="${1:-}" PATH_MTU="${2:-${AWG_DEFAULT_PATH_MTU}}" MTU
-	if ! [[ "${S4}" =~ ^[0-9]+$ ]]; then
+	if ! [[ "${S4}" =~ ^0*[0-9]{1,5}$ ]] || (( 10#${S4} > 65535 )); then
 		echo "ERROR: recommendedMtuForS4 needs a decimal S4, got '${S4}'." >&2
 		return 1
 	fi
-	if ! [[ "${PATH_MTU}" =~ ^[0-9]+$ ]]; then
+	# Linux loopback has MTU 65536; subtracting framing still fits an IP packet.
+	if ! [[ "${PATH_MTU}" =~ ^0*[0-9]{1,5}$ ]] || (( 10#${PATH_MTU} > 65536 )); then
 		echo "ERROR: recommendedMtuForS4 needs a decimal path MTU, got '${PATH_MTU}'." >&2
 		return 1
 	fi
 	MTU=$((10#${PATH_MTU} - AWG_QUICK_MTU_OVERHEAD - 10#${S4}))
-	(( MTU >= AWG_MIN_MTU )) || MTU=${AWG_MIN_MTU}
+	if (( MTU < AWG_MIN_MTU )); then
+		echo "ERROR: outer budget ${PATH_MTU} minus 80 bytes of framing and S4=${S4} leaves effective MTU ${MTU}, below 1280. Reduce S4 or supply a supported path budget; rounding up cannot make the packet fit." >&2
+		return 1
+	fi
 	printf '%s' "${MTU}"
+}
+
+# Separate admission from syntax parsing: old params must stay readable for
+# status, removal, recovery and upgrades. Generic exports contain final inner
+# MTUs, as Linux awg-quick expects. Older WireSock explicit MTUs are pre-S4
+# baselines; warn about compatibility rather than deducting S4 here twice.
+function validateClientTransportBudget() { # [assumed outer budget, default1500]
+	validateClientMtu || return 1
+	local S4="${SERVER_AWG_S4:-0}" PATH_MTU="${1:-${AWG_DEFAULT_PATH_MTU}}" MAX_MTU
+	if ! [[ "${S4}" =~ ^0*[0-9]{1,5}$ ]] || (( 10#${S4} > 65535 )); then
+		echo "ERROR: S4 must be a decimal integer from 0 to 65535." >&2
+		return 1
+	fi
+	S4=$((10#${S4}))
+	MAX_MTU="$(recommendedMtuForS4 "${S4}" "${PATH_MTU}")" || return 1
+	if (( S4 > AWG_S4_MAX )); then
+		echo "ERROR: S4=${S4} exceeds the hard limit ${AWG_S4_MAX}; lower S4 before creating profiles. Existing settings were not changed." >&2
+		return 1
+	fi
+	if [[ -n "${CLIENT_MTU:-}" ]]; then
+		if (( CLIENT_MTU > MAX_MTU )); then
+			echo "ERROR: generic client MTU ${CLIENT_MTU} exceeds ${MAX_MTU}: final inner MTU + S4 + 80 would exceed the assumed ${PATH_MTU}-byte outer budget. WireSock's pre-S4 value must not be used in a generic/Linux profile." >&2
+			return 1
+		fi
+	fi
+}
+
+function validateFreshInstallMtu() {
+	validateClientTransportBudget "$(freshOuterMtuBudget)"
+}
+
+# Omission is valid for padding-aware clients. Linux awg-quick does not deduct
+# S4, so report its separate compatibility constraint without rejecting all clients.
+function warnIfLinuxAutomaticMtu() { # [assumed outer budget]
+	local LIMIT
+	[[ -z "${CLIENT_MTU:-}" ]] || return 0
+	LIMIT="$(s4LimitForAutomaticMtu "${SERVER_PUB_IP:-}" "${1:-${AWG_DEFAULT_PATH_MTU}}")"
+	if (( 10#${SERVER_AWG_S4:-0} > LIMIT )); then
+		echo "WARNING: with S4 = ${SERVER_AWG_S4} and an automatic MTU, Linux awg-quick does not reserve transport padding. Use an explicit final inner MTU on those clients; padding-aware automatic clients such as WireSock account for S4. Automatic MTU is client-derived and may exceed a smaller server/path budget. Remote PMTU is unverified."
+	fi
+}
+
+function warnIfClientMtuUnsafe() { # [assumed outer budget]
+	local DIAGNOSTIC
+	if ! DIAGNOSTIC="$(validateClientTransportBudget "${1:-${AWG_DEFAULT_PATH_MTU}}" 2>&1)"; then
+		echo "WARNING: existing client MTU budget needs attention. ${DIAGNOSTIC} Existing settings were preserved. Coordinate S4 and MTU with every client before regenerating profiles." >&2
+	elif [[ -n "${CLIENT_MTU:-}" && "${SERVER_AWG_S4:-0}" =~ ^0*[0-9]{1,5}$ ]] && (( CLIENT_MTU - 10#${SERVER_AWG_S4:-0} < AWG_MIN_MTU )); then
+		echo "WARNING: generic CLIENT_MTU=${CLIENT_MTU} is a final inner MTU. Older WireSock clients subtract S4 from explicit MTU again and may leave less than 1280. A client-side semantics change is only proposed, not released by this update. Verify the client version and coordinate migration; do not inflate generic/Linux profiles. Existing settings were preserved." >&2
+	else
+		warnIfLinuxAutomaticMtu "${1:-${AWG_DEFAULT_PATH_MTU}}" >&2
+	fi
+	if [[ "${AWG_RANDOM_TRAILERS:-}" == on ]]; then
+		echo "NOTE: RandomTrailers uses a learned packet-size window. Changing MTU does not reset it; coordinate fresh tunnel state on server and clients. The configured budget does not verify remote PMTU." >&2
+	fi
+	return 0
 }
 
 # Preserve explicit default-route MTUs before falling back to the NIC MTU.
@@ -3115,7 +3175,7 @@ function uplinkMtu() { # <nic>
 			read -r MTU <"/sys/class/net/${NIC}/mtu" || true
 		fi
 	fi
-	if [[ "${MTU}" =~ ^[0-9]+$ ]] && (( MTU >= AWG_MIN_MTU )); then
+	if [[ "${MTU}" =~ ^[0-9]+$ ]] && (( MTU > 0 && MTU <= 65536 )); then
 		printf '%s' "${MTU}"
 	else
 		printf '%s' "${AWG_DEFAULT_PATH_MTU}"
@@ -3129,12 +3189,13 @@ function endpointIsIPv4() { # <SERVER_PUB_IP>
 	[[ "${1:-}" =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]
 }
 
-# The largest S4 that an automatic client MTU tolerates behind the endpoint.
-function s4LimitForAutomaticMtu() { # <SERVER_PUB_IP>
+# The largest S4 that Linux awg-quick's automatic MTU leaves room for.
+function s4LimitForAutomaticMtu() { # <SERVER_PUB_IP> [assumed outer budget]
+	local REDUCTION=$((AWG_DEFAULT_PATH_MTU - ${2:-${AWG_DEFAULT_PATH_MTU}}))
 	if endpointIsIPv4 "${1:-}"; then
-		printf '%s' "${AWG_S4_AUTOMATIC_MTU_LIMIT_IPV4}"
+		printf '%s' "$((AWG_S4_AUTOMATIC_MTU_LIMIT_IPV4 - REDUCTION))"
 	else
-		printf '%s' "${AWG_S4_AUTOMATIC_MTU_LIMIT_IPV6}"
+		printf '%s' "$((AWG_S4_AUTOMATIC_MTU_LIMIT_IPV6 - REDUCTION))"
 	fi
 }
 
@@ -3145,6 +3206,34 @@ function s4MaxForEndpoint() { # <SERVER_PUB_IP>
 	else
 		printf '%s' "${AWG_S4_MAX_IPV6}"
 	fi
+}
+
+# A known smaller uplink limits fresh configurations; a jumbo link does not
+# establish a jumbo Internet path. This is a budget assumption, not PMTU probing.
+function freshOuterMtuBudget() {
+	local MTU
+	MTU="$(uplinkMtu "${SERVER_PUB_NIC:-}")"
+	if (( MTU > AWG_DEFAULT_PATH_MTU )); then MTU="${AWG_DEFAULT_PATH_MTU}"; fi
+	printf '%s' "${MTU}"
+}
+
+# Bound every draw before choosing S4, including caller-supplied final-inner
+# MTU. Manual selection can use140; the random default stops at128.
+function s4LimitForFreshInstall() { # [maximum, default generated128] [ignore-client]
+	validateClientMtu || return 1
+	local LIMIT="${1:-${AWG_S4_GENERATED_MAX}}" PATH_MTU BOUND
+	PATH_MTU="$(freshOuterMtuBudget)"
+	BOUND=$((PATH_MTU - AWG_QUICK_MTU_OVERHEAD - AWG_MIN_MTU))
+	if (( BOUND < LIMIT )); then LIMIT="${BOUND}"; fi
+	if [[ -n "${CLIENT_MTU:-}" && "${2:-}" != ignore-client ]]; then
+		BOUND=$((PATH_MTU - AWG_QUICK_MTU_OVERHEAD - CLIENT_MTU))
+		if (( BOUND < LIMIT )); then LIMIT="${BOUND}"; fi
+	fi
+	if (( LIMIT < 15 )); then
+		echo "ERROR: no fresh S4 range15-${LIMIT} fits this MTU/outer budget. Choose a final-inner client MTU that leaves room for S4; automatic generic MTU may not account for padding." >&2
+		return 1
+	fi
+	printf '%s' "${LIMIT}"
 }
 
 # Optional client MTU: use an IPv6-compatible minimum for both address families.
@@ -3161,6 +3250,7 @@ function validateClientMtu() {
 # Append to the DNS line so an unset MTU leaves the generated file unchanged.
 function renderClientMtu() {
 	validateClientMtu || return 1
+	validateClientTransportBudget || return 1
 	if [[ -n "${CLIENT_MTU:-}" ]]; then
 		printf '\nMTU = %s' "${CLIENT_MTU}"
 	fi
@@ -7884,7 +7974,8 @@ function installBoringtunHost() {
 		echo -e "${RED}Nothing was installed.${NC}" >&2
 		exit 1
 	fi
-	installQuestions
+	installQuestions || return 1
+	validateFreshInstallMtu || return 1
 
 	enable_apt_ipv4
 	installBoringtunHostPackages
@@ -7905,7 +7996,7 @@ function installBoringtunHost() {
 		exit 1
 	fi
 
-	writeAwgServerInstallState
+	writeAwgServerInstallState || return 1
 
 	if ! _awgBtInstallServiceFiles "${SERVER_AWG_NIC}"; then
 		echo -e "${RED}ERROR: could not write the BoringTun service files for awg-quick@${SERVER_AWG_NIC}.${NC}" >&2
@@ -8242,16 +8333,16 @@ function readS1AndS2() {
 	done
 }
 
-# S4 pads every transport packet, so behind an endpoint that may be IPv6 it
-# stays at or below 140 (s4MaxForEndpoint); S3 pads only cookie replies.
-function generateS3AndS4() {
+# S4 pads every transport packet. Keep generated values below the hard limit;
+# S3 pads only cookie replies and retains its independent range.
+function generateS3AndS4() { # [maximum S4, default128]
 	RANDOM_AWG_S3=$(shuf -i15-150 -n1)
-	RANDOM_AWG_S4=$(shuf -i15-"$(s4MaxForEndpoint "${SERVER_PUB_IP:-}")" -n1)
+	RANDOM_AWG_S4=$(shuf -i15-"${1:-${AWG_S4_GENERATED_MAX}}" -n1)
 }
 
-function readS3AndS4() {
+function readS3AndS4() { # [maximum S4, default140]
 	local S4_MAX
-	S4_MAX="$(s4MaxForEndpoint "${SERVER_PUB_IP:-}")"
+	S4_MAX="${1:-$(s4MaxForEndpoint "${SERVER_PUB_IP:-}")}"
 	SERVER_AWG_S3=0
 	SERVER_AWG_S4=0
 	# Bound the significant digits before arithmetic so oversized input cannot
@@ -8261,8 +8352,8 @@ function readS3AndS4() {
 	done
 	until [[ ${SERVER_AWG_S4} =~ ^0*[0-9]{1,3}$ ]] && (( 10#${SERVER_AWG_S4} >= 15 )) && (( 10#${SERVER_AWG_S4} <= S4_MAX )); do
 		read -rp "Server AmneziaWG S4 [15-${S4_MAX}]: " -e -i "${RANDOM_AWG_S4}" SERVER_AWG_S4
-		if [[ ${SERVER_AWG_S4} =~ ^0*[0-9]{1,3}$ ]] && (( 10#${SERVER_AWG_S4} > S4_MAX && 10#${SERVER_AWG_S4} <= AWG_S4_MAX )); then
-			echo "S4 stays at or below ${S4_MAX} behind an IPv6 endpoint or a hostname: even at the 1280 minimum MTU, a larger S4 pushes full-size transport packets past 1500 bytes on the wire."
+		if [[ ${SERVER_AWG_S4} =~ ^0*[0-9]{1,3}$ ]] && (( 10#${SERVER_AWG_S4} > S4_MAX && 10#${SERVER_AWG_S4} <= 150 )); then
+			echo "S4 stays at or below ${S4_MAX} for this budget; generated defaults stop at128. The pre-S4 baseline minus S4 must leave at least1280."
 		fi
 	done
 	SERVER_AWG_S3=$((10#${SERVER_AWG_S3}))
@@ -8725,21 +8816,19 @@ function askBoringtunImitation() {
 # full-size transport packets once S4 exceeds what the endpoint's overhead
 # leaves (s4LimitForAutomaticMtu), which the prompt then says.
 function askClientMtu() {
-	local RECOMMENDED_MTU S4_LIMIT
-	RECOMMENDED_MTU="$(recommendedMtuForS4 "${SERVER_AWG_S4}")" || exit 1
-	S4_LIMIT="$(s4LimitForAutomaticMtu "${SERVER_PUB_IP:-}")"
+	local RECOMMENDED_MTU PATH_MTU
+	PATH_MTU="$(freshOuterMtuBudget)"
+	RECOMMENDED_MTU="$(recommendedMtuForS4 "${SERVER_AWG_S4}" "${PATH_MTU}")" || exit 1
 	echo ""
 	echo -e "${GREEN}Client MTU:${NC}"
 	echo "AmneziaWG prepends S4 = ${SERVER_AWG_S4} junk bytes to every transport packet, which awg-quick's automatic MTU does not allow for."
-	echo "The recommended client MTU for S4 = ${SERVER_AWG_S4} on a 1500-byte path is ${RECOMMENDED_MTU}; the server interface gets the same, derived from the MTU of its uplink."
+	echo "The recommended generic client MTU for S4 = ${SERVER_AWG_S4} and an assumed ${PATH_MTU}-byte outer budget is ${RECOMMENDED_MTU}. This is a final inner MTU, as used by Linux awg-quick."
+	echo "Older WireSock clients subtract S4 from an explicit MTU again. Verify client compatibility before importing; the proposed client fix is not part of this update. Generic profiles must not be inflated."
 	while true; do
 		IFS= read -rp "Client MTU (1280-65535, empty for automatic): " -e -i "${CLIENT_MTU:-${RECOMMENDED_MTU}}" CLIENT_MTU || exit 1
-		validateClientMtu && break
+		if validateClientTransportBudget "${PATH_MTU}"; then break; fi
 	done
-	if [[ -z "${CLIENT_MTU}" ]] && (( 10#${SERVER_AWG_S4} > S4_LIMIT )); then
-		echo -e "${ORANGE}WARNING: with S4 = ${SERVER_AWG_S4} and an automatic MTU, full-size transport packets exceed 1500 bytes on the wire and fragment: the automatic MTU tolerates S4 up to ${AWG_S4_AUTOMATIC_MTU_LIMIT_IPV4} behind an IPv4 endpoint and none behind an IPv6 endpoint or a hostname.${NC}"
-		echo -e "${ORANGE}         Set MTU = ${RECOMMENDED_MTU} in the client configs if connections stall.${NC}"
-	fi
+	warnIfLinuxAutomaticMtu "${PATH_MTU}"
 }
 
 # Whether a fresh installation may take NAME as its interface. It may not when
@@ -8919,9 +9008,11 @@ function installQuestions() {
 		SERVER_AWG_S1=${RANDOM_AWG_S1}
 		SERVER_AWG_S2=${RANDOM_AWG_S2}
 
-		generateS3AndS4
+		local S4_GENERATED_LIMIT
+		S4_GENERATED_LIMIT="$(s4LimitForFreshInstall)" || exit 1
+		generateS3AndS4 "${S4_GENERATED_LIMIT}"
 		while (( RANDOM_AWG_S3 + 56 == RANDOM_AWG_S4 )) || (( RANDOM_AWG_S4 + 56 == RANDOM_AWG_S3 )); do
-			generateS3AndS4
+			generateS3AndS4 "${S4_GENERATED_LIMIT}"
 		done
 		SERVER_AWG_S3=${RANDOM_AWG_S3}
 		SERVER_AWG_S4=${RANDOM_AWG_S4}
@@ -8931,8 +9022,10 @@ function installQuestions() {
 		# which leaves the MTU line out of client configs for awg-quick's
 		# automatic MTU.
 		if [[ -z "${CLIENT_MTU+set}" ]]; then
-			CLIENT_MTU="$(recommendedMtuForS4 "${SERVER_AWG_S4}")" || exit 1
+			CLIENT_MTU="$(recommendedMtuForS4 "${SERVER_AWG_S4}" "$(freshOuterMtuBudget)")" || exit 1
 		fi
+		validateFreshInstallMtu || exit 1
+		warnIfClientMtuUnsafe "$(freshOuterMtuBudget)"
 
 		generateH1AndH2AndH3AndH4Ranges
 		SERVER_AWG_H1="${RANDOM_AWG_H1_MIN}-${RANDOM_AWG_H1_MAX}"
@@ -9092,14 +9185,18 @@ function installQuestions() {
 	# S3 && S4 (AmneziaWG 2.0)
 	# Note: Same constraint as S1/S2 - the 56-byte offset must be avoided in both directions
 	echo -e "\n${GREEN}AmneziaWG 2.0 Features:${NC}"
-	generateS3AndS4
+	local S4_MANUAL_LIMIT S4_GENERATED_LIMIT
+	S4_MANUAL_LIMIT="$(s4LimitForFreshInstall "${AWG_S4_MAX}" ignore-client)" || exit 1
+	S4_GENERATED_LIMIT="${AWG_S4_GENERATED_MAX}"
+	if (( S4_MANUAL_LIMIT < S4_GENERATED_LIMIT )); then S4_GENERATED_LIMIT="${S4_MANUAL_LIMIT}"; fi
+	generateS3AndS4 "${S4_GENERATED_LIMIT}"
 	while (( ${RANDOM_AWG_S3} + 56 == ${RANDOM_AWG_S4} )) || (( ${RANDOM_AWG_S4} + 56 == ${RANDOM_AWG_S3} )); do
-		generateS3AndS4
+		generateS3AndS4 "${S4_GENERATED_LIMIT}"
 	done
-	readS3AndS4
+	readS3AndS4 "${S4_MANUAL_LIMIT}"
 	while (( ${SERVER_AWG_S3} + 56 == ${SERVER_AWG_S4} )) || (( ${SERVER_AWG_S4} + 56 == ${SERVER_AWG_S3} )); do
 		echo "AmneziaWG requires S3 + 56 != S4 and S4 + 56 != S3"
-		readS3AndS4
+		readS3AndS4 "${S4_MANUAL_LIMIT}"
 	done
 
 	# Client MTU, asked once S4 is known because the recommended value depends on it
@@ -9477,7 +9574,7 @@ function renderAwgServerInterface() {
 	# awg-quick honours MTU; its automatic value, the uplink MTU minus 80,
 	# ignores the S4 junk bytes, so start from the same uplink and take them off.
 	local SERVER_MTU AWG_PROTOCOL_FIELDS
-	SERVER_MTU="$(recommendedMtuForS4 "${SERVER_AWG_S4}" "$(uplinkMtu "${SERVER_PUB_NIC:-}")")" || return 1
+	SERVER_MTU="$(recommendedMtuForS4 "${SERVER_AWG_S4}" "$(freshOuterMtuBudget)")" || return 1
 	AWG_PROTOCOL_FIELDS="$(renderAwgProtocolFields)" || return 1
 	echo "[Interface]
 Address = ${SERVER_ADDRESS}
@@ -9502,6 +9599,8 @@ ${AWG_PROTOCOL_FIELDS}"
 # keys, params, the server configuration with its firewall hooks, and the
 # forwarding sysctls.
 function writeAwgServerInstallState() {
+	# Refuse an impossible candidate before creating directories, keys or params.
+	validateFreshInstallMtu || return 1
 	# Ensure configuration directory exists
 	mkdir -p "${AMNEZIAWG_DIR}"
 	chmod 700 "${AMNEZIAWG_DIR}"
@@ -9568,7 +9667,8 @@ function installAmneziaWG() {
 	fi
 
 	# Run setup questions first
-	installQuestions
+	installQuestions || return 1
+	validateFreshInstallMtu || return 1
 
 	# A previous failed DKMS build can leave a half-configured package whose
 	# postinst runs again during prerequisite installs, before the module install.
@@ -9692,7 +9792,7 @@ function installAmneziaWG() {
 	fi
 	chmod 644 /etc/modules-load.d/amneziawg.conf
 
-	writeAwgServerInstallState
+	writeAwgServerInstallState || return 1
 
 	# Add a systemd drop-in override that:
 	#  - Ensures the amneziawg module is loaded before awg-quick starts (ExecStartPre)
@@ -11723,6 +11823,7 @@ function loadParams() {
 		echo -e "${RED}Failed to validate params file. Aborting parameter loading.${NC}" >&2
 		exit 1
 	fi
+	warnIfClientMtuUnsafe
 	# The explicit AWG 2.0 recovery path must not mutate params or configs before
 	# the protocol transaction has captured its backups. Any legacy normalization
 	# can run on a later ordinary management invocation after the downgrade.

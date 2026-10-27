@@ -74,6 +74,12 @@ pub enum CreateClientError {
     #[error("failed to parse config: {0}")]
     ConfigParse(String),
 
+    #[error("the assumed 1420 pre-S4 baseline leaves {effective_mtu} bytes, below the required 1280. S4 must not exceed 140, and smaller outer budgets require a lower limit; coordinate S4 and MTU before creating profiles")]
+    UnsafeTransportBudget { effective_mtu: i32 },
+
+    #[error("generic client MTU {mtu} exceeds {max_mtu}: final inner MTU + S4 + 80 would exceed the assumed 1500-byte outer budget. WireSock's pre-S4 value must not be used in a generic/Linux profile")]
+    ExcessiveTransportBudget { mtu: u16, max_mtu: i32 },
+
     #[error("AWG command failed: {0}")]
     Awg(#[from] crate::awg::AwgError),
 
@@ -157,6 +163,8 @@ pub fn sanitized_create_error_category(error: &CreateClientError) -> &'static st
         CreateClientError::KeyGen(_) => "key_generation_failed",
         CreateClientError::FileWrite(_) => "file_write_failed",
         CreateClientError::ConfigParse(_) => "config_parse_failed",
+        CreateClientError::UnsafeTransportBudget { .. }
+        | CreateClientError::ExcessiveTransportBudget { .. } => "unsafe_transport_budget",
         CreateClientError::Awg(_) => "awg_command_failed",
         CreateClientError::LockBusy => "lock_busy",
         CreateClientError::Internal(_) => "internal_error",
@@ -1117,6 +1125,69 @@ fn prepare_client_allowed_ips(
     Ok(formatted)
 }
 
+/// Generic/Linux profiles contain a final inner MTU, not WireSock's pre-S4
+/// baseline. Keep the global S4 limit separate; never deduct S4 twice from
+/// the generic MTU. This check assumes1500 bytes and does not probe PMTU.
+pub(crate) fn validate_client_transport_budget(
+    params: &ServerParams,
+) -> Result<(), CreateClientError> {
+    if params.protocol_version == AwgProtocolVersion::V1 {
+        return Ok(());
+    }
+    if params.s4.is_empty() || !params.s4.bytes().all(|c| c.is_ascii_digit()) {
+        return Err(CreateClientError::ConfigParse(
+            "S4 must be a decimal integer from 0 to 65535".into(),
+        ));
+    }
+    let s4 = params.s4.parse::<u16>().map_err(|_| {
+        CreateClientError::ConfigParse("S4 must be a decimal integer from 0 to 65535".into())
+    })?;
+    let effective_mtu = 1420 - i32::from(s4);
+    if effective_mtu < 1280 {
+        return Err(CreateClientError::UnsafeTransportBudget { effective_mtu });
+    }
+    if let Some(mtu) = params.client_mtu {
+        let max_mtu = 1500 - 80 - i32::from(s4);
+        if i32::from(mtu) > max_mtu {
+            return Err(CreateClientError::ExcessiveTransportBudget { mtu, max_mtu });
+        }
+    }
+    Ok(())
+}
+
+/// Warning-only assessment: never use this to reject loading an old config.
+pub(crate) fn mtu_budget_warning(params: &ServerParams) -> Option<String> {
+    if let Err(error) = validate_client_transport_budget(params) {
+        return Some(format!(
+            "Existing configuration: {error}. Existing configurations remain unchanged. Coordinate S4 and MTU on every device before creating or regenerating profiles. RandomTrailers may retain a larger learned packet-size window; an MTU edit alone does not reset it. Remote PMTU and client relay overhead are unverified."
+        ));
+    }
+    if let (Some(mtu), Ok(s4)) = (params.client_mtu, params.s4.parse::<u16>()) {
+        if i32::from(mtu) - i32::from(s4) < 1280 {
+            return Some("Existing configurations remain unchanged. The generic MTU is a final inner value. Older WireSock clients subtract S4 from explicit MTU again and may leave less than 1280. A client-side semantics change is only proposed, not released by this update. Verify the client version and coordinate migration; do not inflate generic/Linux profiles. Remote PMTU and learned RandomTrailers windows are unverified.".into());
+        }
+    }
+    if params.client_mtu.is_none() {
+        // Match Bash endpointIsIPv4, including its decimal leading-zero form.
+        let octets: Vec<_> = params.server_pub_ip.split('.').collect();
+        let ipv4 = octets.len() == 4
+            && octets.iter().all(|part| {
+                !part.is_empty()
+                    && part.len() <= 3
+                    && part.bytes().all(|c| c.is_ascii_digit())
+                    && part.parse::<u16>().is_ok_and(|n| n <= 255)
+            });
+        let max_s4 = if ipv4 { 20 } else { 0 };
+        if params.s4.parse::<u16>().is_ok_and(|s4| s4 > max_s4) {
+            return Some("Existing configurations remain unchanged. Linux awg-quick does not reserve S4 transport padding when MTU is omitted. Use an explicit final inner MTU on those clients; padding-aware automatic clients such as WireSock account for S4. Automatic MTU is client-derived and may exceed a smaller server/path budget. Remote PMTU and learned RandomTrailers windows are unverified.".into());
+        }
+    }
+    if params.random_trailers == "on" {
+        return Some("RandomTrailers uses a learned packet-size window. Coordinate fresh tunnel state on server and clients after MTU changes; a configuration check does not verify remote PMTU.".into());
+    }
+    None
+}
+
 /// Build the client configuration file content.
 fn build_client_config(
     params: &ServerParams,
@@ -1127,6 +1198,7 @@ fn build_client_config(
     dns: &str,
     endpoint: &str,
 ) -> Result<String, CreateClientError> {
+    validate_client_transport_budget(params)?;
     let address = match client_ipv6_display {
         Some(ipv6) => format!("{client_ipv4}/32,{ipv6}/128"),
         None => format!("{client_ipv4}/32"),
@@ -1456,6 +1528,10 @@ pub(crate) fn create_client_with_lifecycle_lock(
     let params = parse_params(&params_content)?;
 
     debug!(nic = %params.server_awg_nic, "server params loaded");
+
+    // Admission is deliberately separate from parsing legacy state. Reject
+    // before keys, client files, peer append or runtime reconciliation.
+    validate_client_transport_budget(&params)?;
 
     // Step 4: Read server config to check for duplicates and find used IPs.
     let server_config = awg::read_server_state_via_sudo(&params.server_awg_nic)
@@ -1968,14 +2044,191 @@ SERVER_AWG_H4='1837068650'
     // Exercise parsing and rendering together: dropping CLIENT_MTU at either
     // boundary must not silently produce a configuration without the override.
     fn mtu_test_params() -> &'static str {
-        "SERVER_PUB_IP='198.51.100.1'\nSERVER_AWG_NIC='awg0'\nSERVER_AWG_IPV4='10.66.66.1'\nSERVER_AWG_IPV6='fd42:42:42::1'\nSERVER_PORT='51820'\nSERVER_PUB_KEY='PUB'\nCLIENT_DNS_1='1.1.1.1'\nALLOWED_IPS='0.0.0.0/0, ::/0'\nSERVER_AWG_JC='4'\nSERVER_AWG_JMIN='50'\nSERVER_AWG_JMAX='1000'\nSERVER_AWG_S1='30'\nSERVER_AWG_S2='100'\nSERVER_AWG_S3='45'\nSERVER_AWG_S4='120'\nSERVER_AWG_H1='5-10'\nSERVER_AWG_H2='11-20'\nSERVER_AWG_H3='21-30'\nSERVER_AWG_H4='31-40'\n"
+        "SERVER_PUB_IP='198.51.100.1'\nSERVER_AWG_NIC='awg0'\nSERVER_AWG_IPV4='10.66.66.1'\nSERVER_AWG_IPV6='fd42:42:42::1'\nSERVER_PORT='51820'\nSERVER_PUB_KEY='PUB'\nCLIENT_DNS_1='1.1.1.1'\nALLOWED_IPS='0.0.0.0/0, ::/0'\nSERVER_AWG_JC='4'\nSERVER_AWG_JMIN='50'\nSERVER_AWG_JMAX='1000'\nSERVER_AWG_S1='30'\nSERVER_AWG_S2='100'\nSERVER_AWG_S3='45'\nSERVER_AWG_S4='20'\nSERVER_AWG_H1='5-10'\nSERVER_AWG_H2='11-20'\nSERVER_AWG_H3='21-30'\nSERVER_AWG_H4='31-40'\n"
+    }
+
+    #[test]
+    fn automatic_mtu_rejects_1280_byte_packets_against_1272_before_rendering() {
+        for endpoint in ["198.51.100.1", "2001:db8::1", "vpn.example.com"] {
+            let content = mtu_test_params()
+                .replace("SERVER_AWG_S4='20'", "SERVER_AWG_S4='148'")
+                .replace("198.51.100.1", endpoint);
+            // Legacy parsing remains valid: reads/removal/polling must work.
+            let params = parse_params(&content).expect("legacy params remain readable");
+            let result = build_client_config(
+                &params,
+                "PRIVATE",
+                "10.66.66.2",
+                None,
+                "PSK",
+                "1.1.1.1",
+                "example.org:51820",
+            );
+            let error =
+                result.expect_err("must not create the confirmed effective-MTU1272 profile");
+            assert!(error.to_string().contains("1272"), "{error}");
+            assert!(error.to_string().contains("1280"), "{error}");
+        }
+    }
+
+    #[test]
+    fn generic_explicit_mtu_is_not_deducted_twice() {
+        for (s4, mtu) in [(128, 1292), (140, 1280)] {
+            let content = format!(
+                "{}CLIENT_MTU='{mtu}'\n",
+                mtu_test_params().replace("SERVER_AWG_S4='20'", &format!("SERVER_AWG_S4='{s4}'"))
+            );
+            let params = parse_params(&content).unwrap();
+            let result = build_client_config(
+                &params,
+                "PRIVATE",
+                "10.66.66.2",
+                None,
+                "PSK",
+                "1.1.1.1",
+                "example.org:51820",
+            )
+            .unwrap();
+            assert!(result.lines().any(|line| line == format!("MTU = {mtu}")));
+        }
+    }
+
+    #[test]
+    fn generic_explicit_mtu_cannot_bypass_padding_and_outer_budget() {
+        for (s4, mtu) in [
+            (148, 1280),
+            (148, 1420),
+            (120, 1380),
+            (140, 1281),
+            (20, 65535),
+        ] {
+            let content = format!(
+                "{}CLIENT_MTU='{mtu}'\n",
+                mtu_test_params().replace("SERVER_AWG_S4='20'", &format!("SERVER_AWG_S4='{s4}'"))
+            );
+            let params = parse_params(&content).expect("old params remain readable");
+            let error = build_client_config(
+                &params,
+                "PRIVATE",
+                "10.66.66.2",
+                None,
+                "PSK",
+                "1.1.1.1",
+                "example.org:51820",
+            )
+            .expect_err("generic MTU must fit its final-inner interpretation");
+            assert_eq!(
+                sanitized_create_error_category(&error),
+                "unsafe_transport_budget"
+            );
+        }
+    }
+
+    #[test]
+    fn mtu_admission_s4_syntax_matches_bash_without_changing_legacy_parsing() {
+        let mut params = parse_params(mtu_test_params()).unwrap();
+        for value in ["+20", "-1", "20 ", "", "65536", "999999999999999999999"] {
+            params.s4 = value.into();
+            assert!(
+                matches!(
+                    validate_client_transport_budget(&params),
+                    Err(CreateClientError::ConfigParse(_))
+                ),
+                "{value}"
+            );
+        }
+        params.s4 = "00020".into();
+        assert!(validate_client_transport_budget(&params).is_ok());
+    }
+
+    #[test]
+    fn automatic_mtu_allows_padding_aware_clients_and_warns_for_linux() {
+        let mut params = parse_params(mtu_test_params()).unwrap();
+        for (endpoint, limit) in [
+            ("198.51.100.1", 20),
+            ("001.002.003.004", 20),
+            ("2001:db8::1", 0),
+            ("[2001:db8::1]", 0),
+            ("vpn.example.com", 0),
+            ("", 0),
+        ] {
+            params.server_pub_ip = endpoint.into();
+            params.s4 = limit.to_string();
+            assert!(
+                validate_client_transport_budget(&params).is_ok(),
+                "{endpoint}"
+            );
+            assert!(mtu_budget_warning(&params).is_none(), "{endpoint}");
+            params.s4 = (limit + 1).to_string();
+            assert!(
+                validate_client_transport_budget(&params).is_ok(),
+                "{endpoint}"
+            );
+            assert!(mtu_budget_warning(&params)
+                .unwrap()
+                .contains("Linux awg-quick"));
+        }
+        for s4 in [120, 128, 140] {
+            params.s4 = s4.to_string();
+            assert!(validate_client_transport_budget(&params).is_ok());
+            assert!(mtu_budget_warning(&params)
+                .unwrap()
+                .contains("Linux awg-quick"));
+        }
+    }
+
+    #[test]
+    fn mtu_budget_legacy_warning_preserves_params_without_allowing_new_unsafe_profiles() {
+        let legacy = mtu_test_params().replace("SERVER_AWG_S4='20'", "SERVER_AWG_S4='148'");
+        let params = parse_params(&legacy).unwrap();
+        let warning = mtu_budget_warning(&params).unwrap();
+        assert!(warning.contains("1272") && warning.contains("1280"));
+        assert!(warning.contains("remain unchanged") && warning.contains("unverified"));
+        assert_eq!(params.s4, "148");
+        assert_eq!(params.client_mtu, None);
+        assert_eq!(
+            sanitized_create_error_category(
+                &validate_client_transport_budget(&params).unwrap_err()
+            ),
+            "unsafe_transport_budget"
+        );
+        // Legacy syntax remains readable; regeneration still must satisfy
+        // the new policy. Existing export readers do not regenerate files.
+        let explicit = parse_params(&format!("{legacy}CLIENT_MTU='1280'\n")).unwrap();
+        let config = build_client_config(
+            &explicit,
+            "PRIVATE",
+            "10.66.66.2",
+            None,
+            "PSK",
+            "1.1.1.1",
+            "example.org:51820",
+        )
+        .unwrap_err();
+        assert_eq!(
+            sanitized_create_error_category(&config),
+            "unsafe_transport_budget"
+        );
+        assert_eq!(explicit.client_mtu, Some(1280));
+    }
+
+    #[test]
+    fn mtu_budget_random_trailers_never_claims_a_measured_path() {
+        let mut params = parse_params(mtu_test_params()).unwrap();
+        assert!(mtu_budget_warning(&params).is_none());
+        params.random_trailers = "on".into();
+        let warning = mtu_budget_warning(&params).unwrap();
+        assert!(warning.contains("learned packet-size window"));
+        assert!(warning.contains("fresh tunnel state"));
+        assert!(warning.contains("does not verify remote PMTU"));
+        assert!(validate_client_transport_budget(&params).is_ok());
     }
 
     #[test]
     fn awg1_params_preserve_legacy_client_format() {
         let legacy = mtu_test_params()
             .replace("SERVER_AWG_S3='45'\n", "")
-            .replace("SERVER_AWG_S4='120'\n", "")
+            .replace("SERVER_AWG_S4='20'\n", "")
             .replace("5-10", "5")
             .replace("11-20", "11")
             .replace("21-30", "21")
@@ -2007,7 +2260,7 @@ SERVER_AWG_H4='1837068650'
 
     #[test]
     fn client_mtu_is_optional_and_rendered_for_both_address_families() {
-        for mtu in [None, Some(""), Some("1280"), Some("1380"), Some("65535")] {
+        for mtu in [None, Some(""), Some("1280"), Some("1380"), Some("1400")] {
             let mut content = mtu_test_params().to_string();
             if let Some(value) = mtu {
                 content.push_str(&format!("CLIENT_MTU='{value}'\n"));

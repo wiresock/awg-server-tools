@@ -167,6 +167,7 @@ jobs:
           shellcheck --severity=warning tests/test-mutation-engine.sh
           shellcheck --severity=warning tests/helpers/boringtun-live-firewall.sh
           shellcheck --severity=warning tests/helpers/boringtun-lifecycle-fixture.sh
+          shellcheck --severity=warning tests/helpers/boringtun-host-install-fixture.sh
           shellcheck --severity=warning tests/test-boringtun-live-firewall.sh
           shellcheck --severity=warning tests/equivalence/run-kernel-equivalence.sh
           shellcheck --severity=warning tests/equivalence/kernel-scenarios.sh

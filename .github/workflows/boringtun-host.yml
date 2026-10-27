@@ -53,6 +53,7 @@ on:
       - tests/helpers/boringtun-live-firewall.sh
       - tests/helpers/boringtun-imitation-wire.py
       - tests/helpers/boringtun-lifecycle-fixture.sh
+      - tests/helpers/boringtun-host-install-fixture.sh
       - tests/helpers/boringtun-auto-live.sh
       - tests/fixtures/boringtun-auto-preludes/**
       - .github/workflows/boringtun-host.yml
@@ -74,6 +75,7 @@ on:
       - tests/helpers/boringtun-live-firewall.sh
       - tests/helpers/boringtun-imitation-wire.py
       - tests/helpers/boringtun-lifecycle-fixture.sh
+      - tests/helpers/boringtun-host-install-fixture.sh
       - tests/helpers/boringtun-auto-live.sh
       - tests/fixtures/boringtun-auto-preludes/**
       - .github/workflows/boringtun-host.yml

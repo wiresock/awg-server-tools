@@ -486,6 +486,7 @@ fi
 # Verify the serialized file can be sourced and values round-trip
 (
 	# Source in subshell to avoid polluting current env
+	# shellcheck source=/dev/null
 	source "${SERIALIZE_TMP}"
 	if [[ "${SERVER_PUB_IP}" != "198.51.100.1" ]] || [[ "${SERVER_PORT}" != "51820" ]] || \
 	   [[ "${SERVER_AWG_S3}" != "45" ]] || [[ "${SERVER_AWG_H1}" != "5-100000004" ]]; then
@@ -503,15 +504,21 @@ rm -f "${SERIALIZE_TMP}"
 
 echo "=== recommendedMtuForS4 ==="
 # awg-quick's automatic MTU is the path MTU minus 80 (1420 on a 1500-byte
-# path) and ignores the S4 junk bytes, so they come off it too, down to the
-# 1280 IPv6 minimum.
-for MTU_CASE in 15:1405 20:1400 21:1399 100:1320 140:1280 141:1280 150:1280 0:1420 200:1280 0120:1300 08:1412 09:1411; do
+# path) and ignores the S4 junk bytes, so they come off it too. Impossible
+# budgets must fail rather than rounding a packet up past the path budget.
+for MTU_CASE in 15:1405 20:1400 21:1399 100:1320 140:1280 0:1420 0120:1300 08:1412 09:1411; do
 	assert_eq "${MTU_CASE#*:}" "$(recommendedMtuForS4 "${MTU_CASE%%:*}")" "recommended MTU for S4=${MTU_CASE%%:*}"
 done
 # An explicit path MTU, as the server interface passes its uplink's.
-for MTU_CASE in 15:1500:1405 15:1400:1305 100:1400:1280 120:1450:1280 15:9000:8905 15:1280:1280 0120:01500:1300; do
+for MTU_CASE in 15:1500:1405 15:1400:1305 60:1420:1280 90:1450:1280 15:9000:8905 0120:01500:1300; do
 	IFS=: read -r MTU_S4 MTU_PATH MTU_WANT <<<"${MTU_CASE}"
 	assert_eq "${MTU_WANT}" "$(recommendedMtuForS4 "${MTU_S4}" "${MTU_PATH}")" "recommended MTU for S4=${MTU_S4} on a ${MTU_PATH}-byte path"
+done
+for MTU_CASE in 141:1500 150:1500 200:1500 100:1400 120:1450 15:1280; do
+	IFS=: read -r MTU_S4 MTU_PATH <<<"${MTU_CASE}"
+	MTU_RC=0
+	MTU_BAD_OUT="$(recommendedMtuForS4 "${MTU_S4}" "${MTU_PATH}" 2>/dev/null)" || MTU_RC=$?
+	assert_eq '1|' "${MTU_RC}|${MTU_BAD_OUT}" "S4=${MTU_S4} on ${MTU_PATH} refuses an impossible budget without output"
 done
 for MTU_BAD_S4 in '' abc -5 1.5 ' 15' '15 ' 0x10; do
 	MTU_RC=0
@@ -543,7 +550,7 @@ echo "=== S4 limits by endpoint family ==="
 # keeps S4 at or below 140 there, so that even the 1280 minimum MTU fits.
 for S4_ENDPOINT in 198.51.100.1 10.66.66.1 '2001:db8::1' '[2001:db8::1]' vpn.example.com '' '198.51.100.1 ' 300.1.1.1; do
 	case "${S4_ENDPOINT}" in
-		198.51.100.1|10.66.66.1) S4_WANT="20|150";;
+		198.51.100.1|10.66.66.1) S4_WANT="20|140";;
 		*) S4_WANT="0|140";;
 	esac
 	assert_eq "${S4_WANT}" "$(s4LimitForAutomaticMtu "${S4_ENDPOINT}")|$(s4MaxForEndpoint "${S4_ENDPOINT}")" "S4 limits behind endpoint '${S4_ENDPOINT}'"
@@ -556,9 +563,9 @@ _s4_draw_range() ( # <SERVER_PUB_IP>
 	generateS3AndS4
 	printf '%s|%s' "${RANDOM_AWG_S3}" "${RANDOM_AWG_S4}"
 )
-assert_eq '-i15-150 -n1|-i15-150 -n1' "$(_s4_draw_range 198.51.100.1)" "S3 and S4 are drawn from 15-150 behind an IPv4 endpoint"
-assert_eq '-i15-150 -n1|-i15-140 -n1' "$(_s4_draw_range 2001:db8::1)" "S4 is drawn from 15-140 behind an IPv6 endpoint"
-assert_eq '-i15-150 -n1|-i15-140 -n1' "$(_s4_draw_range vpn.example.com)" "S4 is drawn from 15-140 behind a hostname"
+assert_eq '-i15-150 -n1|-i15-128 -n1' "$(_s4_draw_range 198.51.100.1)" "IPv4 generated S4 leaves headroom below the hard maximum"
+assert_eq '-i15-150 -n1|-i15-128 -n1' "$(_s4_draw_range 2001:db8::1)" "S4 is drawn from 15-128 behind an IPv6 endpoint"
+assert_eq '-i15-150 -n1|-i15-128 -n1' "$(_s4_draw_range vpn.example.com)" "S4 is drawn from 15-128 behind a hostname"
 _read_s3s4() ( # <SERVER_PUB_IP> <answers>
 	local dir; dir="$(mktemp -d)"
 	trap 'rm -rf "${dir}"' EXIT
@@ -566,9 +573,9 @@ _read_s3s4() ( # <SERVER_PUB_IP> <answers>
 	# A rejected final answer must fail the fixture instead of looping at EOF.
 	read() { builtin read "$@" || exit 1; }
 	readS3AndS4 >"${dir}/stdout" 2>/dev/null <<<"$2" || exit 1
-	printf '%s|%s|%s' "${SERVER_AWG_S3}" "${SERVER_AWG_S4}" "$(grep -c '^S4 stays at or below 140 behind an IPv6 endpoint or a hostname' "${dir}/stdout" || true)"
+	printf '%s|%s|%s' "${SERVER_AWG_S3}" "${SERVER_AWG_S4}" "$(grep -c '^S4 stays at or below 140 for this budget' "${dir}/stdout" || true)"
 )
-assert_eq '45|150|0' "$(_read_s3s4 198.51.100.1 $'45\n150')" "S4 150 is accepted behind an IPv4 endpoint"
+assert_eq '45|140|1' "$(_read_s3s4 198.51.100.1 $'45\n150\n140')" "S4 150 is refused behind an IPv4 endpoint"
 assert_eq '45|140|1' "$(_read_s3s4 2001:db8::1 $'45\n150\n140')" "S4 150 is refused with the reason behind an IPv6 endpoint and 140 accepted"
 assert_eq '45|140|1' "$(_read_s3s4 2001:db8::1 $'45\n141\n140')" "S4 141 is refused behind an IPv6 endpoint"
 assert_eq '45|140|1' "$(_read_s3s4 vpn.example.com $'45\n150\n140')" "S4 150 is refused behind a hostname"
@@ -578,7 +585,7 @@ assert_eq '45|120|0' "$(_read_s3s4 2001:db8::1 $'045\n0120')" "zero-prefixed S3 
 assert_eq '45|19|0' "$(_read_s3s4 2001:db8::1 $'45\n019')" "S4 containing 9 is accepted without octal arithmetic"
 assert_eq '45|140|1' "$(_read_s3s4 2001:db8::1 $'45\n0141\n140')" "zero-prefixed S4 cannot bypass the IPv6 maximum"
 assert_eq '45|140|1' "$(_read_s3s4 vpn.example.com $'45\n0150\n140')" "zero-prefixed S4 cannot bypass the hostname maximum"
-assert_eq '45|150|0' "$(_read_s3s4 198.51.100.1 $'45\n0151\n150')" "zero-prefixed S4 cannot bypass the protocol maximum"
+assert_eq '45|140|0' "$(_read_s3s4 198.51.100.1 $'45\n0151\n140')" "zero-prefixed S4 cannot bypass the protocol maximum"
 assert_eq '45|120|0' "$(_read_s3s4 198.51.100.1 $'45\n18446744073709551736\n120')" "overflowing S4 cannot wrap into the accepted range"
 assert_eq 1 "$(SERVER_PUB_IP=198.51.100.1; SERVER_AWG_S4=021; CLIENT_MTU=''; askClientMtu <<<'' | grep -c 'WARNING: with S4')" "automatic client MTU warns for decimal S4 021 above the IPv4 limit"
 
@@ -612,9 +619,14 @@ H1 = 5-10
 H2 = 11-20
 H3 = 21-30
 H4 = 31-40" "$(_render_server_interface 120 y)" "the server interface carries the S4-aware MTU"
-assert_eq "MTU = 1280" "$(_render_server_interface 150 n | grep '^MTU')" "the server MTU never goes below 1280"
+_refused_server_interface() (
+	local rc=0 out
+	out="$(_render_server_interface "$@" 2>/dev/null)" || rc=$?
+	printf '%s|%s' "${rc}" "${out}"
+)
+assert_eq '1|' "$(_refused_server_interface 150 n)" "an impossible server budget fails before rendering any configuration"
 assert_eq "MTU = 1305" "$(_render_server_interface 15 y 1400 | grep '^MTU')" "the server MTU starts from a smaller uplink MTU"
-assert_eq "MTU = 1280" "$(_render_server_interface 120 y 1400 | grep '^MTU')" "a small uplink with a large S4 stops at 1280"
+assert_eq '1|' "$(_refused_server_interface 120 y 1400)" "a small uplink with a large S4 cannot be rounded up"
 assert_eq "MTU = 1385" "$(_render_server_interface 15 y 1480 | grep '^MTU')" "the server MTU follows the uplink MTU exactly"
 assert_eq "MTU = 1300" "$(_render_server_interface 0120 y | grep '^MTU')" "the server MTU subtracts decimal S4 even with leading zeros"
 _render_server_with_routes() ( # <IPv4 default routes> <IPv6 default routes>
@@ -634,10 +646,12 @@ assert_eq 'MTU = 1305' "$(_render_server_with_routes 'default via 192.0.2.254 de
 assert_eq 'MTU = 1305' "$(_render_server_with_routes '' 'default via fe80::1 dev lo proto ra metric 1024 mtu 1400 pref medium')" "IPv6 route MTU takes precedence over the larger NIC MTU"
 assert_eq 'MTU = 1305' "$(_render_server_with_routes 'default via 192.0.2.254 dev lo mtu 1500' 'default via fe80::1 dev lo mtu lock 1400')" "dual-stack uplink uses its smaller route MTU, including locked MTUs"
 assert_eq 'MTU = 1305' "$(_render_server_with_routes $'default via 192.0.2.1 dev lo mtu 1450\ndefault via 192.0.2.2 dev lo mtu 1400' '')" "multiple default routes keep the smallest explicit MTU"
-assert_eq 'MTU = 1280' "$(_render_server_with_routes 'default via 192.0.2.254 dev lo mtu 1200' '')" "a route below the tunnel minimum retains the existing 1280 clamp"
-assert_eq "MTU = $(($(cat /sys/class/net/lo/mtu) - 95))" "$(_render_server_with_routes 'default via 192.0.2.254 dev lo' '')" "a default route without an MTU falls back to the NIC"
-assert_eq "MTU = $(($(cat /sys/class/net/lo/mtu) - 95))" "$(_render_server_with_routes 'default via 192.0.2.254 dev lo mtu invalid' 'default via fe80::1 dev lo mtu 0')" "unusable route MTUs fall back to the NIC"
-assert_eq "Address = 10.66.66.1/24" "$(_render_server_interface 150 n | grep '^Address')" "an IPv4-only server keeps its IPv4-only address"
+MTU_RC=0
+MTU_RENDER_OUT="$(_render_server_with_routes 'default via 192.0.2.254 dev lo mtu 1200' '' 2>/dev/null)" || MTU_RC=$?
+assert_eq '1|' "${MTU_RC}|${MTU_RENDER_OUT}" "a route below the tunnel minimum fails without rendering"
+assert_eq 'MTU = 1405' "$(_render_server_with_routes 'default via 192.0.2.254 dev lo' '')" "NIC fallback is capped at the nominal1500 Internet budget"
+assert_eq 'MTU = 1405' "$(_render_server_with_routes 'default via 192.0.2.254 dev lo mtu invalid' 'default via fe80::1 dev lo mtu 0')" "unusable routes do not turn a jumbo NIC into a jumbo path claim"
+assert_eq "Address = 10.66.66.1/24" "$(_render_server_interface 140 n | grep '^Address')" "an IPv4-only server keeps its IPv4-only address"
 MTU_RC=0
 MTU_RENDER_OUT="$(_render_server_interface '' y 2>/dev/null)" || MTU_RC=$?
 assert_eq "1|" "${MTU_RC}|${MTU_RENDER_OUT}" "an unusable S4 fails the server render without output"
@@ -801,12 +815,14 @@ MTU_PARAMS_DIR="$(mktemp -d)"
 MTU_PARAMS="${MTU_PARAMS_DIR}/params"
 for MTU_VALUE in '' 1280 1380 65535; do
 	CLIENT_MTU="${MTU_VALUE}" serializeParams "${MTU_PARAMS}"
+	# shellcheck source=/dev/null
 	assert_eq "${MTU_VALUE}" "$(unset CLIENT_MTU; source "${MTU_PARAMS}"; printf '%s' "${CLIENT_MTU-missing}")" "MTU round-trip: '${MTU_VALUE}'"
 done
 # Exercise the real privileged allow-list, with only its params path redirected.
 MTU_SAFE_PARAMS="$(
 	# Load all helper functions without dispatching main (which requires root).
 	# Only the fixed config root changes; real filtering and file checks run.
+	# shellcheck source=/dev/null
 	source <(sed -e '$d' -e "s|^readonly AWG_CONFIG_ROOT=.*|readonly AWG_CONFIG_ROOT='${MTU_PARAMS_DIR}'|" \
 		"${PROJECT_ROOT}/amneziawg-web/scripts/amneziawg-web-privileged")
 	emit_safe_params
@@ -871,7 +887,15 @@ _check_install_mtu() ( # <mode> <value> [S4] [endpoint]
 	detectPublicIPv4() { echo 198.51.100.1; }
 	ip() { [[ "$1" != link ]] || return 1; echo 'default via 198.51.100.254 dev eth0'; }
 	ipv6Available() { return 1; }
-	generateS3AndS4() { RANDOM_AWG_S3=45; RANDOM_AWG_S4="${s4}"; }
+	generateS3AndS4() { RANDOM_AWG_S3=45; RANDOM_AWG_S4="${s4}"; if (( RANDOM_AWG_S4 > $1 )); then RANDOM_AWG_S4="$1"; fi; }
+	# Exhausted prompt input is a failure. Ordinary file/pipe reads still use
+	# EOF to finish loops and must retain the builtin's normal return value.
+	read() {
+		case "${1:-}" in
+			-rp|-p) builtin read "$@" || exit 1;;
+			*) builtin read "$@";;
+		esac
+	}
 	AUTO_INSTALL="${mode}"
 	CLIENT_MTU=""
 	case "${mode}" in
@@ -891,15 +915,16 @@ _check_install_mtu() ( # <mode> <value> [S4] [endpoint]
 	stdout="$(sed 's/\x1b\[[0-9;]*m//g' "${dir}/stdout")"
 	printf '%s|%s|%s|%s|%s' "${CLIENT_MTU:-}" "$(grep -c 'CLIENT_MTU must' "${dir}/stderr" || true)" \
 		"$(grep -c "^WARNING: with S4 = ${s4} and an automatic MTU" <<<"${stdout}" || true)" \
-		"$(grep -c "^The recommended client MTU for S4 = ${s4} on a 1500-byte path is $(recommendedMtuForS4 "${s4}");" <<<"${stdout}" || true)" \
+		"$(grep -c "^The recommended generic client MTU for S4 = ${s4} and an assumed 1500-byte outer budget is $(recommendedMtuForS4 "${s4}")\." <<<"${stdout}" || true)" \
 		"${SERVER_AWG_S4}"
 )
-assert_eq '1380|0|0|0|120' "$(_check_install_mtu y 1380)" "automatic install persists requested MTU"
+assert_eq '1380|0|0|0|40' "$(_check_install_mtu y 1380)" "automatic install bounds its S4 draw for the requested MTU"
 assert_eq '|0|0|0|120' "$(_check_install_mtu y '')" "automatic install keeps an explicitly empty MTU automatic"
 assert_eq '1300|0|0|0|120' "$(_check_install_mtu unset '')" "automatic install defaults the MTU to 1420 minus S4"
 assert_eq '1400|0|0|0|20' "$(_check_install_mtu unset '' 20)" "automatic install default follows S4"
-assert_eq '1280|0|0|0|150' "$(_check_install_mtu unset '' 150)" "automatic install default stays at the 1280 floor"
-assert_eq '1380|0|0|1|120' "$(_check_install_mtu n 1380)" "interactive install accepts valid MTU on first attempt"
+assert_eq '1292|0|0|0|128' "$(_check_install_mtu unset '' 140)" "automatic install caps generated S4 at128"
+assert_eq '1380|0|0|1|40' "$(_check_install_mtu n 1380 40)" "interactive install accepts valid MTU on first attempt"
+assert_eq '1300|0|0|1|120' "$(_check_install_mtu n $'1380\n1300')" "interactive install rejects a syntactically valid MTU that exceeds its S4 budget"
 assert_eq '1300|0|0|1|120' "$(_check_install_mtu n 1300)" "interactive install accepts the recommended MTU without warning"
 assert_eq '|0|1|1|120' "$(_check_install_mtu n '')" "interactive install accepts omitted MTU and warns for S4 above 20"
 assert_eq '|0|1|1|21' "$(_check_install_mtu n '' 21)" "interactive install warns at S4 21 when the MTU stays automatic"
@@ -911,12 +936,12 @@ assert_eq '|0|1|1|15' "$(_check_install_mtu n '' 15 2001:db8::1)" "interactive i
 assert_eq '|0|1|1|15' "$(_check_install_mtu n '' 15 vpn.example.com)" "interactive install warns at the smallest S4 behind a hostname"
 assert_eq '1405|0|0|1|15' "$(_check_install_mtu n 1405 15 2001:db8::1)" "interactive install does not warn behind an IPv6 endpoint once the MTU is set"
 assert_eq '1300|0|0|0|120' "$(_check_install_mtu unset '' 120 2001:db8::1)" "automatic install keeps the 1500-byte-path default behind an IPv6 endpoint"
-assert_eq '1380|1|0|1|120' "$(_check_install_mtu n $'1279\n1380')" "interactive install retries invalid MTU and persists correction"
+assert_eq '1300|1|0|1|120' "$(_check_install_mtu n $'1279\n1300')" "interactive install retries invalid MTU and persists correction"
 for MTU_WHITESPACE in ' 1380' '1380 ' '   ' $'\t1380\t' $'\t'; do
 	MTU_RC=0
-	MTU_PROMPT_RESULT="$(_check_install_mtu n "${MTU_WHITESPACE}"$'\n1380')" || MTU_RC=$?
+	MTU_PROMPT_RESULT="$(_check_install_mtu n "${MTU_WHITESPACE}"$'\n1300')" || MTU_RC=$?
 	assert_eq 0 "${MTU_RC}" "interactive MTU whitespace fixture succeeds"
-	assert_eq '1380|1|0|1|120' "${MTU_PROMPT_RESULT}" "interactive install rejects MTU whitespace before accepting correction"
+	assert_eq '1300|1|0|1|120' "${MTU_PROMPT_RESULT}" "interactive install rejects MTU whitespace before accepting correction"
 done
 unset MTU_WHITESPACE MTU_PROMPT_RESULT
 printf 'unchanged\n' >"${MTU_PARAMS}"
@@ -2234,12 +2259,20 @@ unset ALLOC_DIR ALLOC_HOST ALLOC_PEERS ALLOC_SERVER_IP
 unset ALLOC_MODE ALLOC_IPV6
 echo "=== optional client MTU generation ==="
 for MTU_MODE in noninteractive auto interactive initial-kernel initial-boringtun; do
-	for MTU_VALUE in '' 1280 1380 65535; do
+	for MTU_VALUE in '' 1280 1300; do
 		NIAC_PATHS="$(_run_niac y client '' '' "${MTU_MODE}" $'client\n2\n2' '' "${MTU_VALUE}")"
 		MTU_DIR="$(dirname "$(dirname "${NIAC_PATHS##*|||}")")"
 		assert_eq 0 "$(cat "${MTU_DIR}/rc")" "${MTU_MODE}: valid MTU '${MTU_VALUE}'"
 		MTU_EXPECTED=""; [[ -z "${MTU_VALUE}" ]] || MTU_EXPECTED="MTU = ${MTU_VALUE}"
 		assert_eq "${MTU_EXPECTED}" "$(grep '^MTU' "${NIAC_PATHS%%|||*}" || true)" "${MTU_MODE}: generated MTU '${MTU_VALUE}'"
+	done
+	for MTU_VALUE in 1301 1380 65535; do
+		NIAC_PATHS="$(_run_niac n client '' '' "${MTU_MODE}" $'client\n2' '' "${MTU_VALUE}")"
+		MTU_DIR="$(dirname "$(dirname "${NIAC_PATHS##*|||}")")"
+		assert_eq 1 "$(cat "${MTU_DIR}/rc")" "${MTU_MODE}: reject MTU beyond the S4 budget"
+		assert_contains "$(cat "${MTU_DIR}/stderr")" 'exceeds 1300' "${MTU_MODE}: explain the transport budget"
+		assert_rc 1 test -e "${NIAC_PATHS%%|||*}"
+		assert_rc 0 cmp -s "${MTU_DIR}/server-before.conf" "${NIAC_PATHS##*|||}"
 	done
 	for MTU_VALUE in 0 1279 65536 01380 +1380 -1380 1380.5 '1380 ' '1+1380' 999999999999999999999 $'1380\nPostUp = false'; do
 		NIAC_PATHS="$(_run_niac n client '' '' "${MTU_MODE}" $'client\n2' '' "${MTU_VALUE}")"
@@ -3545,7 +3578,7 @@ EOF
 	echo "OK"
 }
 assert_eq "OK" "$(_run_regen_test _setup_panel_only)" "regenerateClients: preserves key when config exists only in web panel config dir"
-assert_eq "OK" "$(_run_regen_test _setup_panel_only 1380)" "regenerateClients: applies persisted client MTU"
+assert_eq "OK" "$(_run_regen_test _setup_panel_only 1300)" "regenerateClients: applies persisted client MTU"
 
 _setup_invalid_mtu_regen() {
 	local dir="$1" PANEL_DIR="$2" rc=0 diagnostic=no before after unchanged=no

@@ -33,7 +33,12 @@
 # version: they prove the lifecycle's mechanics, not a cross-version rollback.
 #
 # With AWG_LIVE_PREVIOUS_INSTALLER=<path>, the fresh install runs that earlier
-# installer version instead, and everything after it runs this one: the
+# installer version instead, and everything after it runs this one. Only that
+# historical install uses deterministic S1-S4=120 draws, so an old random
+# S4=141-150 does not intentionally block later new-client admission. All
+# other randomness delegates to real shuf; the old script stays byte-for-byte
+# intact. The separate lifecycle regression covers preserved unsafe settings.
+# This exercises the
 # upgrade path from an installation without imitation (params without its
 # keys, a FORMAT=1 runtime file, the earlier helpers and a running daemon
 # started without --imitate-protocol) and with the earlier installer's own
@@ -206,6 +211,8 @@ source "${SCRIPT_DIR}/helpers/boringtun-wire-checks.sh"
 source "${SCRIPT_DIR}/helpers/boringtun-contracts.sh"
 # shellcheck source=helpers/boringtun-lifecycle-fixture.sh
 source "${SCRIPT_DIR}/helpers/boringtun-lifecycle-fixture.sh"
+# shellcheck source=helpers/boringtun-host-install-fixture.sh
+source "${SCRIPT_DIR}/helpers/boringtun-host-install-fixture.sh"
 # shellcheck source=helpers/boringtun-auto-live.sh
 source "${SCRIPT_DIR}/helpers/boringtun-auto-live.sh"
 fw_args() {
@@ -459,9 +466,11 @@ PUBLIC_NIC="$(ip -4 route show default | awk '{for (i = 1; i < NF; i++) if ($i =
 echo "=== Fresh install: AWG_BACKEND=boringtun AUTO_INSTALL=y"
 # Without an initial client, so that the install output holds no client
 # config or QR code; the client is added below, its output kept private.
-env AWG_BACKEND=boringtun AUTO_INSTALL=y SERVER_PUB_IP="${HOST_ADDR}" SERVER_PUB_NIC="${PUBLIC_NIC}" \
+INITIAL_INSTALL_MODE=fresh
+[[ -z "${AWG_LIVE_PREVIOUS_INSTALLER:-}" ]] || INITIAL_INSTALL_MODE=historical
+AWG_BACKEND=boringtun AUTO_INSTALL=y SERVER_PUB_IP="${HOST_ADDR}" SERVER_PUB_NIC="${PUBLIC_NIC}" \
 	SERVER_AWG_NIC="${IF}" SERVER_PORT="${PORT}" ENABLE_IPV6=n CREATE_INITIAL_CLIENT=n \
-	bash "${AWG_LIVE_PREVIOUS_INSTALLER:-${INSTALLER}}" >"${WORK}/install.log" 2>&1 </dev/null
+	bt_live_initial_install "${AWG_LIVE_PREVIOUS_INSTALLER:-${INSTALLER}}" "${INITIAL_INSTALL_MODE}" >"${WORK}/install.log" 2>&1 </dev/null
 INSTALL_RC=$?
 [[ -z "${AWG_LIVE_PREVIOUS_INSTALLER:-}" ]] ||
 	echo "    (installed by the earlier installer ${AWG_LIVE_PREVIOUS_INSTALLER}, with its own release; everything below runs this one)"
@@ -482,6 +491,8 @@ RELEASE_LOG="${WORK}/install.log"
 # is checked here too, before any operation of this installer touches it.
 if [[ -n "${AWG_LIVE_PREVIOUS_INSTALLER:-}" ]]; then
 	echo "=== The earlier installer's release"
+	check "historical fixture starts with the deterministic valid S4 budget" \
+		grep -qx "SERVER_AWG_S4='120'" /etc/amnezia/amneziawg/params
 	PREVIOUS="${AWG_LIVE_PREVIOUS_INSTALLER}"
 	# Three earlier installers are covered: the last one without protocol
 	# imitation (9f5a1afb87f7), whose release constants predate the build
