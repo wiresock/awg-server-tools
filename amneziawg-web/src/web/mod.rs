@@ -393,7 +393,8 @@ fn create_user_diagnostic_message(
         CreateClientError::IpInUse(ip) => {
             format!("Failed to create user: IP address already in use: {ip}")
         }
-        CreateClientError::UnsafeTransportBudget { .. } => error.to_string(),
+        CreateClientError::UnsafeTransportBudget { .. }
+        | CreateClientError::ExcessiveTransportBudget { .. } => error.to_string(),
         // The following variants may contain raw stderr/paths from sudo
         // commands or OS errors; use fixed messages and log details server-side.
         CreateClientError::ParamsRead(_) => {
@@ -3536,7 +3537,8 @@ async fn api_create_user(
             )
                 .into_response())
         }
-        Err(e @ crate::admin::client_manager::CreateClientError::UnsafeTransportBudget { .. }) => {
+        Err(e @ (crate::admin::client_manager::CreateClientError::UnsafeTransportBudget { .. }
+            | crate::admin::client_manager::CreateClientError::ExcessiveTransportBudget { .. })) => {
             Ok((StatusCode::CONFLICT, Json(json!({ "error": create_user_diagnostic_message(&e) }))).into_response())
         }
         Err(e) => {
