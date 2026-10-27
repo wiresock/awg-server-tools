@@ -13,6 +13,8 @@ RestartSec=5s
 #   sudo useradd --system --no-create-home --shell /usr/sbin/nologin awg-web
 User=awg-web
 Group=awg-web
+# SQLite can contain saved SMTP credentials, including WAL/SHM sidecars.
+UMask=0077
 
 # --- Binary and working directory --------------------------------------------
 ExecStart=/usr/local/bin/amneziawg-web

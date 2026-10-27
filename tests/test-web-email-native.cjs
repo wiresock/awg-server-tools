@@ -279,6 +279,24 @@ test('unavailable private storage prevents Save but transient testing does not p
   await p.get('email-settings-form').fire('input');await p.get('email-test-open').fire('click');
   assert.equal(p.get('email-test-dialog').open,true);assert.equal(p.requests.filter(r=>r.body).length,0);
 });
+
+test('successful SMTP check leaves unavailable storage disabled with repair guidance',async()=>{
+  let ready=false;
+  const p=page('settings',responder({settings:()=>ok({...saved,source:'environment',revision:0,storage_ready:ready}),check:()=>ok({outcome:'connected',security:'starttls',authenticated:true,settings_changed:false})}));await tick();
+  await p.get('email-smtp-check').fire('click');
+  assert.equal(p.get('email-smtp-result').dataset.result,'success');
+  assert.equal(p.get('email-save').disabled,true);
+  assert.equal(p.get('email-storage-notice').hidden,false);
+  const notice=p.get('email-storage-notice').textContent;
+  assert.match(notice,/Save.*disabled/i);
+  assert.match(notice,/0700/);assert.match(notice,/0600/);assert.match(notice,/service.*own|own.*service/i);
+  assert.match(notice,/SMTP.*(storage|saving)|check.*(storage|saving)/i);
+  assert.match(notice,/reload|restart/i);
+  await p.get('email-settings-form').fire('submit');
+  assert.equal(p.requests.filter(r=>r.url.endsWith('/settings') && r.body).length,0);
+  ready=true;await p.get('email-reload').fire('click');
+  assert.equal(p.get('email-save').disabled,false);assert.equal(p.get('email-storage-notice').hidden,true);
+});
 test('main peer selection persists across navigation and restores only existing peer ids',async()=>{
   const p=page('peers',responder());await tick();p.selects[0].checked=true;await p.selects[0].fire('change');
   assert.match(p.get('email-selection-count').textContent,/1 selected/);

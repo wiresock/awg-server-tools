@@ -1005,7 +1005,7 @@ setup_filesystem() {
         info "System user already exists: ${SERVICE_USER}"
     fi
 
-    # Data directory (owned by service user)
+    # Saved SMTP credentials require a private service-owned data directory.
     if [[ ! -d "${DATA_DIR}" ]]; then
         mkdir -p "${DATA_DIR}"
         info "Created data directory: ${DATA_DIR}"
@@ -1013,7 +1013,7 @@ setup_filesystem() {
         info "Data directory already exists: ${DATA_DIR}"
     fi
     chown "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}"
-    chmod 0750 "${DATA_DIR}"
+    chmod 0700 "${DATA_DIR}"
 
     # If amneziawg-proxy is already installed, allow the web service to read
     # its status file without making the directory world-readable.
@@ -2105,6 +2105,7 @@ Restart=on-failure
 RestartSec=5s
 User=${SERVICE_USER}
 Group=${SERVICE_USER}
+UMask=0077
 ExecStart=${INSTALL_DIR}/amneziawg-web
 WorkingDirectory=${DATA_DIR}
 EnvironmentFile=${ENV_FILE}
@@ -2132,6 +2133,14 @@ UNITEOF
         # No EnvironmentFile directive at all; insert after the ExecStart line
         sed -i "/^ExecStart=/a EnvironmentFile=${ENV_FILE}" "${SYSTEMD_UNIT_DEST}"
         info "Added EnvironmentFile directive to service unit."
+    fi
+
+    # Apply to preserved units as well: new SQLite databases and sidecars must
+    # be private. Existing files are deliberately left for offline repair.
+    if grep -q '^[[:blank:]]*UMask[[:blank:]]*=' "${SYSTEMD_UNIT_DEST}"; then
+        sed -i 's/^[[:blank:]]*UMask[[:blank:]]*=.*/UMask=0077/' "${SYSTEMD_UNIT_DEST}"
+    else
+        sed -i '/^[[:blank:]]*\[Service\][[:blank:]]*$/a UMask=0077' "${SYSTEMD_UNIT_DEST}"
     fi
 
     # Adjust ReadWritePaths / ProtectHome for the configured AWG config directory

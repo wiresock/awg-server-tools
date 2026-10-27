@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /build/target/release/amneziawg-web /usr/local/bin/amneziawg-web
 
 # Runtime directory for the SQLite database.
-RUN mkdir -p /data && chown awg-web:awg-web /data
+RUN install -d -m 0700 -o awg-web -g awg-web /data
 
 USER awg-web
 WORKDIR /data
@@ -42,4 +42,6 @@ ENV AWG_WEB_LISTEN=0.0.0.0:8080 \
 
 EXPOSE 8080
 
-ENTRYPOINT ["/usr/local/bin/amneziawg-web"]
+# Preserve argv and signals while making newly created SQLite files private.
+# Bind mounts still require operator-provided ownership and permissions.
+ENTRYPOINT ["/bin/sh", "-c", "umask 077; exec /usr/local/bin/amneziawg-web \"$@\"", "--"]

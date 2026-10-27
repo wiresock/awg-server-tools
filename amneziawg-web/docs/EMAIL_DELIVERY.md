@@ -37,12 +37,58 @@ resurrect its environment value. No operator env file is edited or silently impo
 The existing database now contains a plaintext SMTP credential if one is saved.
 Before reading/saving the profile, the app requires a canonical non-symlink database
 path in a private service-owned directory and service-owned regular private database,
-WAL, SHM and rollback-journal files without hardlinks. Use directory0700 and file0600;
+WAL, SHM and rollback-journal files without hardlinks. Use directory `0700` and file `0600`;
 unsafe storage is rejected, never automatically chmod/chowned. Windows persistence
 fails closed rather than treating POSIX mode bits as ACL protection. Legacy env-only
 installations keep working before first Save. Backups and old WAL/pages are also
 secret-bearing: Clear removes the active value, not historical copies. Protect and
 retire those copies under the operator's backup policy.
+
+### Save disabled after a successful SMTP check or test
+
+SMTP checks and test messages use the unsaved form; their success does not validate
+credential persistence. If Settings reports unavailable private storage, Save stays
+disabled until the storage prerequisite is repaired. No SMTP test is needed to
+diagnose or repair this condition.
+
+Fresh installer deployments use a service-owned directory `0700` and systemd
+`UMask=0077` so newly created SQLite databases and sidecars are private. A reinstall
+also tightens the selected data directory and sets the unit's umask, but **does not
+change existing database or sidecar files**. A binary upgrade can preserve both the
+old unit and old permissions. SQLite may inherit a pre-existing database's mode for
+new sidecars, so changing only the umask is insufficient for an existing database.
+
+For an existing installation, the operator should:
+
+1. Inspect the effective service user, `WorkingDirectory`, `UMask`, unit/drop-ins and
+   configured `AWG_WEB_DB` locally. The default database is
+   `/var/lib/amneziawg-web/awg-web.db`; a custom environment file or unit may override
+   it. Do not source an environment file or publish its contents: it may contain
+   credentials. `systemctl show amneziawg-web -p User -p Group -p WorkingDirectory -p UMask`
+   reports nonsecret service metadata.
+2. Stop the panel and take a consistent private SQLite backup, preserving any WAL
+   contents. Inspect the resolved database path, its parent, and the exact existing
+   `-wal`, `-shm`, and `-journal` siblings. Require a dedicated canonical directory,
+   no symlink path components, regular files, and one hard link per file. If a path
+   is shared, linked, unexpectedly owned or noncanonical, resolve that explicitly;
+   do not blindly chmod/chown its target.
+3. On the verified dedicated path, make the directory and these exact files owned
+   by the service account, with directory `0700` and files `0600`. Do not recurse,
+   change unrelated paths, delete sidecars, or modify a running database. Set the
+   service's effective `UMask=0077` (for example in a `[Service]` systemd drop-in)
+   and run `systemctl daemon-reload` after editing the unit configuration.
+4. Restart the panel and select **Reload saved settings**. Save becomes available
+   once the private-storage check succeeds. A profile quarantined at startup always
+   requires a restart, not just a page reload.
+
+For manual launches, prepare the same dedicated directory and use `umask 077`
+before starting the binary as its owner. The Docker image uses `/data` mode `0700`
+and a private launch umask, but a bind mount replaces the image's directory and its
+permissions. Provision the mounted directory/files for the container service's
+numeric UID/GID and apply the same offline checks to existing volume contents.
+Neither the application nor the container entrypoint repairs existing permissions.
+
+### Startup quarantine
 
 If a saved profile fails the private-storage guard at startup, the peer panel
 continues with email quarantined. No saved secret is read, environment SMTP fallback
