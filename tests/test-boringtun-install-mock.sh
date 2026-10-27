@@ -112,6 +112,17 @@ elif [[ "$*" == *--dearmor* ]]; then
 	echo MOCK_BINARY_KEY_DATA
 fi
 exit 0'
+# Use this installer's exact selected URL, including its publisher and build.
+source_constants() {
+	# shellcheck disable=SC2016
+	bash -c 'source "$1" && printf "%s %s %s %s %s\n" "${AWG_BT_RELEASE_ASSET_X86_64}" "${AWG_BT_RELEASE_VERSION}" "${AWG_BT_RELEASE_SOURCE_COMMIT}" "${AWG_BT_RELEASE_BUILD}" "${AWG_BT_RELEASE_BASE_URL}"' _ "${INSTALLER}"
+}
+read -r ASSET VERSION COMMIT BUILD BASE_URL <<<"$(source_constants)"
+ARCHIVE_ID="${ASSET%.tar.gz}"
+REL_ID="boringtun-cli-${VERSION}-g${COMMIT:0:12}"
+[[ "${BUILD}" == 1 ]] || REL_ID+="-b${BUILD}"
+REL_ID+="-linux-x86_64-musl"
+
 # curl: PPA metadata probes, the Debian signing key, and the BoringTun release
 # asset from the fixture directory.
 mock curl "
@@ -130,7 +141,7 @@ case \"\${URL}\" in
 		case \"\${URL}\" in */resolute/*) printf 404 ;; *) printf 200 ;; esac ;;
 	https://keyserver.ubuntu.com/*)
 		printf -- '-----BEGIN PGP PUBLIC KEY BLOCK-----\nMOCKKEY\n-----END PGP PUBLIC KEY BLOCK-----\n' >\"\${OUT}\" ;;
-	https://github.com/wiresock/awg-server-tools/releases/download/*)
+	\"${BASE_URL}/${ASSET}\")
 		cp -- \"${MOCK}/serve/\${URL##*/}\" \"\${OUT}\" || exit 22 ;;
 	*) exit 6 ;;
 esac"
@@ -178,18 +189,12 @@ mock firewall-cmd 'exit 1'
 # A fixture release: a fake boringtun-cli packed with the release layout. The
 # installer's embedded hashes are pointed at it after sourcing.
 FIXTURE="${MOCK}/fixture"
-source_constants() {
-	# shellcheck disable=SC2016
-	bash -c 'source "$1" && printf "%s %s %s\n" "${AWG_BT_RELEASE_ASSET_X86_64}" "${AWG_BT_RELEASE_VERSION}" "${AWG_BT_RELEASE_SOURCE_COMMIT}"' _ "${INSTALLER}"
-}
-read -r ASSET VERSION COMMIT <<<"$(source_constants)"
-REL_ID="${ASSET%.tar.gz}"
-mkdir -p "${FIXTURE}/${REL_ID}"
-printf '#!/bin/sh\n[ "$1" = --version ] && echo "boringtun %s"\nexit 0\n' "${VERSION}" >"${FIXTURE}/${REL_ID}/boringtun-cli"
-chmod 0755 "${FIXTURE}/${REL_ID}/boringtun-cli"
-echo "BSD-3-Clause fixture" >"${FIXTURE}/${REL_ID}/LICENSE"
-echo "fixture notices" >"${FIXTURE}/${REL_ID}/THIRD-PARTY-LICENSES"
-BINARY_SHA256="$(sha256sum "${FIXTURE}/${REL_ID}/boringtun-cli" | cut -d' ' -f1)"
+mkdir -p "${FIXTURE}/${ARCHIVE_ID}"
+printf '#!/bin/sh\n[ "$1" = --version ] && echo "boringtun %s"\nexit 0\n' "${VERSION}" >"${FIXTURE}/${ARCHIVE_ID}/boringtun-cli"
+chmod 0755 "${FIXTURE}/${ARCHIVE_ID}/boringtun-cli"
+echo "BSD-3-Clause fixture" >"${FIXTURE}/${ARCHIVE_ID}/LICENSE"
+echo "fixture notices" >"${FIXTURE}/${ARCHIVE_ID}/THIRD-PARTY-LICENSES"
+BINARY_SHA256="$(sha256sum "${FIXTURE}/${ARCHIVE_ID}/boringtun-cli" | cut -d' ' -f1)"
 {
 	echo "artifact_format=1"
 	echo "name=boringtun-cli"
@@ -212,9 +217,9 @@ BINARY_SHA256="$(sha256sum "${FIXTURE}/${REL_ID}/boringtun-cli" | cut -d' ' -f1)
 	echo "binary_sha256=${BINARY_SHA256}"
 	echo "license=LICENSE (BSD-3-Clause)"
 	echo "third_party_licenses=THIRD-PARTY-LICENSES"
-} >"${FIXTURE}/${REL_ID}/MANIFEST"
+} >"${FIXTURE}/${ARCHIVE_ID}/MANIFEST"
 tar --no-recursion --numeric-owner --owner=0 --group=0 -czf "${MOCK}/serve/${ASSET}" -C "${FIXTURE}" \
-	"${REL_ID}/" "${REL_ID}/LICENSE" "${REL_ID}/MANIFEST" "${REL_ID}/THIRD-PARTY-LICENSES" "${REL_ID}/boringtun-cli"
+	"${ARCHIVE_ID}/" "${ARCHIVE_ID}/LICENSE" "${ARCHIVE_ID}/MANIFEST" "${ARCHIVE_ID}/THIRD-PARTY-LICENSES" "${ARCHIVE_ID}/boringtun-cli"
 ARCHIVE_SHA256="$(sha256sum "${MOCK}/serve/${ASSET}" | cut -d' ' -f1)"
 
 mkdir -p /run/systemd/system /etc/apt/sources.list.d
@@ -269,7 +274,7 @@ else
 	check "Ubuntu: the Amnezia PPA source is configured" bash -c 'grep -l "ppa.launchpadcontent.net/amnezia/ppa/ubuntu" /etc/apt/sources.list.d/*.sources >/dev/null'
 fi
 check "the release is downloaded from its exact public URL over HTTPS" \
-	grep -q "^curl --proto =https --proto-redir =https .* https://github.com/wiresock/awg-server-tools/releases/download/boringtun-cli-${VERSION}-g${COMMIT:0:12}-b1/${ASSET}\$" "${LOG}"
+	grep -q "^curl --proto =https --proto-redir =https .* ${BASE_URL}/${ASSET}\$" "${LOG}"
 STORE=/usr/local/lib/amneziawg-install/boringtun
 check "the store holds the release and its current link" test "$(readlink "${STORE}/current")" = "${REL_ID}"
 check "the store is root-owned and not writable by others" test "$(stat -c '%u %a' "${STORE}" "${STORE}/${REL_ID}" "${STORE}/${REL_ID}/boringtun-cli" | tr '\n' ' ')" = "0 755 0 755 0 755 "

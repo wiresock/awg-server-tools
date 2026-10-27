@@ -142,8 +142,8 @@ assert_true "the embedded source commit is a full commit SHA" eval '[[ "${AWG_BT
 assert_true "the embedded build is a positive integer" eval '[[ "${AWG_BT_RELEASE_BUILD}" =~ ^[1-9][0-9]*$ ]]'
 assert_eq "boringtun-cli-${AWG_BT_RELEASE_VERSION}-g${AWG_BT_RELEASE_SOURCE_COMMIT:0:12}-b${AWG_BT_RELEASE_BUILD}" "${AWG_BT_RELEASE_TAG}" \
 	"the embedded tag follows from the embedded version, commit and build"
-assert_eq "https://github.com/wiresock/awg-server-tools/releases/download/${AWG_BT_RELEASE_TAG}" "${AWG_BT_RELEASE_BASE_URL}" \
-	"downloads come from exactly this repository's release of that tag, over HTTPS"
+assert_eq "${BTC_FORK_RELEASE_DOWNLOAD_URL}/${AWG_BT_RELEASE_TAG}" "${AWG_BT_RELEASE_BASE_URL}" \
+	"downloads come from exactly the fork's release of that tag, over HTTPS"
 assert_eq "boringtun-cli-${AWG_BT_RELEASE_VERSION}-g${AWG_BT_RELEASE_SOURCE_COMMIT:0:12}-linux-x86_64-musl.tar.gz" \
 	"${AWG_BT_RELEASE_ASSET_X86_64}" "the x86_64 asset name follows from the version and commit"
 assert_eq "boringtun-cli-${AWG_BT_RELEASE_VERSION}-g${AWG_BT_RELEASE_SOURCE_COMMIT:0:12}-linux-aarch64-musl.tar.gz" \
@@ -192,9 +192,9 @@ inconsistent_installer "an uppercase archive hash is inconsistent" "AWG_BT_RELEA
 	ARCHIVE_SHA256_X86_64 "${AWG_BT_RELEASE_ARCHIVE_SHA256_X86_64^^}"
 inconsistent_installer "a short binary hash is inconsistent" "AWG_BT_RELEASE_BINARY_SHA256_AARCH64" \
 	BINARY_SHA256_AARCH64 "${AWG_BT_RELEASE_BINARY_SHA256_AARCH64:1}"
-inconsistent_installer "the x86_64 binary hash for aarch64 is inconsistent" "not four different values" \
+inconsistent_installer "the x86_64 binary hash for aarch64 is inconsistent" "not six different values" \
 	BINARY_SHA256_AARCH64 "${AWG_BT_RELEASE_BINARY_SHA256_X86_64}"
-inconsistent_installer "the archive hash as the binary hash is inconsistent" "not four different values" \
+inconsistent_installer "the archive hash as the binary hash is inconsistent" "not six different values" \
 	BINARY_SHA256_X86_64 "${AWG_BT_RELEASE_ARCHIVE_SHA256_X86_64}"
 sed "/^AWG_BT_RELEASE_TAG=/p" "${INSTALLER}" >"${T}/inconsistent-installer.sh"
 assert_contains "AWG_BT_RELEASE_TAG is assigned 2 times, not once" "$(btc_embedded_release_problems "${T}/inconsistent-installer.sh")" \
@@ -207,7 +207,7 @@ rm -f -- "${T}/inconsistent-installer.sh"
 # an installer as data with the check of that format, which keeps every other
 # check; the check of this installer's format still requires the build.
 buildless_installer() { # <file> [<sed script for one more change>]
-	sed -e '/^AWG_BT_RELEASE_BUILD=/d' -e 's/^\(AWG_BT_RELEASE_\(TAG\|BASE_URL\)=".*-b\)[0-9][0-9]*"$/\11"/' \
+	sed -e '/^AWG_BT_RELEASE_BUILD=/d' -e '/^AWG_BT_RELEASE_.*_ARMV7=/d' -e 's/^\(AWG_BT_RELEASE_\(TAG\|BASE_URL\)=".*-b\)[0-9][0-9]*"$/\11"/' \
 		-e "${2:-}" "${INSTALLER}" >"$1"
 }
 buildless_installer "${T}/buildless-installer.sh"
@@ -234,13 +234,13 @@ assert_contains "AWG_BT_RELEASE_SOURCE_COMMIT is assigned 0 times, not once" "$(
 assert_contains "is not an embedded release format" "$(_btc_embedded_release_problems "${INSTALLER}" another-format)" \
 	"an unknown embedded release format is a problem, never a pass"
 # Installers released before the repository rename must still validate for
-# live upgrade tests. Only the two exact repository URLs are accepted, and
+# live upgrade tests. Only the canonical fork and historical repository URLs are accepted, and
 # the historical URL must still point to the embedded immutable release tag.
 sed "s|^AWG_BT_RELEASE_BASE_URL=.*\$|AWG_BT_RELEASE_BASE_URL=\"https://github.com/wiresock/amneziawg-install/releases/download/${AWG_BT_RELEASE_TAG}\"|" \
 	"${INSTALLER}" >"${T}/legacy-repository-installer.sh"
 assert_eq "" "$(btc_embedded_release_problems "${T}/legacy-repository-installer.sh")" \
 	"an installer from before the repository rename retains a valid release URL"
-buildless_installer "${T}/buildless-installer.sh" 's|wiresock/awg-server-tools/releases/download|wiresock/amneziawg-install/releases/download|'
+buildless_installer "${T}/buildless-installer.sh" 's|Wiresock-Foundation/wiresock-boringtun/releases/download|wiresock/amneziawg-install/releases/download|'
 assert_eq "" "$(btc_buildless_embedded_release_problems "${T}/buildless-installer.sh")" \
 	"an installer without a build number also retains its historical repository URL"
 sed 's|/releases/download/boringtun-cli-|/releases/download/wrong-tag-boringtun-cli-|' \
@@ -377,6 +377,8 @@ chmod 0755 "${MOCKBIN}"/*
 # the fixture's own.
 FIXTURE="${T}/fixture"
 FIXTURE_ID="${AWG_BT_RELEASE_ASSET_X86_64%.tar.gz}"
+# Archives omit the build suffix; installed stores include it after build 1.
+FIXTURE_STORE_ID="$(embedded_store_id x86_64)"
 EXEC_LOG="${S}/binary-runs"
 make_release_dir() { # <dir> [version printed]
 	local DIR="$1" VERSION_TEXT="${2:-boringtun ${AWG_BT_RELEASE_VERSION}}"
@@ -483,18 +485,18 @@ assert_rc 0 "${RC}" "the embedded release is downloaded, verified and installed"
 assert_contains "curl --proto =https --proto-redir =https " "$(cat "${S}/log")" "the download is HTTPS only, redirects included"
 assert_contains " ${AWG_BT_RELEASE_BASE_URL}/${AWG_BT_RELEASE_ASSET_X86_64}" "$(cat "${S}/log")" "from the exact release URL of the x86_64 asset"
 assert_eq "1" "$(grep -c '^curl ' "${S}/log")" "the archive is downloaded once"
-assert_eq "${FIXTURE_ID} current " "$(store_names)" "the store holds the release and the current link, nothing else"
-assert_eq "${FIXTURE_ID}" "$(readlink "${AWG_BT_STORE_DIR}/current")" "current links to the release"
+assert_eq "${FIXTURE_STORE_ID} current " "$(store_names)" "the store holds the release and the current link, nothing else"
+assert_eq "${FIXTURE_STORE_ID}" "$(readlink "${AWG_BT_STORE_DIR}/current")" "current links to the release"
 run _awgBtVerifyStore
 assert_rc 0 "${RC}" "the installed store passes the runtime's own verification"
-assert_eq "$(readlink -f "${AWG_BT_STORE_DIR}")/${FIXTURE_ID}/boringtun-cli" "${_AWG_BT_VERIFIED_BIN:-$(
+assert_eq "$(readlink -f "${AWG_BT_STORE_DIR}")/${FIXTURE_STORE_ID}/boringtun-cli" "${_AWG_BT_VERIFIED_BIN:-$(
 	_awgBtVerifyStore
 	printf '%s' "${_AWG_BT_VERIFIED_BIN}"
 )}" "and names the installed binary"
-assert_eq "755 644 644 644 755" "$(stat -c '%a' "${AWG_BT_STORE_DIR}/${FIXTURE_ID}" "${AWG_BT_STORE_DIR}/${FIXTURE_ID}/LICENSE" \
-	"${AWG_BT_STORE_DIR}/${FIXTURE_ID}/MANIFEST" "${AWG_BT_STORE_DIR}/${FIXTURE_ID}/THIRD-PARTY-LICENSES" \
-	"${AWG_BT_STORE_DIR}/${FIXTURE_ID}/boringtun-cli" | tr '\n' ' ' | sed 's/ $//')" "the release has the store's modes"
-assert_true "the archive's MANIFEST is installed as it is" cmp -s "${FIXTURE}/${FIXTURE_ID}/MANIFEST" "${AWG_BT_STORE_DIR}/${FIXTURE_ID}/MANIFEST"
+assert_eq "755 644 644 644 755" "$(stat -c '%a' "${AWG_BT_STORE_DIR}/${FIXTURE_STORE_ID}" "${AWG_BT_STORE_DIR}/${FIXTURE_STORE_ID}/LICENSE" \
+	"${AWG_BT_STORE_DIR}/${FIXTURE_STORE_ID}/MANIFEST" "${AWG_BT_STORE_DIR}/${FIXTURE_STORE_ID}/THIRD-PARTY-LICENSES" \
+	"${AWG_BT_STORE_DIR}/${FIXTURE_STORE_ID}/boringtun-cli" | tr '\n' ' ' | sed 's/ $//')" "the release has the store's modes"
+assert_true "the archive's MANIFEST is installed as it is" cmp -s "${FIXTURE}/${FIXTURE_ID}/MANIFEST" "${AWG_BT_STORE_DIR}/${FIXTURE_STORE_ID}/MANIFEST"
 assert_true "the binary ran to report its version" test -s "${EXEC_LOG}"
 assert_eq "" "$(grep -v "^run ${AWG_BT_STORE_DIR}/" "${EXEC_LOG}")" \
 	"and ran only from the store, never from the download directory (which may be a noexec /tmp)"
@@ -580,7 +582,7 @@ reset_store
 serve "${T}/good.tar.gz"
 run installBoringtunRelease
 OTHER_ID="boringtun-cli-0.7.2-g0123456789ab-linux-x86_64-musl"
-cp -a -- "${AWG_BT_STORE_DIR}/${FIXTURE_ID}" "${AWG_BT_STORE_DIR}/${OTHER_ID}"
+cp -a -- "${AWG_BT_STORE_DIR}/${FIXTURE_STORE_ID}" "${AWG_BT_STORE_DIR}/${OTHER_ID}"
 write_manifest "${AWG_BT_STORE_DIR}/${OTHER_ID}" version=0.7.2 source_commit=0123456789abcdef0123456789abcdef01234567
 ln -sfn "${OTHER_ID}" "${AWG_BT_STORE_DIR}/current"
 run _awgBtVerifyStore
@@ -601,9 +603,9 @@ rm -f "${AWG_BT_STORE_DIR}/current"
 : >"${S}/log"
 run installBoringtunRelease
 assert_rc 0 "${RC}" "a verified release without its current link is linked, not downloaded again"
-assert_eq "0 ${FIXTURE_ID}" "$(grep -c '^curl ' "${S}/log") $(readlink "${AWG_BT_STORE_DIR}/current")" "without a download, to that release"
+assert_eq "0 ${FIXTURE_STORE_ID}" "$(grep -c '^curl ' "${S}/log") $(readlink "${AWG_BT_STORE_DIR}/current")" "without a download, to that release"
 rm -f "${AWG_BT_STORE_DIR}/current"
-echo tampered >>"${AWG_BT_STORE_DIR}/${FIXTURE_ID}/boringtun-cli"
+echo tampered >>"${AWG_BT_STORE_DIR}/${FIXTURE_STORE_ID}/boringtun-cli"
 run installBoringtunRelease
 assert_rc 1 "${RC}" "a damaged release directory of that name is refused"
 assert_true "and not made current" test ! -e "${AWG_BT_STORE_DIR}/current"
@@ -619,7 +621,7 @@ stage_candidate() { # a verified release in the store, without current
 	rm -f "${AWG_BT_STORE_DIR}/current" "${EXEC_LOG}"
 	: >"${S}/log"
 }
-CANDIDATE="${AWG_BT_STORE_DIR}/${FIXTURE_ID}"
+CANDIDATE="${AWG_BT_STORE_DIR}/${FIXTURE_STORE_ID}"
 candidate_refused() { # <label>
 	run installBoringtunRelease
 	assert_rc 1 "${RC}" "$1"
@@ -722,7 +724,7 @@ assert_true "  and leaves current absent" test ! -e "${AWG_BT_STORE_DIR}/current
 stage_candidate
 run installBoringtunRelease
 assert_rc 0 "${RC}" "a trusted, verified candidate is made current"
-assert_eq "${FIXTURE_ID}" "$(readlink "${AWG_BT_STORE_DIR}/current")" "  selecting that release"
+assert_eq "${FIXTURE_STORE_ID}" "$(readlink "${AWG_BT_STORE_DIR}/current")" "  selecting that release"
 assert_eq "0" "$(grep -c '^curl ' "${S}/log")" "  without a download"
 
 # A staging failure leaves no half-installed release under its final name.
@@ -754,7 +756,7 @@ reset_store
 serve "${T}/good.tar.gz"
 run installBoringtunRelease
 assert_true "current is a symlink" test -L "${AWG_BT_STORE_DIR}/current"
-assert_eq "0" "$(find "${AWG_BT_STORE_DIR}" -name '.current.tmp.*' -o -name ".${FIXTURE_ID}.tmp.*" | wc -l)" \
+assert_eq "0" "$(find "${AWG_BT_STORE_DIR}" -name '.current.tmp.*' -o -name ".${FIXTURE_STORE_ID}.tmp.*" | wc -l)" \
 	"no temporary link or staging directory is left behind"
 
 echo "=== Standalone proxy guard ==="
@@ -1235,8 +1237,8 @@ install_runtime
 # A socket another process serves for another interface stays.
 listening_socket "${AWG_BT_WG_SOCKET_DIR}/other0.sock"
 # A daemon of the interface still runs: nothing is removed.
-cp -- "$(command -v bash)" "${AWG_BT_STORE_DIR}/${FIXTURE_ID}/boringtun-cli.running"
-"${AWG_BT_STORE_DIR}/${FIXTURE_ID}/boringtun-cli.running" -c 'sleep 120; :' fake "${IF}" &
+cp -- "$(command -v bash)" "${AWG_BT_STORE_DIR}/${FIXTURE_STORE_ID}/boringtun-cli.running"
+"${AWG_BT_STORE_DIR}/${FIXTURE_STORE_ID}/boringtun-cli.running" -c 'sleep 120; :' fake "${IF}" &
 DAEMON_PID=$!
 echo "${DAEMON_PID}" >>"${T}/background"
 sleep 0.3
@@ -1247,7 +1249,7 @@ assert_rc 1 "${RC}" "the BoringTun uninstall refuses while a daemon of the inter
 assert_true "  and removes nothing" runtime_kept
 kill -KILL "${DAEMON_PID}"
 wait "${DAEMON_PID}" 2>/dev/null
-rm -f "${AWG_BT_STORE_DIR}/${FIXTURE_ID}/boringtun-cli.running"
+rm -f "${AWG_BT_STORE_DIR}/${FIXTURE_STORE_ID}/boringtun-cli.running"
 
 echo "--- S1: unfinished teardown evidence is kept"
 # Exactly the review's case: poststop returns 0, and the attempt it keeps

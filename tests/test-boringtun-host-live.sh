@@ -177,11 +177,13 @@ case "$(uname -m)" in
 esac
 RELEASE_TAG="$(installer_value AWG_BT_RELEASE_TAG)"
 RELEASE_BASE_URL="$(installer_value AWG_BT_RELEASE_BASE_URL)"
+RELEASE_BUILD="$(installer_value AWG_BT_RELEASE_BUILD)"
 SOURCE_COMMIT="$(installer_value AWG_BT_RELEASE_SOURCE_COMMIT)"
 ASSET="$(installer_value "AWG_BT_RELEASE_ASSET_${ARCH_KEY}")"
 ARCHIVE_SHA256="$(installer_value "AWG_BT_RELEASE_ARCHIVE_SHA256_${ARCH_KEY}")"
 BINARY_SHA256="$(installer_value "AWG_BT_RELEASE_BINARY_SHA256_${ARCH_KEY}")"
 RELEASE_ID="${ASSET%.tar.gz}"
+[[ "${RELEASE_BUILD}" == 1 ]] || RELEASE_ID="${RELEASE_TAG}-linux-${ARCH}-musl"
 STORE="/usr/local/lib/amneziawg-install/boringtun"
 
 main_pid() {
@@ -509,7 +511,7 @@ if [[ -n "${AWG_LIVE_PREVIOUS_INSTALLER:-}" ]]; then
 	# The binary's own answer is then checked against this.
 	case "${PREV_TAG}" in
 		boringtun-cli-0.7.1-g71d88784ad29-b1 | boringtun-cli-0.7.1-gae2ab44e9a68-b1) PREV_AUTO=0 ;;
-		boringtun-cli-0.7.1-gb94943906b11-b1) PREV_AUTO=1 ;;
+		boringtun-cli-0.7.1-gb94943906b11-b1 | boringtun-cli-0.7.1-ge94c04f3f4fd-b1) PREV_AUTO=1 ;;
 		*) die "the earlier installer's release ${PREV_TAG} is not one whose auto support this test knows" ;;
 	esac
 	echo "    earlier installer's release: ${PREV_TAG}, ${ARCH} binary ${PREV_BINARY_SHA256}, auto $( ((PREV_AUTO)) && echo supported || echo unsupported)"
@@ -582,7 +584,7 @@ record_config_secrets "${CLIENT_CONF}"
 # the earlier daemon, leaves behind.
 if [[ -n "${AWG_LIVE_PREVIOUS_INSTALLER:-}" ]]; then
 	echo "=== Upgrade from the earlier installer's release: --upgrade-boringtun"
-	RELEASE_DOWNLOAD="Downloading https://github.com/wiresock/awg-server-tools/releases/download/${RELEASE_TAG}/${ASSET}"
+	RELEASE_DOWNLOAD="Downloading ${RELEASE_BASE_URL}/${ASSET}"
 	upgraded_links() {
 		test "$(store_links)" = "${RELEASE_ID} ${PREV_ID}"
 	}
@@ -644,7 +646,7 @@ if [[ -n "${AWG_LIVE_PREVIOUS_INSTALLER:-}" ]]; then
 fi
 
 check "it downloaded the public release ${RELEASE_TAG}" \
-	grep -qF "Downloading https://github.com/wiresock/awg-server-tools/releases/download/${RELEASE_TAG}/${ASSET}" "${RELEASE_LOG}"
+	grep -qF "Downloading ${RELEASE_BASE_URL}/${ASSET}" "${RELEASE_LOG}"
 check "the BoringTun preflight passed" grep -qF "BoringTun preflight passed" "${WORK}/install.log"
 check "no AmneziaWG kernel module is loaded" no_kernel_module
 check "no AmneziaWG kernel module is installed" bash -c '! modinfo -n amneziawg >/dev/null 2>&1'
@@ -1304,7 +1306,7 @@ echo "=== Auto (fixed layouts)"
 check "the auto collision test runs the embedded release's binary" \
 	test "$(sha256sum "${CLIENT_BIN}" | cut -d' ' -f1)" = "${BINARY_SHA256}"
 COMPARE_BIN=()
-if ((PREV_AUTO)); then
+if [[ "${PREV_TAG:-}" == boringtun-cli-0.7.1-gb94943906b11-b1 ]]; then
 	check "  and compares it with the earlier release's binary, a copy with the earlier installer's embedded SHA-256" \
 		test "$(sha256sum "${PREV_BIN}" 2>/dev/null | cut -d' ' -f1)" = "${PREV_BINARY_SHA256}"
 	COMPARE_BIN=("${PREV_BIN}")
@@ -1312,7 +1314,7 @@ fi
 bash "${SCRIPT_DIR}/test-boringtun-auto-collision-live.sh" "${CLIENT_BIN}" "${COMPARE_BIN[@]}" 2>&1 | sed 's/^/    | /'
 AUTO_COLLISION_RC="${PIPESTATUS[0]}"
 check "the auto collision test passes" test "${AUTO_COLLISION_RC}" -eq 0
-if ((PREV_AUTO)); then
+if [[ "${PREV_TAG:-}" == boringtun-cli-0.7.1-gb94943906b11-b1 ]]; then
 	echo "=== Auto hints, the earlier release's semantics, on ${PREV_ID}"
 	bash "${SCRIPT_DIR}/test-boringtun-auto-hint-live.sh" "${PREV_BIN}" 2>&1 | sed 's/^/    | /'
 	AUTO_HINT_RC="${PIPESTATUS[0]}"
@@ -1361,7 +1363,7 @@ RC=$?
 tail -n 6 "${WORK}/upgrade.log" | sed 's/^/    | /'
 check "--upgrade-boringtun succeeds" test "${RC}" -eq 0
 check "  it downloaded the pinned release from its public URL" \
-	grep -qF "Downloading https://github.com/wiresock/awg-server-tools/releases/download/${RELEASE_TAG}/${ASSET}" "${WORK}/upgrade.log"
+	grep -qF "Downloading ${RELEASE_BASE_URL}/${ASSET}" "${WORK}/upgrade.log"
 check "  current is the pinned release and previous the fixture" test "$(store_links)" = "${RELEASE_ID} ${FIXTURE_ID}"
 check "  the pinned binary has the embedded SHA-256" test "$(sha256sum "${STORE}/${RELEASE_ID}/boringtun-cli" | cut -d' ' -f1)" = "${BINARY_SHA256}"
 check "  the daemon was restarted onto it" test "$(main_pid)" != "${PID}" -a "$(bt_unit_release "${UNIT}" "${STORE}")" = "${RELEASE_ID}"
@@ -1433,10 +1435,10 @@ if [[ -n "${AWG_LIVE_BASE_INSTALLER:-}" ]]; then
 	# installer version's helpers are installed, which refuse it: the upgrade
 	# must reconcile them without starting the service, and the next ordinary
 	# start must then run it. A TEST FIXTURE copy of this installer pins the
-	# -b2 build (the same commit and binary as build 1); nothing is published.
+	# -b2 build (the same commit and binary as the pin); nothing is published.
 	echo "=== The pin already current and stopped, with the previous installer version's helpers"
 	B2_INSTALLER="${WORK}/installer-pinning-test-fixture-b2.sh"
-	sed 's/^AWG_BT_RELEASE_BUILD="1"$/AWG_BT_RELEASE_BUILD="2"/' "${INSTALLER}" >"${B2_INSTALLER}"
+	sed 's/^AWG_BT_RELEASE_BUILD="[1-9][0-9]*"$/AWG_BT_RELEASE_BUILD="2"/' "${INSTALLER}" >"${B2_INSTALLER}"
 	check "a TEST FIXTURE copy of this installer pins the -b2 build" test "$(grep -c '^AWG_BT_RELEASE_BUILD="2"$' "${B2_INSTALLER}")" = 1
 	lifecycle --rollback-boringtun rollback-b2-again.log
 	check "  --rollback-boringtun makes the -b2 release current again" test "$?" -eq 0 -a "$(store_links)" = "${B2_ID} ${RELEASE_ID}"

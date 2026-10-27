@@ -67,7 +67,7 @@ Vadim Smirnov. (Assumed from branch names.)
 | `amneziawg-proxy/` | MIT (`Cargo.toml`) | VS | Vadim Smirnov (#15 by the Copilot agent, then the maintainer) | History | Added `amneziawg-proxy/LICENSE`; inline SPDX in sources | High (license); medium (questions 1 and 2) |
 | `amneziawg-web.sh`, `amneziawg-proxy.sh`, `scripts/amneziawg-cargo-build.sh` | MIT | VS | Vadim Smirnov | History | Inline SPDX | High |
 | BoringTun packaging recipe, provenance metadata and scripts | MIT | VS | Vadim Smirnov | History | `REUSE.toml`; `required-notices` quotes notices as data with an override annotation. Vendored full notice texts are separate entries below. | High |
-| `packaging/boringtun/fork-license.txt` | BSD-3-Clause | Cloudflare, Inc. 2019; Vadim Smirnov (doing business as WireSock), existing 2024-2026 range | BoringTun upstream/fork notices | Exact source license comparison and notice policy checksum | Explicit REUSE override; Cloudflare text preserved, 2024 remains unverified | High (preservation); unresolved fork start year |
+| `packaging/boringtun/fork-license.txt` | BSD-3-Clause | Cloudflare, Inc. 2019; Vadim Smirnov (doing business as WireSock), existing 2024-2026 range | BoringTun upstream/fork notices | Exact source license comparison and notice policy checksum; owner history recorded below | Explicit REUSE override; Cloudflare text preserved, exact start not independently verified | High (preservation); retained years accepted with owner history, no date-only release blocker |
 | `packaging/boringtun/runtime-notices.txt` | `LicenseRef-BoringTun-Runtime-Notices`, retaining each portion's original terms | Upstream holders identified in the reproduced notices | Linux profile: exact pinned Rust, musl, ring and LLVM inputs | `runtime-provenance.json`, `runtime-sections.json`, notice policy and reproducible generator | Explicit REUSE override; exact collection also in `LICENSES/`; no aggregate MIT ownership claim | High (text provenance); release gates below remain |
 | `packaging/boringtun/runtime-notices-macos.txt` | `LicenseRef-BoringTun-Runtime-Notices-macOS`, retaining each portion's original terms | Upstream holders identified in the reproduced notices | macOS profile: common Rust and ring notice supersets; excludes Linux musl and self-contained CRT/libunwind sections | `runtime-provenance.json`, `runtime-sections-macos.json`, policy v2 and reproducible generator; both macOS distribution inventories pinned | Explicit REUSE override; exact collection also in `LICENSES/`; no aggregate MIT ownership claim | High (text provenance); release gates below remain |
 | `tests/**`, including `tests/fixtures/boringtun-auto-preludes/*.hex` | MIT | VS | Vadim Smirnov; the fixtures are datagrams recorded from BoringTun releases | History | `REUSE.toml` | High (tests); medium (fixtures are program output, not authored code) |
@@ -142,16 +142,18 @@ case.
    on the server; it is not distributed. Whether the MIT script should quote
    them is flagged rather than changed, because changing the matching would
    change installer behaviour.
-6. **BoringTun replacement releases and fork years.** The packaging fix now
-   includes reviewed runtime/native notices and a complete fork license, but
-   existing published archives are unchanged. The fork's 2024 start is retained
-   without being declared verified; owner evidence or an explicit correction is
-   still needed. Build, reproducibility, provenance, publication and separate
-   installer adoption gates remain before this correction reaches users (see
+6. **BoringTun historical archives and retained fork years.** Published fork
+   releases include reviewed runtime/native notices and a complete fork license;
+   historical AWG archives remain unchanged. The owner stated that wgbooster/netlib
+   existed before 2022 and identified the archived earlier fork. This first-party
+   evidence resolves the date-only blocker without independently verifying the
+   exact scope of every retained 2024-2026 assertion. No other contributor's
+   ownership was changed. The correction reaches users through a reviewed
+   installer adoption and explicit upgrades (see
    [`LICENSING.md`](LICENSING.md#known-gaps)). Tracked in
-   [issue #175](https://github.com/wiresock/awg-server-tools/issues/175), to be
-   fixed in new, attested release builds before the binary is distributed in
-   any other product.
+   [issue #175](https://github.com/wiresock/awg-server-tools/issues/175); any other
+   product redistributing the binary should use the corrected attested archives
+   with all accompanying notices.
 7. **Denis Glotov's change.** One line (removing a `2>/dev/null`) is probably
    too small to be protected. He is named as a contributor; no ownership is
    claimed for the maintainer.

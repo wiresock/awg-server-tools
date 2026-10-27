@@ -60,6 +60,12 @@ host unknown aarch64
 check 1 'unknown userland fails closed' _awgBtHostArch
 
 host armhf aarch64
+# The negative case is an explicit unpublished fixture, independent of the
+# release this checkout has adopted. Restore the actual pins before testing it.
+SAVED_ARMV7=("${AWG_BT_RELEASE_ASSET_ARMV7}" "${AWG_BT_RELEASE_ARCHIVE_SHA256_ARMV7}" "${AWG_BT_RELEASE_BINARY_SHA256_ARMV7}")
+AWG_BT_RELEASE_ASSET_ARMV7=""
+AWG_BT_RELEASE_ARCHIVE_SHA256_ARMV7=""
+AWG_BT_RELEASE_BINARY_SHA256_ARMV7=""
 _awgBtSelectRelease x86_64
 check 1 'unpublished ARMv7 release cannot be selected' _awgBtSelectRelease armv7
 SELECTION_ERROR="$(cat "${T}/err")"
@@ -153,6 +159,14 @@ check 0 'rollback selects the actual previous ARM64 store' equal "${OLD}" "$(rea
 check 1 'upgrade waits for a published ARMv7 pin' rollback upgrade
 check 0 'unpublished upgrade preserves the selected ARM64 store' equal "${OLD}" "$(readlink "${AWG_BT_STORE_DIR}/current")"
 
+AWG_BT_RELEASE_ASSET_ARMV7="${SAVED_ARMV7[0]}"
+AWG_BT_RELEASE_ARCHIVE_SHA256_ARMV7="${SAVED_ARMV7[1]}"
+AWG_BT_RELEASE_BINARY_SHA256_ARMV7="${SAVED_ARMV7[2]}"
+if [[ -n "${AWG_BT_RELEASE_ASSET_ARMV7}" ]]; then
+	check 0 'the actually adopted ARMv7 release is selectable' _awgBtSelectRelease armv7
+	check 0 'the adopted ARMv7 archive is selected exactly' equal "${AWG_BT_RELEASE_ASSET_ARMV7}" "${_AWG_BT_REL_ASSET}"
+fi
+
 # A full adoption supplies all three constants. A partial or malformed contract
 # must never reuse stale state or become an installable release.
 AWG_BT_RELEASE_ASSET_ARMV7="boringtun-cli-${AWG_BT_RELEASE_VERSION}-g${AWG_BT_RELEASE_SOURCE_COMMIT:0:12}-linux-armv7-musleabihf.tar.gz"
@@ -160,8 +174,13 @@ AWG_BT_RELEASE_ARCHIVE_SHA256_ARMV7="$(printf a%.0s {1..64})"
 AWG_BT_RELEASE_BINARY_SHA256_ARMV7=""
 check 1 'partially adopted ARMv7 contract is rejected' _awgBtSelectRelease armv7
 AWG_BT_RELEASE_BINARY_SHA256_ARMV7="$(printf b%.0s {1..64})"
+AWG_BT_RELEASE_BUILD=2
 check 0 'complete verified ARMv7 constants make it selectable' _awgBtSelectRelease armv7
-check 0 'selected archive keeps hard-float naming' equal "${AWG_BT_RELEASE_ASSET_ARMV7%.tar.gz}" "${_AWG_BT_REL_ID}"
+check 0 'later ARMv7 build has a distinct hard-float store identity' equal \
+	"boringtun-cli-${AWG_BT_RELEASE_VERSION}-g${AWG_BT_RELEASE_SOURCE_COMMIT:0:12}-b2-linux-armv7-musleabihf" "${_AWG_BT_REL_ID}"
+AWG_BT_RELEASE_BUILD=1
+check 0 'first ARMv7 build remains selectable' _awgBtSelectRelease armv7
+check 0 'first ARMv7 build preserves the original hard-float store identity' equal "${AWG_BT_RELEASE_ASSET_ARMV7%.tar.gz}" "${_AWG_BT_REL_ID}"
 
 sed '/^AWG_BT_RELEASE_\(ASSET\|ARCHIVE_SHA256\|BINARY_SHA256\)_ARMV7=/d' \
 	"${PROJECT_ROOT}/amneziawg-install.sh" >"${T}/legacy.sh"

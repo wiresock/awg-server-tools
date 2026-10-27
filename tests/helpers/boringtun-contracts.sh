@@ -33,6 +33,20 @@ btc_embedded_value() { # <installer> <NAME>
 	sed -n "s/^AWG_BT_RELEASE_$2=\"\\(.*\\)\"\$/\\1/p" "$1"
 }
 
+# A live candidate must be the exact binary selected by this checkout, rather
+# than an arbitrary executable reporting the same 0.7.1 version. Read constants
+# as data; never source a caller-supplied installer or execute the binary.
+btc_embedded_binary_matches() { # <installer> <binary>
+	local HASH EXPECTED ARCH
+	HASH="$(sha256sum -- "$2" 2>/dev/null | cut -d' ' -f1)" || return 1
+	[[ "${HASH}" =~ ^[0-9a-f]{64}$ ]] || return 1
+	for ARCH in X86_64 AARCH64 ARMV7; do
+		EXPECTED="$(btc_embedded_value "$1" "BINARY_SHA256_${ARCH}")"
+		[[ "${EXPECTED}" =~ ^[0-9a-f]{64}$ && "${HASH}" == "${EXPECTED}" ]] && return 0
+	done
+	return 1
+}
+
 # Every way in which the release an installer embeds is not internally
 # consistent, one per line; nothing when it is. The tag, the download URL and
 # the asset names must all follow from the embedded version, source commit and

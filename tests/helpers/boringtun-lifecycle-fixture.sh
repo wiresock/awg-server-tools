@@ -60,11 +60,11 @@ bt_unit_release() { # <unit> <store>
 
 # bt_fixture_build2 <store> <pinned release id>: a TEST FIXTURE build 2 of the
 # pinned source commit (the same files and MANIFEST under the -b2 store name
-# that a later build of that commit would get), and print its store name. Its
+# for a different build of that commit), and print its store name. Its
 # name is one the helpers of installer versions before PR 6 refuse.
 bt_fixture_build2() {
 	local STORE="$1" PINNED="$2" FIXTURE FILE
-	FIXTURE="$(sed -E 's/(-g[0-9a-f]{12})-linux-/\1-b2-linux-/' <<<"${PINNED}")"
+	FIXTURE="$(sed -E 's/(-g[0-9a-f]{12})(-b[1-9][0-9]*)?-linux-/\1-b2-linux-/' <<<"${PINNED}")"
 	[[ "${FIXTURE}" != "${PINNED}" && ! -e "${STORE}/${FIXTURE}" ]] || return 1
 	mkdir -m 0755 -- "${STORE}/${FIXTURE}" || return 1
 	for FILE in LICENSE MANIFEST THIRD-PARTY-LICENSES boringtun-cli; do
