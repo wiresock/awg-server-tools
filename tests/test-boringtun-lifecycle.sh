@@ -558,7 +558,22 @@ rm -rf -- "${STORE:?}"/*
 store_release b1
 links b1
 pin_to b2
+# Old installers could generate S4=150. New client admission must reject
+# that inherited budget without making status, binary upgrade or rollback
+# unavailable, and without rewriting any existing configuration.
+SERVER_AWG_S4=150
+CLIENT_MTU=''
+serializeParams "${AMNEZIAWG_DIR}/params"
+sed -i '/^ListenPort = /a S4 = 150' "${SERVER_AWG_CONF}"
 BEFORE_HASHES="$(config_hashes)"
+run validateParamsFile
+assert_rc 0 "${RC}" "legacy S4=150 params remain readable"
+run eval 'awg() { echo reached >>"${S}/unsafe-key-work"; return 99; }; nonInteractiveAddClient unsafe'
+assert_rc 1 "${RC}" "legacy S4=150 refuses new client creation"
+assert_contains "effective MTU 1270, below 1280" "${ERR}" "legacy rejection explains its actual budget"
+assert_true "legacy refusal never reaches key or backend work" test ! -e "${S}/unsafe-key-work"
+assert_true "legacy refusal creates no client file" test ! -e "${AMNEZIAWG_DIR}/clients/awg0-client-unsafe.conf"
+assert_eq "${BEFORE_HASHES}" "$(config_hashes)" "legacy refusal preserves params, server, runtime and existing clients"
 run upgrade
 assert_rc 0 "${RC}" "b1 -> b2: the upgrade succeeds"
 assert_eq "current=${STORE_ID_[b2]} previous=${STORE_ID_[b1]} store=[$(sorted ${STORE_ID_[b1]} ${STORE_ID_[b2]} previous current)]" \

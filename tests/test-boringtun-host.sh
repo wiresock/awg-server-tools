@@ -36,6 +36,8 @@ done
 source "${INSTALLER}"
 # shellcheck source=helpers/boringtun-contracts.sh
 source "${SCRIPT_DIR}/helpers/boringtun-contracts.sh"
+# shellcheck source=helpers/boringtun-host-install-fixture.sh
+source "${SCRIPT_DIR}/helpers/boringtun-host-install-fixture.sh"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/boringtun-host-tests.XXXXXX")"
 T="$(CDPATH='' cd -- "${T}" && pwd -P)"
@@ -1877,5 +1879,34 @@ OS=ubuntu AWG_BACKEND=kernel RUN_INPUT=y run uninstall_flow
 assert_true "a kernel uninstall still removes it" test ! -e "${AWG_MODULES_LOAD_FILE}"
 
 echo
+echo "--- historical install randomness stays inside its fixture"
+mkdir -p "${T}/initial-install-bin"
+cat >"${T}/initial-install-bin/shuf" <<'EOF'
+#!/bin/bash
+printf 'delegated'; printf '|%s' "$@"; printf '\n'
+EOF
+chmod +x "${T}/initial-install-bin/shuf"
+cat >"${T}/initial-install.sh" <<'EOF'
+for _ in 1 2 3 4; do shuf -i15-150 -n1; done
+shuf -i49152-65535 -n1
+shuf -i15-128 -n1
+bash -c 'printf "env:%s\n" "$AWG_HOST_FIXTURE_PROBE"; shuf -i15-150 -n1; shuf -i49152-65535 -n1'
+EOF
+INITIAL_HASH="$(sha256sum "${T}/initial-install.sh")"
+PATH="${T}/initial-install-bin:${PATH}" AWG_HOST_FIXTURE_PROBE=passed \
+	bt_live_initial_install "${T}/initial-install.sh" historical >"${T}/initial-install.out"
+HISTORICAL_OUT="$(cat "${T}/initial-install.out")"
+assert_eq $'120\n120\n120\n120\ndelegated|-i49152-65535|-n1\ndelegated|-i15-128|-n1\nenv:passed\n120\ndelegated|-i49152-65535|-n1' "${HISTORICAL_OUT}" \
+	"historical fixture fixes only the exact old S-field argument vector"
+FRESH_OUT="$(PATH="${T}/initial-install-bin:${PATH}" AWG_HOST_FIXTURE_PROBE=passed bt_live_initial_install "${T}/initial-install.sh" fresh)"
+assert_eq $'delegated|-i15-150|-n1\ndelegated|-i15-150|-n1\ndelegated|-i15-150|-n1\ndelegated|-i15-150|-n1\ndelegated|-i49152-65535|-n1\ndelegated|-i15-128|-n1\nenv:passed\ndelegated|-i15-150|-n1\ndelegated|-i49152-65535|-n1' "${FRESH_OUT}" \
+	"fresh install keeps real shuf after a historical fixture invocation"
+assert_eq "${INITIAL_HASH}" "$(sha256sum "${T}/initial-install.sh")" "historical installer bytes are unchanged"
+assert_true "the randomness override is not exported to subsequent commands" test -z "$(declare -F shuf)"
+assert_true "the captured executable path stays inside the fixture" test -z "${AWG_HOST_FIXTURE_REAL_SHUF+x}"
+printf 'exit 17\n' >"${T}/initial-failure.sh"
+run bt_live_initial_install "${T}/initial-failure.sh" historical
+assert_rc 17 "${RC}" "the fixture preserves installer failure"
+
 echo "BoringTun host tests: ${PASS} passed, ${FAIL} failed"
 [[ "${FAIL}" -eq 0 ]]
