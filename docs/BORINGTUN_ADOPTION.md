@@ -6,9 +6,10 @@ reads GitHub and writes a new local evidence directory. It does not edit the
 checkout, publish a release, create a PR, or install anything. It never executes
 a downloaded BoringTun binary. There is no `latest` mode.
 
-The installer continues to use its existing AWG-hosted release until a separate
-adoption patch is reviewed and merged. Existing release assets and historical
-installer URLs stay untouched. The release identity remains
+The installer selects the verified first fork release
+`boringtun-cli-0.7.1-ga92909c49920-b101` for Linux x86_64, ARM64 and ARMv7.
+Existing installations retain their binary until an explicit upgrade. Existing
+release assets and historical installer URLs stay untouched. The release identity remains
 `boringtun-cli-VERSION-gCOMMIT12-bBUILD`; for new fork releases, BUILD is the
 merged PR number. Existing Linux x86_64/aarch64 archive names and the four-member
 archive format remain unchanged. New ARMv7 and macOS targets have their own
@@ -85,8 +86,7 @@ build must be a canonical master push at C; PR-event and maintenance-dispatch
 runs are ineligible. Empty Actions PR associations are expected and do not
 replace this independent discovery. Unrelated associated PRs cannot select C.
 Normal merge, squash and rebase use the API's postmerge source, not PR head H.
-The
-original build must have succeeded and postdate the merge. The original
+The original build must have succeeded and postdate the merge. The original
 publication attempt must have successful `Validate completed build` and `Attest
 verified content` jobs, read through its attempt-specific paginated jobs API.
 Its overall result may be failure if a later publication or cleanup step failed:
@@ -134,10 +134,9 @@ adoption command will accept it.
 After all checks and a second release/tag readback, the output contains:
 
 - `adoption.patch`: proposed changes to the shared release identity and the
-  three Linux installer selections only. The ARMv7 asset/hash fields stay empty
-  in the current installer until a published release passes verification and
-  its explicit adoption patch is reviewed. macOS assets never become installer
-  selections.
+  three Linux installer selections only. All three ARMv7 asset/hash fields must
+  be populated together from the verified release. macOS assets never become
+  installer selections.
 - `candidate-pin.env`: the exact source/toolchain pin used for static inspection.
   This is evidence, not an automatic replacement of the historical build pin.
 - `verification.json`: selected attestation identities, the full parsed output
@@ -156,7 +155,7 @@ contract, host, upgrade, and rollback checks before approving adoption. Neither
 the fork's automated releases nor this helper automatically upgrades servers.
 Rollback continues to select an existing verified release/store identity.
 
-## Implementation and remaining activation gates
+## Implemented verification and rollout evidence
 
 `scripts/boringtun_release_policy.py` is a byte-for-byte vendored copy of the
 fork's same-named pure policy module. Schema or identity changes must update both
@@ -164,20 +163,32 @@ copies together and rerun both repositories' tests. The adoption tests are
 offline: they use synthetic REST/gh fixtures and real static archive checking.
 Those fixtures are not cryptographic evidence of a live GitHub workflow run.
 
-Before activation, capture and review live pinned-CLI verification output and
-merged-PR run/attempt metadata for the supported merge strategies. The build
-`head_sha == merged source` rule remains conservative until that evidence is
-available; a missing association field must not be guessed. The publisher's
-closed-event association checks bind the descriptor's build claim to its
-trusted recipe. Adoption also independently checks the recorded attempt's
-identity, status, source and original creation time.
+The canonical build is a push to master. It resolves exactly one merged PR
+whose merge result equals the pushed source, checks the executed workflow
+identity and source ancestry, and excludes direct pushes. The publisher does
+not rely on empty `workflow_run.pull_requests` metadata or a display name.
+Adoption independently checks the recorded attempt's identity, status, source,
+original creation time and workflow. Merge, squash and rebase results must meet
+the same exact-source predicate; ambiguous or missing evidence fails closed.
 The minimal `id`/`url`/`name` association schema was confirmed from the real
 [fork run 40239937252, attempt 1](https://github.com/Wiresock-Foundation/wiresock-boringtun/actions/runs/40239937252/attempts/1).
-That read establishes the repository-object schema; it does not establish the
-closed-merged event's source-SHA semantics or satisfy the activation fixture gate.
+That read establishes the repository-object schema, not signing evidence.
 
-The unresolved fork copyright years, publisher retirement/owner audit, and
-first deployment approval remain release gates. This command does not resolve
-them, disable historical workflow reruns, modify repository security settings,
-or grant permission to publish. No fork release was created or adopted while
-implementing this helper.
+The first published fork release is
+[`ga92909c49920-b101`](https://github.com/Wiresock-Foundation/wiresock-boringtun/releases/tag/boringtun-cli-0.7.1-ga92909c49920-b101).
+Its five archives and descriptor were independently verified with pinned gh
+2.100.0 against build `40409966150/1` and publisher `40412814028/1`; the same
+original draft was recovered after a draft-lookup defect, without rebuilding or
+re-signing. A fresh invocation of this adoption command on 2026-10-27 verified
+all seven public assets and all six signed subjects, checked every platform's
+static archive and full notices, and generated the installer patch. No downloaded
+binary was executed. Exact identities and digests are recorded in
+[the first-release adoption evidence](BORINGTUN_ADOPTION_2026-10-27.md).
+The later lookup repair is a distinct source/release. See
+[migration status](BORINGTUN_MIGRATION.md) for retirement and trust limitations.
+
+The owner supplied earlier-component history, so exhaustive proof of an exact
+creation year is no longer a date-only release blocker. Existing notices remain
+unchanged; this does not independently verify every year or transfer another
+contributor's rights. The helper does not change security settings, grant
+publication permission or deploy to a server.

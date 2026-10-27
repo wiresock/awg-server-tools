@@ -113,25 +113,25 @@ AWG_INSTALLER_CAPABILITY_PROTOCOL_DIAGNOSTICS="protocol-diagnostics-v1"
 # they name an earlier release. tests/test-boringtun-host.sh checks that they
 # are internally consistent, and tests/test-boringtun-public-release.sh that
 # the release is public with exactly these bytes.
-AWG_BT_RELEASE_TAG="boringtun-cli-0.7.1-ge94c04f3f4fd-b1"
-AWG_BT_RELEASE_BASE_URL="https://github.com/wiresock/awg-server-tools/releases/download/boringtun-cli-0.7.1-ge94c04f3f4fd-b1"
+AWG_BT_RELEASE_TAG="boringtun-cli-0.7.1-ga92909c49920-b101"
+AWG_BT_RELEASE_BASE_URL="https://github.com/Wiresock-Foundation/wiresock-boringtun/releases/download/boringtun-cli-0.7.1-ga92909c49920-b101"
 AWG_BT_RELEASE_VERSION="0.7.1"
 AWG_BT_RELEASE_SOURCE_REPOSITORY="https://github.com/Wiresock-Foundation/wiresock-boringtun"
-AWG_BT_RELEASE_SOURCE_COMMIT="e94c04f3f4fdb8b392f9586db07a269ea0bf7575"
+AWG_BT_RELEASE_SOURCE_COMMIT="a92909c49920e12de11fb0e066192b8f39b5b212"
 # The release's build number (the tag's -b<build>). It is part of the store
 # identity of builds from 2 on (_awgBtReleaseStoreId).
-AWG_BT_RELEASE_BUILD="1"
-AWG_BT_RELEASE_ASSET_X86_64="boringtun-cli-0.7.1-ge94c04f3f4fd-linux-x86_64-musl.tar.gz"
-AWG_BT_RELEASE_ARCHIVE_SHA256_X86_64="6614814d11cbec37cf65c40887822af9866ac5abc05929332968737c39c6af68"
-AWG_BT_RELEASE_BINARY_SHA256_X86_64="7c717357554a4d8022154fbdb1c40c92de8174ee064e81878fdf5f610651fb79"
-AWG_BT_RELEASE_ASSET_AARCH64="boringtun-cli-0.7.1-ge94c04f3f4fd-linux-aarch64-musl.tar.gz"
-AWG_BT_RELEASE_ARCHIVE_SHA256_AARCH64="a2d7c4a0cc702a7dfc146036e6bda6e341701a3609a6842462bfdbebf7490880"
-AWG_BT_RELEASE_BINARY_SHA256_AARCH64="cc1cdf215bb3d75f8a7006f8d424d698e9574dadb3e08becd8ace17a3c44cb08"
-# ARMv7 support is prepared, but this published release has no ARMv7 artifact.
-# A separate verified adoption must fill all three values before installation.
-AWG_BT_RELEASE_ASSET_ARMV7=""
-AWG_BT_RELEASE_ARCHIVE_SHA256_ARMV7=""
-AWG_BT_RELEASE_BINARY_SHA256_ARMV7=""
+AWG_BT_RELEASE_BUILD="101"
+AWG_BT_RELEASE_ASSET_X86_64="boringtun-cli-0.7.1-ga92909c49920-linux-x86_64-musl.tar.gz"
+AWG_BT_RELEASE_ARCHIVE_SHA256_X86_64="d7dbd5019540fb0c9c451b41b8b16830cb5d5923afec20a61ce4edf2c513358f"
+AWG_BT_RELEASE_BINARY_SHA256_X86_64="8b0bbb4897d4ccce34b89025374f97476cd6505b4f8bf2346ebd21126f797b8a"
+AWG_BT_RELEASE_ASSET_AARCH64="boringtun-cli-0.7.1-ga92909c49920-linux-aarch64-musl.tar.gz"
+AWG_BT_RELEASE_ARCHIVE_SHA256_AARCH64="3171278b375c2e5b3c55f288c1db34513c78b0cbba6165244264f7efb4b51dd4"
+AWG_BT_RELEASE_BINARY_SHA256_AARCH64="c49f5f1501885aaabd787e5ab24f18e4070d1bf2e1b21ff255211d0f20428f94"
+# ARMv7-A hard-float uses the verified fork release's dedicated musleabihf asset.
+# ARMv6 hosts are unsupported; selection also checks the userspace ABI.
+AWG_BT_RELEASE_ASSET_ARMV7="boringtun-cli-0.7.1-ga92909c49920-linux-armv7-musleabihf.tar.gz"
+AWG_BT_RELEASE_ARCHIVE_SHA256_ARMV7="bd724ea1d8ad12a0b2185b0f361add9bb1cadccb39df8ebcccfac3fe1d0847b9"
+AWG_BT_RELEASE_BINARY_SHA256_ARMV7="bd19a5957e78c875b1f8ec75ef2296cddce19ba8869c7ca6d3697f8b206a35c0"
 
 # Where the BoringTun runtime lives. The generated helpers embed these values
 # when they are written, so a helper never reads a path from its environment.

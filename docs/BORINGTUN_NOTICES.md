@@ -79,15 +79,18 @@ weaken Cargo's placeholder check. Removing a copyright line, terms, a runtime
 section, or the fork notice fails verification.
 
 Linux static ELF checks and macOS Mach-O/system-link checks are distinct. Native
-macOS compilation, SDK/link receipts, two-build equality and utun behavior still
-require real macOS execution before release activation; fixtures do not establish
-those results. No Developer ID or notarization credentials are introduced.
+macOS compilation, SDK/link receipts, two-build equality and utun behavior passed
+for the first published fork release and remain required for each new release;
+fixtures do not establish those results. No Developer ID or notarization
+credentials are introduced.
 
 The fork's existing 2024–2026 year assertions are retained, **not independently
 verified**. The 33 affected paths and source-port evidence are listed in the
-fork's `docs/ATTRIBUTION.md`; six 2026-only notices remain 2026. Publication is
-blocked pending owner evidence or an explicit correction. Other contributors'
-authorship is preserved. A locally passing notice check does not resolve that
-historical ownership question or authorize release publication.
+fork's `docs/ATTRIBUTION.md`; six 2026-only notices remain 2026. The owner stated
+that wgbooster/netlib existed before 2022 and identified the archived earlier
+fork. This first-party evidence removed the date-only release blocker without
+inventing an exact creation year or changing retained notices. Other contributors'
+authorship is preserved. Local notice checks prove preservation and provenance of
+the reproduced text, not exhaustive historical ownership or publication authority.
 
 The migration is described in [BORINGTUN_MIGRATION.md](BORINGTUN_MIGRATION.md).

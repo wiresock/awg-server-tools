@@ -509,7 +509,7 @@ if [[ -n "${AWG_LIVE_PREVIOUS_INSTALLER:-}" ]]; then
 	# The binary's own answer is then checked against this.
 	case "${PREV_TAG}" in
 		boringtun-cli-0.7.1-g71d88784ad29-b1 | boringtun-cli-0.7.1-gae2ab44e9a68-b1) PREV_AUTO=0 ;;
-		boringtun-cli-0.7.1-gb94943906b11-b1) PREV_AUTO=1 ;;
+		boringtun-cli-0.7.1-gb94943906b11-b1 | boringtun-cli-0.7.1-ge94c04f3f4fd-b1) PREV_AUTO=1 ;;
 		*) die "the earlier installer's release ${PREV_TAG} is not one whose auto support this test knows" ;;
 	esac
 	echo "    earlier installer's release: ${PREV_TAG}, ${ARCH} binary ${PREV_BINARY_SHA256}, auto $( ((PREV_AUTO)) && echo supported || echo unsupported)"
@@ -1304,7 +1304,7 @@ echo "=== Auto (fixed layouts)"
 check "the auto collision test runs the embedded release's binary" \
 	test "$(sha256sum "${CLIENT_BIN}" | cut -d' ' -f1)" = "${BINARY_SHA256}"
 COMPARE_BIN=()
-if ((PREV_AUTO)); then
+if [[ "${PREV_TAG:-}" == boringtun-cli-0.7.1-gb94943906b11-b1 ]]; then
 	check "  and compares it with the earlier release's binary, a copy with the earlier installer's embedded SHA-256" \
 		test "$(sha256sum "${PREV_BIN}" 2>/dev/null | cut -d' ' -f1)" = "${PREV_BINARY_SHA256}"
 	COMPARE_BIN=("${PREV_BIN}")
@@ -1312,7 +1312,7 @@ fi
 bash "${SCRIPT_DIR}/test-boringtun-auto-collision-live.sh" "${CLIENT_BIN}" "${COMPARE_BIN[@]}" 2>&1 | sed 's/^/    | /'
 AUTO_COLLISION_RC="${PIPESTATUS[0]}"
 check "the auto collision test passes" test "${AUTO_COLLISION_RC}" -eq 0
-if ((PREV_AUTO)); then
+if [[ "${PREV_TAG:-}" == boringtun-cli-0.7.1-gb94943906b11-b1 ]]; then
 	echo "=== Auto hints, the earlier release's semantics, on ${PREV_ID}"
 	bash "${SCRIPT_DIR}/test-boringtun-auto-hint-live.sh" "${PREV_BIN}" 2>&1 | sed 's/^/    | /'
 	AUTO_HINT_RC="${PIPESTATUS[0]}"

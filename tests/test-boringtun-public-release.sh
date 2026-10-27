@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Live check that the BoringTun release an installer embeds is public, with
-# exactly the embedded bytes. It downloads both release assets and SHA256SUMS
+# exactly the embedded bytes. It downloads the release assets and SHA256SUMS
 # anonymously from the exact URLs the installer uses, and checks each archive's
 # SHA-256, its layout, the SHA-256 of the boringtun-cli inside it and its
 # MANIFEST, all against the installer's AWG_BT_RELEASE_* constants alone.
@@ -12,7 +12,10 @@
 # earlier release the installer still embeds stays downloadable; after that
 # change it proves the adopted one.
 #
-# Requirements: curl, tar, sha256sum and network access to GitHub.
+# Fork releases additionally require the complete five-platform schema-2
+# checksum set and RELEASE.json; all three Linux selections match the installer.
+# Adoption separately verifies signatures/provenance; this checks public bytes.
+# Requirements: curl, tar, sha256sum, Python 3 and network access to GitHub.
 #
 # Usage: bash tests/test-boringtun-public-release.sh [installer]
 #        (default: amneziawg-install.sh of this checkout)
@@ -74,14 +77,39 @@ else
 	exit 1
 fi
 
-for ARCH in x86_64 aarch64; do
+ARCHES=(x86_64 aarch64)
+FORK=0
+if [[ "${BASE}" == "${BTC_FORK_RELEASE_DOWNLOAD_URL}/${TAG}" ]]; then
+	FORK=1
+	ARCHES+=(armv7)
+	if ! download "${BASE}/RELEASE.json" "${WORK}/RELEASE.json" ||
+		! python3 "${SCRIPT_DIR}/helpers/boringtun-public-contract.py" "${INSTALLER}" "${WORK}/RELEASE.json" >"${WORK}/expected-sums"; then
+		bad "the public fork descriptor matches all adopted Linux pins and the five-platform contract"
+		exit 1
+	fi
+	ok "the public fork descriptor matches all adopted Linux pins and the five-platform contract"
+	# Names come only from the validated descriptor, never arbitrary checksum input.
+	while read -r HASH ASSET; do
+		if download "${BASE}/${ASSET}" "${WORK}/${ASSET}"; then
+			check "${ASSET} matches its public descriptor hash" test "$(sha_of "${WORK}/${ASSET}")" = "${HASH}"
+		else
+			bad "${ASSET} is downloadable anonymously"
+		fi
+	done <"${WORK}/expected-sums"
+else
+	printf '%s  %s\n%s  %s\n' "$(value ARCHIVE_SHA256_AARCH64)" "$(value ASSET_AARCH64)" \
+		"$(value ARCHIVE_SHA256_X86_64)" "$(value ASSET_X86_64)" >"${WORK}/expected-sums"
+fi
+
+for ARCH in "${ARCHES[@]}"; do
 	KEY="${ARCH^^}"
 	ASSET="$(value "ASSET_${KEY}")"
 	ARCHIVE_SHA256="$(value "ARCHIVE_SHA256_${KEY}")"
 	BINARY_SHA256="$(value "BINARY_SHA256_${KEY}")"
 	STEM="${ASSET%.tar.gz}"
 	echo "=== ${BASE}/${ASSET}"
-	if ! download "${BASE}/${ASSET}" "${WORK}/${ASSET}"; then
+	if { ((FORK)) && [[ ! -f "${WORK}/${ASSET}" ]]; } ||
+		{ ((!FORK)) && ! download "${BASE}/${ASSET}" "${WORK}/${ASSET}"; }; then
 		bad "${ASSET} is downloadable anonymously"
 		continue
 	fi
@@ -96,17 +124,21 @@ for ARCH in x86_64 aarch64; do
 	check "its MANIFEST names the embedded source commit ${COMMIT}" manifest_has "source_commit=${COMMIT}"
 	check "  the embedded source repository" manifest_has "source_repository=${REPOSITORY}"
 	check "  the embedded version" manifest_has "version=${VERSION}"
-	check "  the architecture ${ARCH}" manifest_has "target=${ARCH}-unknown-linux-musl"
+	TARGET="${ARCH}-unknown-linux-musl"
+	[[ "${ARCH}" != armv7 ]] || TARGET=armv7-unknown-linux-musleabihf
+	check "  the architecture ${ARCH}" manifest_has "target=${TARGET}"
 	check "  and the embedded binary SHA-256" manifest_has "binary_sha256=${BINARY_SHA256}"
 done
 
 echo "=== ${BASE}/SHA256SUMS"
-printf '%s  %s\n%s  %s\n' "$(value ARCHIVE_SHA256_AARCH64)" "$(value ASSET_AARCH64)" \
-	"$(value ARCHIVE_SHA256_X86_64)" "$(value ASSET_X86_64)" >"${WORK}/expected-sums"
 if download "${BASE}/SHA256SUMS" "${WORK}/SHA256SUMS"; then
 	ok "SHA256SUMS is downloadable anonymously"
-	check "it lists exactly the two embedded assets with their embedded hashes" cmp -s "${WORK}/SHA256SUMS" "${WORK}/expected-sums"
-	check "and the downloaded archives match it" bash -c 'cd "$1" && sha256sum --quiet -c SHA256SUMS' _ "${WORK}"
+	if cmp -s "${WORK}/SHA256SUMS" "${WORK}/expected-sums"; then
+		ok "it lists exactly the expected platform assets and hashes"
+		check "and the downloaded archives match it" bash -c 'cd "$1" && sha256sum --quiet -c SHA256SUMS' _ "${WORK}"
+	else
+		bad "it lists exactly the expected platform assets and hashes"
+	fi
 	echo "    SHA256SUMS $(sha_of "${WORK}/SHA256SUMS")"
 else
 	bad "SHA256SUMS is downloadable anonymously"

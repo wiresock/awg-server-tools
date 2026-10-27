@@ -513,9 +513,9 @@ echo "=== Release identity ==="
 # release being prepared, which this installer may not have adopted yet.
 assert_true "the embedded build number is a positive integer" eval '[[ "${REAL_BUILD}" =~ ^[1-9][0-9]*$ ]]'
 assert_eq "b${REAL_BUILD}" "${REAL_TAG##*-g*-}" "the embedded tag ends with that build"
-assert_eq "${REAL_ASSET_X86_64%.tar.gz}" "$(_awgBtReleaseStoreId "${REAL_VERSION}" "${REAL_COMMIT}" "${REAL_BUILD}" x86_64)" \
-	"the published build 1 keeps the store name PR 4 and PR 5 installs gave it (x86_64)"
-assert_eq "${REAL_ASSET_AARCH64%.tar.gz}" "$(_awgBtReleaseStoreId "${REAL_VERSION}" "${REAL_COMMIT}" "${REAL_BUILD}" aarch64)" \
+assert_eq "${REAL_ASSET_X86_64%.tar.gz}" "$(_awgBtReleaseStoreId "${REAL_VERSION}" "${REAL_COMMIT}" 1 x86_64)" \
+	"build 1 preserves the original archive-directory store naming (x86_64)"
+assert_eq "${REAL_ASSET_AARCH64%.tar.gz}" "$(_awgBtReleaseStoreId "${REAL_VERSION}" "${REAL_COMMIT}" 1 aarch64)" \
 	"  (aarch64)"
 assert_eq "boringtun-cli-0.7.1-g111111111111-linux-x86_64-musl" "$(_awgBtReleaseStoreId 0.7.1 "${COMMIT_X}" 1 x86_64)" "build 1 has no build component"
 assert_eq "boringtun-cli-0.7.1-g111111111111-b2-linux-x86_64-musl" "$(_awgBtReleaseStoreId 0.7.1 "${COMMIT_X}" 2 x86_64)" "build 2 names its build"

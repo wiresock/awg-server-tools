@@ -71,9 +71,9 @@ program that runs it.
 
 | Component | License | How the project uses it | Obligations for the project |
 | --- | --- | --- | --- |
-| WireSock BoringTun `boringtun-cli` | BSD-3-Clause (Cloudflare, Inc.; fork additions by Vadim Smirnov, doing business as WireSock) | Existing releases are **distributed** by this repository; fork-owned publication is being prepared. The installer downloads an explicitly selected release and runs it as a separate program. | Binary redistribution must reproduce BoringTun's notices and those of everything linked into it: each archive ships `LICENSE` and `THIRD-PARTY-LICENSES` (see below). BSD-3-Clause does not require source to be provided; the archive `MANIFEST` names the public source repository and commit anyway. |
+| WireSock BoringTun `boringtun-cli` | BSD-3-Clause (Cloudflare, Inc.; fork additions by Vadim Smirnov, doing business as WireSock) | Historical releases are **distributed** by this repository; new releases are published by the fork. The installer downloads an explicitly selected release and runs it as a separate program. | Binary redistribution must reproduce BoringTun's notices and those of everything linked into it: each archive ships `LICENSE` and `THIRD-PARTY-LICENSES` (see below). BSD-3-Clause does not require source to be provided; the archive `MANIFEST` names the public source repository and commit anyway. |
 | Rust crates linked into `boringtun-cli` | Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0 (gated by `packaging/boringtun/deny.toml`) | Statically linked into the distributed binary. | Reproduced in `THIRD-PARTY-LICENSES`. No crate in the graph may ship an Apache-2.0 `NOTICE` file: the build fails if one does, because that file would have to be reproduced too. |
-| musl libc, Rust runtime and native support code | Per-component terms, including MIT, Apache-2.0 WITH LLVM-exception and upstream notices | Rust runtime is linked into `boringtun-cli`; Linux targets also use musl and self-contained native runtime objects, while macOS uses platform system libraries. | The reviewed target-specific runtime bundle is appended to newly generated notices; published archives still need replacement releases. See [Known gaps](#known-gaps). |
+| musl libc, Rust runtime and native support code | Per-component terms, including MIT, Apache-2.0 WITH LLVM-exception and upstream notices | Rust runtime is linked into `boringtun-cli`; Linux targets also use musl and self-contained native runtime objects, while macOS uses platform system libraries. | New fork releases include the reviewed target-specific runtime bundle. Historical AWG archives remain unchanged. See [Known gaps](#known-gaps). |
 | Rust crates of `amneziawg-web` and `amneziawg-proxy` | Permissive, gated by `.github/licensing/deny.toml` | Downloaded from crates.io and built **on the server** by the install scripts. | None for the project, which distributes only its own source. Whoever distributes a built binary must include the crates' notices (see below). |
 | SQLite (via `libsqlite3-sys`) | Public domain | Compiled into `amneziawg-web` on the server. | None. |
 | AmneziaWG kernel module and `amneziawg-tools` (`awg`, `awg-quick`) | GPL-2.0 | Installed by the system package manager from Amnezia's package repository; run as separate programs. | None for the project, which does not distribute them. The packages carry their own license and source offers. |
@@ -107,15 +107,20 @@ lockfile fail these checks.
 
 These files are inputs to reproducible, attested release builds. Changing them
 changes archive bytes and requires a new release; published assets stay intact.
-The installer continues to use its explicitly selected published release until
-a separate reviewed adoption update.
+The installer explicitly selects the first verified public fork release,
+`boringtun-cli-0.7.1-ga92909c49920-b101`; see the
+[adoption evidence](BORINGTUN_ADOPTION_2026-10-27.md). Existing installations keep
+their current binary until explicitly upgraded.
 
 ### Vendored notice texts and SPDX metadata
 
 `packaging/boringtun/fork-license.txt` preserves Cloudflare's original notice and
 BSD-3-Clause terms and the fork notice under the same terms. Its REUSE annotation
 names both holders and retains the existing fork year range. The 2024 start is
-unverified, and retaining it does not resolve the release gate below.
+not independently verified. The owner's statement that wgbooster/netlib existed
+before 2022 concerns original components, not an exact date for each BoringTun
+adaptation. Retaining the original assertions no longer blocks release solely
+for lack of exhaustive date history; no notice was rewritten to an invented year.
 
 The two runtime files contain texts from several upstream projects, including
 conservative source-notice supersets. Each portion retains the holders and terms
@@ -179,16 +184,16 @@ license or the separate BoringTun policy.
 Implementation and publication are separate. These remaining gates do not
 change the license of anything in this repository.
 
-1. **Existing published BoringTun archives retain the notice gaps.** The local
-   packaging fix adds checksum-pinned runtime/native notices and the complete
-   fork notice, but does not modify any published archive. The corrected fork
-   year range still needs owner evidence or an explicit correction: the 2024
-   start has not been verified. New releases need the reviewed fork source,
-   successful build and reproducibility gates on every supported target, verified
-   attestations and authorized activation/publication. Installer adoption is
-   a separate reviewed change. This work is tracked in
-   [issue #175](https://github.com/wiresock/awg-server-tools/issues/175) and
-   should be done before `boringtun-cli` is distributed in any other product.
+1. **Historical AWG BoringTun archives retain the notice gaps.** New fork
+   releases contain checksum-pinned runtime/native notices and the complete
+   fork notice; old public files are not replaced. The first fork release passed
+   all five reproducibility lanes and six-subject attestation verification; see
+   [migration evidence](BORINGTUN_MIGRATION.md). Each subsequent release must
+   pass those gates again, and reaches AWG through a separate reviewed adoption.
+   Existing installations keep their old binary until explicitly upgraded.
+   [Issue #175](https://github.com/wiresock/awg-server-tools/issues/175) tracks
+   publication and adoption together; passing local packaging tests alone is
+   not its completion criterion.
 
 The open legal questions found in the audit are listed in
 [`LICENSING_INVENTORY.md`](LICENSING_INVENTORY.md#unresolved-questions).
@@ -235,8 +240,8 @@ AWG's BoringTun Artifacts workflow checks consumer contracts, archive fixtures
 and the pinned published release. Source dependency auditing and notice
 generation belong to the fork's BoringTun merged PR artifacts workflow and its
 read-only candidate platform validation workflow, using
-`packaging/boringtun/deny.toml`. The fork publisher remains disabled pending
-the activation gates in [BORINGTUN_MIGRATION.md](BORINGTUN_MIGRATION.md).
+`packaging/boringtun/deny.toml`. The fork publisher was enabled after owner
+approval and the activation gates in [BORINGTUN_MIGRATION.md](BORINGTUN_MIGRATION.md).
 
 To run the checks locally, install the tools at the versions the workflow pins
 and run the script from the repository root:

@@ -11,19 +11,21 @@ name: BoringTun Host
 # and uninstalls. Every job also runs the imitation mode auto: clients with
 # different imitation settings, several behind one address on different ports,
 # share the server port, and the server's datagrams to each are checked on the
-# wire. Three earlier installers start the upgrade paths: the last version
+# wire. Four earlier installers start the upgrade paths: the last version
 # without protocol imitation (9f5a1afb87f7, release 71d88784 build 1; x86_64),
 # the version that embedded the published ae2ab44e9a68 build 1 (c7cd737c221a;
 # x86_64 and aarch64), and the version that embedded the published
 # b94943906b11 build 1, the first release with imitation auto (4a6f6656ea14;
-# x86_64). Each installs its own release, which the test checks, upgrades to
+# x86_64), plus the last AWG-owned e94c04f3 release (aa2e91d, x86_64).
+# Each installs its own
+# release, which the test checks, upgrades to
 # this installer's release with this installer's --upgrade-boringtun, then
 # proves on those real, different binaries that a rollback refuses auto, rolls
 # back with a fixed imitation, refuses auto on the earlier binary and upgrades
 # again (from the first two), or that a rollback with auto configured keeps
 # auto running on the earlier binary and the upgrade back restores this
-# release (from b94943906b11, whose binary also runs the auto collision
-# scenarios for comparison), with traffic and an unchanged configuration; the
+# release (from b94943906b11 and e94c04f3; only b949 also runs the old-model
+# auto collision comparison), with traffic and an unchanged configuration; the
 # aarch64 fresh and the Debian jobs install with this one.
 # A separate job
 # downloads the public release that the installer embeds anonymously, and one
@@ -43,6 +45,8 @@ on:
       - tests/test-boringtun-auto-collision-live.sh
       - tests/test-boringtun-record-live.sh
       - tests/test-boringtun-public-release.sh
+      - tests/test-boringtun-public-contract.py
+      - tests/helpers/boringtun-public-contract.py
       - tests/test-boringtun-kernel-coexistence.sh
       - tests/helpers/boringtun-contracts.sh
       - tests/helpers/boringtun-wire-checks.sh
@@ -62,6 +66,8 @@ on:
       - tests/test-boringtun-auto-collision-live.sh
       - tests/test-boringtun-record-live.sh
       - tests/test-boringtun-public-release.sh
+      - tests/test-boringtun-public-contract.py
+      - tests/helpers/boringtun-public-contract.py
       - tests/test-boringtun-kernel-coexistence.sh
       - tests/helpers/boringtun-contracts.sh
       - tests/helpers/boringtun-wire-checks.sh
@@ -134,6 +140,12 @@ jobs:
             runner: ubuntu-24.04
             path: upgrade from b949439 b1
             previous: 4a6f6656ea149e80d981e44e4cf243326d721274
+            base: false
+          # The last adopted AWG-owned release, including imitation auto.
+          - arch: x86_64
+            runner: ubuntu-24.04
+            path: upgrade from e94c04f b1
+            previous: aa2e91d90a6b476d1cb27d92dd9a3b16971296ac
             base: false
     steps:
       - uses: actions/checkout@v6

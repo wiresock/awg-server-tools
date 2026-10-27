@@ -28,6 +28,7 @@ jobs:
       - run: |
           python3 tests/test-boringtun-notices.py
           python3 tests/test-boringtun-adopt.py
+          python3 tests/test-boringtun-public-contract.py
           bash tests/test-boringtun-artifact.sh
           bash tests/test-boringtun-release.sh
       - name: Check the exact release embedded by the installer

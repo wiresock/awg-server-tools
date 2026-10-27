@@ -2,45 +2,52 @@
 
 ## Current implementation status
 
-The local patch implements the read-only five-platform build workflow, strict
-release policy/orchestration, dormant publisher workflow and AWG adoption
-tooling. The fork's `.github/workflows/boringtun-release.yml` separates read-only
-validation, attestation and publication jobs. `release-policy.json` remains
-disabled, with attribution unresolved; signing and publication jobs require the
-validated activation output and independently recheck live policy. Nothing in
-this patch activates publication or changes existing releases or production.
+The fork publisher is active for ordinary merged-PR pushes after explicit owner
+approval. Its `.github/workflows/boringtun-release.yml` separates read-only
+validation, attestation and publication jobs; privileged jobs independently
+recheck live policy. The first release
+[`ga92909c49920-b101`](https://github.com/Wiresock-Foundation/wiresock-boringtun/releases/tag/boringtun-cli-0.7.1-ga92909c49920-b101)
+passed five-platform reproducibility, native macOS utun and three Linux interop
+lanes in build `40409966150/1`. Publisher `40412814028/1` signed all six subjects.
+The original draft was published with owner-approved recovery after a lookup
+bug; all seven public files and six signatures were independently verified.
+PR #102 added authenticated inventory and numeric-ID lookup. Its own canonical
+build `40459788478/1` passed all 13 jobs, but publisher `40461864091/1` exposed
+a remaining create/readback defect: it discards the returned draft ID and then
+depends on the inventory immediately showing that draft. Signing passed; draft
+`425104516` has no assets and is not public. No publication retry has been made.
+AWG must not adopt this source until the existing draft is safely recovered and
+its published files and original signatures are independently verified.
 
-The sections below describe the implemented contract and remaining live
-validation/activation gates. Local fixture tests do not establish successful
-GitHub publication, native macOS acceptance or resolution of historical dates.
+AWG workflow `369920301` was explicitly disabled and read back as
+`disabled_manually`; its current YAML and scripts cannot publish. The owner-side
+audit found no remaining legacy drafts or active publisher runs. Old releases
+remain immutable. Existing historical workflows still require owner control;
+current YAML alone cannot revoke every historical execution path.
 
 The canonical producer moves to `Wiresock-Foundation/wiresock-boringtun`.
-Each merged PR targeting its master branch has a distinct source-based tag:
+Each eligible ordinary merged-PR push to master has a distinct source-based tag:
 `boringtun-cli-<CLI version>-g<source SHA first 12>-b<PR number>`. The complete
 40-character source SHA is retained in MANIFEST and signed RELEASE.json.
 The PR's merged result identifies the source for merge, squash and rebase
 strategies; the PR head alone is not the release source. Direct pushes do not
 request releases. AWG adoption remains an explicit, reviewed version/hash patch.
 
-## Phased activation
+## Completed cutover and separate adoption
 
-1. Review both repository changes and resolve the source attribution gate.
-   The fork's release-policy configuration starts disabled, with unresolved
-   evidence listed. This implementation task does not activate or dispatch it.
-2. Merge the AWG retirement change only with owner approval. Its current Release
-   workflow has no publisher, and its Artifacts workflow runs consumer checks.
-   The Runtime workflow tests the exact published installer release rather than
-   building a separate artifact with placeholder notices. Historical releases,
-   assets, tags and installer defaults remain unchanged.
-3. With the owner's AWG access, audit all existing drafts and queued/running
-   legacy publishers, record their disposition, and **disable the historical
-   publishing workflow through GitHub**. A fork token or anonymous release list
-   cannot prove drafts are absent. A current-YAML edit cannot prevent historical
-   reruns. This repository does not change those settings or create credentials.
-4. Record real merge/squash/rebase event and run-attempt fixtures, canonical
-   repository/workflow IDs, and pinned-gh verified-attestation fixtures. Resolve
-   every activation blocker through review before enabling the fork publisher.
-5. Review the first eligible fork release and use `scripts/boringtun-adopt.py`
+1. Both implementation PRs and the identity/transport repairs were independently
+   reviewed and merged with publication disabled. Real canonical build evidence
+   and one separately approved attestation-only run preceded activation.
+2. The old AWG publisher was retired and disabled with owner approval before the
+   fork publisher was enabled. No stored credentials or keys were created.
+3. The owner stated that wgbooster/netlib existed before 2022 and identified the
+   earlier archived fork. Existing 2024-2026 notices are retained assertions,
+   not claims that the original components began in 2024. No exact origin year
+   or other contributor's ownership was invented; see the fork's
+   [attribution record](https://github.com/Wiresock-Foundation/wiresock-boringtun/blob/39d7bfc14f13a11a35122287ecdfa58c5ec1f218/docs/ATTRIBUTION.md).
+4. The owner accepted GitHub-hosted toolchain trust and ordinary-event coverage
+   and approved activation; exceptional missed events remain manual recovery.
+5. Review an explicitly selected published fork release and use `scripts/boringtun-adopt.py`
    to generate a local adoption patch. Review its exact tag, source, toolchain,
    notices, all five archive/binary hashes and the three Linux installer
    selections in a separate AWG PR.
@@ -64,9 +71,9 @@ in signing or publication jobs.
 The descriptor's `toolchain_sha256` binds the reviewed Rust version, Rust/LLVM
 source commits and pinned input manifest. Compiler/SDK receipts from each build
 are supplemental CI artifacts; their bytes are not included in that digest.
-Native compiler/SDK/packaging-tool and Bash source-build provenance remains an
-explicit activation gate. Do not describe this digest as attesting every host
-tool or as establishing a fully hermetic build.
+The owner explicitly accepted the GitHub-hosted compiler/SDK/packaging-tool
+trust boundary. Do not describe this digest as attesting every host tool or as
+establishing a fully hermetic build.
 
 Builds have `contents: read`. Signing receives only the necessary OIDC and
 attestation writes; publication receives content writes separately. Trusted
@@ -93,9 +100,11 @@ unrelated pending merge runs; reconciliation exposes missing releases.
 ## Explicit platform limitations
 
 GitHub can suppress merge-triggered workflows for merges made using
-GITHUB_TOKEN. Reconciliation must expose the missing build; rerunning a
-nonexistent run is not recovery. A reviewed recovery route and real event
-fixtures remain activation prerequisites, not claimed implementation proof.
+GITHUB_TOKEN; batched or missed pushes can also lack one build per merge.
+Read-only reconciliation exposes missing releases, but automatic catch-up is
+not implemented. The owner accepted ordinary-event coverage for initial
+activation. Recovery requires review; rerunning a nonexistent run is not
+recovery. No `actions: write` dispatcher was authorized or added.
 
 Creating a tag at an older merged commit whose workflow files differ from the
 current default branch may require authorization beyond `contents: write`.
@@ -105,8 +114,9 @@ does not broaden credentials, retarget the tag silently or skip that merge.
 
 ## Compatibility and rollback
 
-The installer continues embedding its existing published AWG release,
-`boringtun-cli-0.7.1-ge94c04f3f4fd-b1`, until a later adoption PR. Old AWG and
+The installer embeds the first verified public fork release,
+`boringtun-cli-0.7.1-ga92909c49920-b101`, through the explicit
+[adoption record](BORINGTUN_ADOPTION_2026-10-27.md). Old AWG and
 renamed-repository URLs remain accepted alongside the exact canonical fork URL.
 The source repository, archive naming and four-member format stay compatible.
 The installed cache key includes source/build but not publisher: adoption must
@@ -123,14 +133,15 @@ permission to execute an obsolete publisher.
 
 ARMv7 support requires ARMv7-A or later with VFPv3-D16 hard-float; original Pi 1
 and original Pi Zero ARMv6 CPUs are excluded. AWG selects the ARMv7 archive for
-compatible armhf hosts only after a reviewed adoption populates the currently
-empty ARMv7 release fields. Existing runnable ARM64 stores on mixed-bitness
+compatible armhf hosts using this release's verified ARMv7 pins. Existing runnable ARM64 stores on mixed-bitness
 hosts remain valid rollback candidates. This does not establish ARM32 support
 for the full web/proxy stack or validate a physical Pi.
 
-Native ARM64 and macOS execution, ARMv7 emulation/interop, actual GitHub
-event/attestation behavior and disposable host upgrade/rollback must be validated in their real environments before
-activation. Local fixture tests are not substitutes for those checks.
+Native ARM64/macOS execution, ARMv7 emulation/interop and actual GitHub
+event/attestation behavior passed for the first fork release. Each new source
+must pass again. Each AWG adoption separately runs disposable-host
+upgrade/rollback checks; physical Pi and production deployment remain distinct
+from those checks. Local fixtures are not substitutes for live evidence.
 
 ### Exact Bash for native macOS validation
 
@@ -151,11 +162,12 @@ production 5.3.20 gate. Its setup check ran under the macOS system Bash and did
 not log either version representation. GNU Bash's shipped `CHANGES` records that
 `[[` became subject to `set -e` after Bash 3.2; an unguarded comparison was
 therefore insufficient there. Installation and verification now have explicit
-failure exits and print the verified receipt. The local GNU-source verification
-build was Linux-only; it is not native macOS validation.
+failure exits and print the verified receipt. The initial local GNU-source
+verification build was Linux-only. Both native macOS lanes subsequently passed
+the exact Bash gate in canonical release CI.
 
 `BASH-TOOLCHAIN.json` is copied into each `NATIVE-TOOLCHAIN.json` as supplemental
 CI provenance. These receipt bytes and the Bash input manifest are not included
 in the release descriptor's existing `toolchain_sha256` projection. This change
-does not clear the native host/tool provenance activation gate or enable
-publication; both native macOS CI lanes must still pass.
+does not make the host toolchain hermetic; both native macOS CI lanes must pass
+for every release.

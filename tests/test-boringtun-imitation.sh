@@ -1056,7 +1056,10 @@ status() {
 make_install boringtun dns example.com 2
 echo inactive >"${S}/active-state"
 mkdir -p "${AWG_BT_STORE_DIR}"
-ln -sfn "${AWG_BT_RELEASE_ASSET_X86_64%.tar.gz}" "${AWG_BT_STORE_DIR}/current"
+# This fixture represents the pinned store, whose build suffix can differ from
+# the archive's directory. Status must not report a spurious pending upgrade.
+STATUS_RELEASE_ID="$(_awgBtReleaseStoreId "${AWG_BT_RELEASE_VERSION}" "${AWG_BT_RELEASE_SOURCE_COMMIT}" "${AWG_BT_RELEASE_BUILD}" x86_64)"
+ln -sfn "${STATUS_RELEASE_ID}" "${AWG_BT_STORE_DIR}/current"
 touch "${S}/store-ok"
 run status
 assert_rc 0 "${RC}" "a valid BoringTun installation reports status 0"
@@ -1066,8 +1069,8 @@ service_state=inactive
 imitation_protocol=dns
 imitation_domain=example.com
 imitation_domain_mode=configured
-installed_release=${AWG_BT_RELEASE_ASSET_X86_64%.tar.gz}
-pinned_release=${AWG_BT_RELEASE_ASSET_X86_64%.tar.gz}
+installed_release=${STATUS_RELEASE_ID}
+pinned_release=${STATUS_RELEASE_ID}
 daemon_state=stopped
 daemon_pid=
 daemon_imitation_protocol=

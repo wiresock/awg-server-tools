@@ -77,7 +77,7 @@ sudo AWG_BACKEND=boringtun AWG_BORINGTUN_IMITATE_PROTOCOL=none ./amneziawg-insta
 
 BoringTun uses a downloaded, verified prebuilt binary instead of a kernel
 module. It requires a supported Debian/Ubuntu VM or bare-metal host with
-systemd, TUN and IPv6 socket support, on x86_64 or aarch64. This selects
+systemd, TUN and IPv6 socket support, on x86_64, aarch64 or ARMv7 hard-float. This selects
 BoringTun only on a fresh install; it does not migrate an existing kernel
 installation. See [BoringTun requirements and lifecycle](#-experimental-boringtun-userspace-backend).
 
@@ -585,23 +585,28 @@ sudo AWG_BACKEND=boringtun ./amneziawg-install.sh
 ```
 
 **Where it runs:** Debian 11+ and Ubuntu 22.04+ hosts (virtual machines or bare
-metal) with systemd, on x86_64 or aarch64, with `/dev/net/tun` and the IPv6
-socket family available. Containers and LXC are not supported. Other
-architectures are refused before anything is changed.
+metal) with systemd, on x86_64, aarch64 or ARMv7-A with VFPv3-D16 hard-float,
+with `/dev/net/tun` and the IPv6 socket family available. ARMv7 requires an
+`armhf` userspace; a 64-bit kernel with 32-bit armhf userspace selects that
+ARMv7 binary. Original Pi 1 and Pi Zero ARMv6 CPUs are unsupported. ARMv7 release
+validation uses emulation and interop tests, not physical Pi hardware; this does
+not establish ARM32 support for the optional web/proxy stack. Containers and LXC
+are not supported. Other architectures are refused before anything is changed.
 
 **What it installs:**
 
 - `amneziawg-tools` from the Amnezia PPA with `--no-install-recommends`, so the
   kernel module package (`amneziawg-dkms`) is not pulled in, plus `nftables`,
   `iptables` and `qrencode`. No `amneziawg`, DKMS, headers or `deb-src` sources.
-- `boringtun-cli` from this repository's immutable public release
-  [`boringtun-cli-0.7.1-ge94c04f3f4fd-b1`](https://github.com/wiresock/awg-server-tools/releases/tag/boringtun-cli-0.7.1-ge94c04f3f4fd-b1),
-  built from WireSock BoringTun `e94c04f3f4fdb8b392f9586db07a269ea0bf7575`. The
+- `boringtun-cli` from the fork's immutable public release
+  [`boringtun-cli-0.7.1-ga92909c49920-b101`](https://github.com/Wiresock-Foundation/wiresock-boringtun/releases/tag/boringtun-cli-0.7.1-ga92909c49920-b101),
+  built from WireSock BoringTun `a92909c49920e12de11fb0e066192b8f39b5b212`. The
   installer downloads the archive for its architecture from that exact URL and
   checks it against SHA-256 values embedded in the script before extracting
   anything; then it checks the archive's layout, its `MANIFEST`, the binary's
   SHA-256 and `boringtun-cli --version`. No "latest" lookup and no GitHub API.
-  The release notes describe how to verify its build provenance yourself.
+  The release notes and [adoption evidence](docs/BORINGTUN_ADOPTION_2026-10-27.md)
+  describe the verified provenance and exact hashes.
 - The binary into `/usr/local/lib/amneziawg-install/boringtun/`, and two
   generated helpers into `/usr/local/libexec/amneziawg-install/` that supervise
   the daemon inside the usual `awg-quick@<interface>` service.
@@ -777,7 +782,7 @@ share one server and port. What to know:
   this server's AmneziaWG S/H framing, as a client's own imitation datagrams
   can depending on the S1–S4 and H1–H4 values, is tried as AmneziaWG traffic
   first. The release this installer pins
-  (`boringtun-cli-0.7.1-ge94c04f3f4fd-b1`) still learns from it, but only when
+  (`boringtun-cli-0.7.1-ga92909c49920-b101`) still learns from it, but only when
   every such reading is refused for a reason that establishes nothing (a failed
   mac1, an unknown peer, index or session, no matching handshake, a failed
   decryption); after any other outcome it never counts as a hint, and the
@@ -799,8 +804,9 @@ share one server and port. What to know:
   padding. Nothing is disabled and the S/H framing is never changed
   automatically, so `auto`, unlike `sip`, is accepted at any S size.
 - It needs a BoringTun release that has it: the one this installer pins
-  (`boringtun-cli-0.7.1-ge94c04f3f4fd-b1`) or the earlier
-  `boringtun-cli-0.7.1-gb94943906b11-b1`. Earlier releases report
+  (`boringtun-cli-0.7.1-ga92909c49920-b101`) or the earlier
+  `boringtun-cli-0.7.1-ge94c04f3f4fd-b1` and
+  `boringtun-cli-0.7.1-gb94943906b11-b1`. Releases predating those report
   the same version but refuse `auto`; the installer asks the installed binary,
   and refuses `auto` before changing anything, pointing to
   `--upgrade-boringtun`. `--backend-status` reports this as

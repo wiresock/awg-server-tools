@@ -1,5 +1,6 @@
 #!/bin/bash
-# Live check of what an imitation auto server of boringtun-cli e94c04f3f4fd
+# Live regression check of the installer's pinned imitation auto server,
+# preserving the behavior established by boringtun-cli e94c04f3f4fd:
 # learns in a few fixed, reproducible scenarios, and of the difference from
 # b94943906b11 where it changed: a recognizable prelude that also fits an
 # AmneziaWG packet kind. Each scenario is a fresh server (--verbosity info,
@@ -54,14 +55,15 @@
 # record's completeness. A scenario that did not run to the end fails; it is
 # never skipped or counted as passed.
 #
-# The binaries are named by their SHA-256 (RELEASE_OF below), never by their
-# version, which both releases report as 0.7.1.
+# The current binary must match the installer's embedded SHA-256. The optional
+# comparison remains exact b94943906b11 bytes (RELEASE_OF below). Their common
+# version banner alone is never an identity or a change in expected behavior.
 #
 # Requirements: root, ip (iproute2) with network namespaces, /dev/net/tun, awg
 # (amneziawg-tools), ping, python3 and AWG_DISPOSABLE_HOST_TEST=1. With
 # AWG_LIVE_SECRET_SCAN set, the keys generated here join that output scan.
 #
-# Usage: AWG_DISPOSABLE_HOST_TEST=1 bash tests/test-boringtun-auto-collision-live.sh <e94c04f3f4fd boringtun-cli> [<b94943906b11 boringtun-cli>]
+# Usage: AWG_DISPOSABLE_HOST_TEST=1 bash tests/test-boringtun-auto-collision-live.sh <adopted boringtun-cli> [<b94943906b11 boringtun-cli>]
 
 set -uo pipefail
 
@@ -137,10 +139,12 @@ wait_for() { # <seconds> <command...>
 }
 # shellcheck source=helpers/boringtun-wire-checks.sh
 source "${SCRIPT_DIR}/helpers/boringtun-wire-checks.sh"
+# shellcheck source=helpers/boringtun-contracts.sh
+source "${SCRIPT_DIR}/helpers/boringtun-contracts.sh"
 
 [[ "${AWG_DISPOSABLE_HOST_TEST:-}" == 1 ]] || die "this test creates network namespaces and interfaces; set AWG_DISPOSABLE_HOST_TEST=1 on a disposable host"
 [[ "${EUID}" -eq 0 ]] || die "must run as root"
-[[ -n "${NEW_BIN}" && -x "${NEW_BIN}" ]] || die "usage: $0 <e94c04f3f4fd boringtun-cli> [<b94943906b11 boringtun-cli>]"
+[[ -n "${NEW_BIN}" && -x "${NEW_BIN}" ]] || die "usage: $0 <adopted boringtun-cli> [<b94943906b11 boringtun-cli>]"
 [[ -z "${OLD_BIN}" || -x "${OLD_BIN}" ]] || die "${OLD_BIN} is not executable"
 for TOOL in ip awg ping python3 sha256sum; do
 	command -v "${TOOL}" >/dev/null 2>&1 || die "${TOOL} is required"
@@ -152,8 +156,8 @@ release_of() { # <binary>
 	SUM="$(sha256sum -- "$1" 2>/dev/null | cut -d' ' -f1)"
 	echo "${RELEASE_OF[${SUM:-none}]:-unknown}"
 }
-[[ "$(release_of "${NEW_BIN}")" == e94c04f3f4fd ]] ||
-	die "${NEW_BIN} is not a published e94c04f3f4fd boringtun-cli ($(sha256sum -- "${NEW_BIN}" | cut -d' ' -f1)); these expectations are that release's"
+btc_embedded_binary_matches "${SCRIPT_DIR}/../amneziawg-install.sh" "${NEW_BIN}" ||
+	die "${NEW_BIN} does not match this installer's adopted binary hashes"
 [[ -z "${OLD_BIN}" || "$(release_of "${OLD_BIN}")" == b94943906b11 ]] ||
 	die "${OLD_BIN} is not a published b94943906b11 boringtun-cli ($(sha256sum -- "${OLD_BIN}" | cut -d' ' -f1)); the comparison needs that release"
 
@@ -434,7 +438,7 @@ scenario() { # <name> <plant> <hp 0|1> <client imitation> <server imitation> <ex
 	judge "$1" "$6"
 }
 
-echo "=== Auto collisions on $("${NEW_BIN}" --version 2>/dev/null) ($(sha256sum "${NEW_BIN}" | cut -d' ' -f1), e94c04f3f4fd)"
+echo "=== Auto collisions on $("${NEW_BIN}" --version 2>/dev/null) ($(sha256sum "${NEW_BIN}" | cut -d' ' -f1), adopted release; e94 behavior regression)"
 use_layout "${LAYOUT_SIP}"
 check "the 247-byte SIP probe is an AmneziaWG transport candidate under S ${S_SIZES}, H4 ${H_RANGES##*,}" \
 	test "$(python3 "${WIRE}" candidates probe sip "${S_SIZES},${H_RANGES}")" = "247 transport"
@@ -478,14 +482,14 @@ if [[ -n "${OLD_BIN}" ]]; then
 			continue
 		fi
 		if holds "${NEW_CASE}" "${OLD_OUTCOME}"; then
-			bad "difference ${NEW_CASE}: e94c04f3f4fd's capture also passes as ${OLD_OUTCOME}, b94943906b11's outcome (${BT_WIRE_REASON})"
+			bad "difference ${NEW_CASE}: the adopted release's capture also passes as ${OLD_OUTCOME}, b94943906b11's outcome (${BT_WIRE_REASON})"
 		else
-			ok "difference ${NEW_CASE}: e94c04f3f4fd's capture fails as ${OLD_OUTCOME}, b94943906b11's outcome (${BT_WIRE_REASON})"
+			ok "difference ${NEW_CASE}: the adopted release's capture fails as ${OLD_OUTCOME}, b94943906b11's outcome (${BT_WIRE_REASON})"
 		fi
 		if holds "${OLD_CASE}" "${NEW_OUTCOME}"; then
-			bad "difference ${NEW_CASE}: b94943906b11's capture also passes as ${NEW_OUTCOME}, e94c04f3f4fd's outcome (${BT_WIRE_REASON})"
+			bad "difference ${NEW_CASE}: b94943906b11's capture also passes as ${NEW_OUTCOME}, the adopted release's expected outcome (${BT_WIRE_REASON})"
 		else
-			ok "difference ${NEW_CASE}: b94943906b11's capture fails as ${NEW_OUTCOME}, e94c04f3f4fd's outcome (${BT_WIRE_REASON})"
+			ok "difference ${NEW_CASE}: b94943906b11's capture fails as ${NEW_OUTCOME}, the adopted release's expected outcome (${BT_WIRE_REASON})"
 		fi
 	done
 else
