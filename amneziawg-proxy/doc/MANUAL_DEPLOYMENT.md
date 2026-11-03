@@ -27,22 +27,27 @@ clients connect to the proxy's public UDP port.
 
 ## Choose a Topology
 
-### Same host, AWG on loopback
+### Same host, AWG reached over loopback
 
-This is the simplest and safest layout.
+The proxy and AWG share the host network namespace. Protect the backend port
+with firewall rules so external clients cannot bypass the proxy.
 
 ```text
 client -> server public IP:51820/udp -> amneziawg-proxy
 amneziawg-proxy -> 127.0.0.1:51821/udp -> AWG interface
 ```
 
-Configure AWG to listen only on loopback and a backend port:
+Configure a separate backend port in the existing AWG config:
 
 ```ini
 [Interface]
-ListenAddr = 127.0.0.1
 ListenPort = 51821
 ```
+
+Do not add `ListenAddr`: standard AmneziaWG tools do not support it. AWG can
+listen on wildcard addresses while the proxy reaches it through loopback.
+`backend` is a destination for the proxy, not a bind-address setting for AWG.
+Apply the [firewall checklist](#firewall-checklist) before changing the port.
 
 Then configure the proxy:
 
@@ -60,7 +65,8 @@ Only the proxy port should be reachable from the internet.
 ### AWG in Docker, proxy on the host
 
 This layout is useful when an existing container owns the AWG interface.
-Publish the container's AWG UDP port to a host loopback-only backend port:
+Publish the container's AWG UDP port on the host's loopback address. This is a
+Docker port-mapping setting, not an AWG `ListenAddr` setting:
 
 ```bash
 docker run \
@@ -95,8 +101,11 @@ connect correctly.
 ### Proxy and AWG in Docker
 
 Put both containers on the same Docker network. Because `backend` currently
-expects an IP socket address, not a DNS name, use a static container IP or
-publish AWG to a loopback port on the Docker host.
+expects an IP socket address, not a DNS name, use a static container IP.
+`127.0.0.1` inside the proxy container refers to that container, not to AWG or
+the Docker host. Publishing AWG on host loopback is appropriate for a proxy
+running on the host (or sharing its network namespace), not this bridge-network
+layout.
 
 Example with static bridge-network IPs:
 
@@ -254,27 +263,42 @@ sudo chmod 0644 /etc/amneziawg-proxy/proxy.toml
 
 ## Configure AWG
 
-The public client endpoint should point to the proxy. The AWG backend should
-listen on a private address.
+The public client endpoint should point to the proxy. The AWG backend must be
+reachable by the proxy and protected from direct external access.
 
-For same-host AWG, edit the AWG interface config:
+For same-host AWG, apply the [firewall rules](#firewall-checklist) first, then
+edit the existing `/etc/amnezia/amneziawg/awg0.conf`:
 
 ```ini
 [Interface]
-ListenAddr = 127.0.0.1
 ListenPort = 51821
 ```
 
-Reload the interface using the command appropriate for your deployment. On a
-standard host installation, that is usually:
+Keep the other interface and peer settings. Remove `ListenAddr` if an older
+version of this guide led you to add it; standard AmneziaWG tools reject it.
+Changing `ListenPort` does not bind AWG exclusively to loopback.
+
+For an already-running interface, apply only the port change without restarting
+it or reloading the rest of the config:
 
 ```bash
-sudo wg syncconf awg0 <(sudo wg-quick strip awg0)
+sudo awg set awg0 listen-port 51821
+sudo awg show awg0 listen-port
 ```
 
-For Docker-based AWG, update the container configuration instead. A common
-pattern is to leave AWG listening on `51820/udp` inside the container, but
-publish it to the host as `127.0.0.1:51821/udp`.
+The file edit makes the change persistent; `awg set` alone changes only the
+running interface. Use `awg`, not the stock WireGuard `wg` command. If the
+interface is down, start the appropriate service after fixing its config:
+
+```bash
+sudo systemctl start awg-quick@awg0
+```
+
+Adjust the interface name and config path for your installation. These commands
+do not install firewall rules. For Docker-based AWG, update the container
+configuration instead. A common pattern for a proxy on the host is to leave
+AWG listening on `51820/udp` inside the container, but publish it to the host as
+`127.0.0.1:51821/udp`.
 
 ## Install a systemd Service
 
@@ -335,15 +359,35 @@ sudo systemctl status amneziawg-proxy
 - Do not expose the AWG backend port to the internet.
 - If the backend is on another host, allow the backend UDP port only from the
   proxy host.
-- If Docker is used, verify published ports. Prefer
-  `127.0.0.1:<backend-port>:<container-awg-port>/udp` for the backend.
+- If Docker is used, verify published ports and Docker's firewall rules.
+  For a proxy on the host, prefer
+  `127.0.0.1:<backend-port>:<container-awg-port>/udp` for the backend. For two
+  containers on a private bridge, publish only the proxy port.
+- Cover both IPv4 and IPv6 where enabled, and retain the rules across reboots.
+  The proxy installer does not install these rules for you.
 
-Example `ufw` rules for same-host deployment:
+For same-host AWG and proxy processes sharing the host network namespace, an
+`iptables`-managed firewall can reject backend packets arriving on any interface
+other than loopback:
 
 ```bash
-sudo ufw allow 51820/udp
-sudo ufw deny 51821/udp
+sudo iptables -I INPUT 1 ! -i lo -p udp --dport 51821 -j DROP
+sudo ip6tables -I INPUT 1 ! -i lo -p udp --dport 51821 -j DROP
 ```
+
+Use the actual backend port. These rules do not open the public proxy port or
+permit loopback traffic if your existing rules block it; ensure both are
+allowed. The examples change live rules only. Persist the equivalent policy
+using your system's firewall manager. If you use `nftables`, `ufw`, or
+`firewalld`, configure the same policy there rather than mixing managers, and
+check rule ordering so a broader allow rule does not bypass the restriction.
+
+These host `INPUT` rules are not a Docker or split-host recipe. Docker-published
+ports can use forwarding/NAT chains instead; do not rely on host `ufw`/`INPUT`
+rules alone. See [Docker's firewall documentation](https://docs.docker.com/engine/network/packet-filtering-firewalls/).
+Also note that [Docker versions older than 28.0.0](https://docs.docker.com/engine/network/port-publishing/)
+can expose loopback-published ports to hosts on the same L2 network. Keep Docker
+updated and verify the effective exposure for your network mode.
 
 ## Web Panel Integration
 
@@ -390,11 +434,18 @@ Check that it is listening:
 sudo ss -lunp | grep amneziawg-proxy
 ```
 
-Check that the AWG backend is not publicly exposed:
+Inspect the proxy and backend listening ports:
 
 ```bash
+sudo awg show awg0 listen-port
 sudo ss -lunp | grep -E '51820|51821'
 ```
+
+`ss` shows sockets, not firewall reachability. A wildcard AWG listener is
+expected when only `ListenPort` is configured. Verify the active IPv4/IPv6
+firewall rules and counters, and test the backend from outside the host as well
+as through the proxy. A silent UDP scan alone does not prove that the backend
+is protected.
 
 After a client connects, check the session status file:
 
@@ -424,9 +475,11 @@ own the public port.
 
 ### Docker service name does not work in backend
 
-`backend` must be an IP socket address. Use a static Docker network IP, publish
-the AWG container to a host loopback port, or run the proxy in a mode where the
-backend has a stable IP address.
+`backend` must be an IP socket address. Use a static Docker network IP when
+both containers share a bridge. A host-loopback publication works only if the
+proxy can reach the host's loopback namespace, for example when the proxy runs
+directly on the host. A separate bridge-network container cannot reach it via
+its own `127.0.0.1`.
 
 ### Web panel does not show proxy sessions
 

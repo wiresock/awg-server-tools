@@ -44,9 +44,17 @@ filesystem to choose the build disk explicitly.
 
 ### Automated installer (recommended)
 
-The installer handles everything: detecting the AWG interface, building the
-binary, writing the config, rebinding AWG to loopback, and enabling the
-systemd service.
+The installer detects the AWG interface, builds the binary, writes the config,
+moves AWG to a separate backend port, and enables the systemd service.
+
+> [!IMPORTANT]
+> The installer does **not** install firewall rules or guarantee loopback-only
+> listening. Standard AmneziaWG tools do not support `ListenAddr`. Changing
+> `ListenPort` leaves AWG listening on wildcard addresses. Restrict the backend
+> port to the intended proxy path before installation, including IPv6 where
+> enabled; see the [firewall checklist](MANUAL_DEPLOYMENT.md#firewall-checklist).
+> Setting `backend = "127.0.0.1:51821"` changes only where the proxy sends traffic,
+> not the addresses on which AWG listens.
 
 #### Interactive (guided prompts)
 
@@ -60,7 +68,9 @@ The script will:
    features.
 3. Build the proxy binary (or install Rust automatically if `--install-rust`
    is given).
-4. Reconfigure AWG to listen on `127.0.0.1:<backend-port>` (loopback only).
+4. Change AWG's `ListenPort` to the backend port. When `ListenAddr` is absent,
+   the installer warns/prompts before changing the port; in non-interactive
+   mode it warns and continues. It does not add `ListenAddr` or firewall rules.
 5. Write `/etc/amneziawg-proxy/proxy.toml`.
 6. Install and start the `amneziawg-proxy` systemd service.
 
@@ -103,7 +113,7 @@ sudo ./amneziawg-proxy/scripts/amneziawg-proxy-install.sh \
 | `--install-rust` | off | Install the Rust toolchain via `rustup` if `cargo` is not found. |
 | `--listen-host HOST` | `0.0.0.0` | Public-facing bind address. |
 | `--listen-port PORT` | auto from AWG | Public-facing UDP port. |
-| `--backend-host HOST` | `127.0.0.1` | Loopback host for the AWG backend. |
+| `--backend-host HOST` | `127.0.0.1` | AWG destination address used by the proxy; does not itself restrict the AWG listener. |
 | `--backend-port PORT` | `51821` | Port AWG is rebound to after install. |
 | `--protocol PROTO` | `quic` | Protocol to imitate: `quic`, `dns`, `stun`, `sip`, or `auto`. |
 | `--session-ttl SECS` | `300` | Idle session timeout in seconds. |
@@ -125,10 +135,14 @@ sudo ./amneziawg-proxy/scripts/amneziawg-proxy-install.sh \
 
 ### Manual build & install
 
-This quick path assumes the proxy and AWG run on the same host and that AWG can
-be rebound to a loopback backend port. For Docker-hosted AWG, split-host
-deployments, custom systemd units, or web-panel status-file sharing, see
-[MANUAL_DEPLOYMENT.md](MANUAL_DEPLOYMENT.md).
+This quick path assumes the proxy and a working AWG interface run in the same
+host network namespace. Traffic reaches AWG over loopback, but AWG's backend
+port must be protected by firewall rules. Apply the
+[firewall checklist](MANUAL_DEPLOYMENT.md#firewall-checklist) for `51821/udp`
+before moving AWG to that port. Do not add `ListenAddr` to the AWG config.
+
+For Docker-hosted AWG, split-host deployments, custom systemd units, or web-panel
+status-file sharing, see [MANUAL_DEPLOYMENT.md](MANUAL_DEPLOYMENT.md).
 
 ```bash
 # 1. Build release binary
@@ -138,8 +152,9 @@ cargo build --release
 # 2. Install binary
 sudo install -m 755 target/release/amneziawg-proxy /usr/local/bin/
 
-# 3. Create config directory
-sudo mkdir -p /etc/amneziawg-proxy
+# 3. Create config and service working directories
+sudo install -d -m 0755 /etc/amneziawg-proxy
+sudo install -d -m 0750 /var/lib/amneziawg-proxy
 
 # 4. Write proxy.toml (see Configuration section)
 sudo tee /etc/amneziawg-proxy/proxy.toml > /dev/null <<'EOF'
@@ -149,15 +164,17 @@ imitate_protocol = "quic"
 awg_config = "/etc/amnezia/amneziawg/awg0.conf"
 EOF
 
-# 5. Rebind AWG to loopback (edit /etc/amnezia/amneziawg/awg0.conf)
+# 5. Move AWG to the backend port (edit /etc/amnezia/amneziawg/awg0.conf)
 #    Change: ListenPort = 51820
 #    To:     ListenPort = 51821
-#            ListenAddr = 127.0.0.1
-# Then reload: sudo wg syncconf awg0 <(sudo wg-quick strip awg0)
+#    Remove ListenAddr if it was added from an older version of this guide.
+# Apply just the port change to the already-running interface:
+sudo awg set awg0 listen-port 51821
+sudo awg show awg0 listen-port
 
-# 6. Install systemd service
+# 6. Install systemd service (still in the amneziawg-proxy directory)
 sudo install -m 644 \
-  amneziawg-proxy/packaging/amneziawg-proxy.service \
+  packaging/amneziawg-proxy.service \
   /etc/systemd/system/amneziawg-proxy.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now amneziawg-proxy
@@ -554,24 +571,51 @@ Another process (or AWG itself) is already listening on the proxy's configured
 sudo ss -ulnp | grep 51820
 ```
 
-If AWG is still bound to the public port, ensure its `ListenAddr = 127.0.0.1`
-and `ListenPort = 51821` are set in `/etc/amnezia/amneziawg/awg0.conf` and
-reload it with `sudo wg syncconf awg0 <(sudo wg-quick strip awg0)`.
+If AWG is still using the public port, follow [Configure AWG](MANUAL_DEPLOYMENT.md#configure-awg)
+to move it to `51821/udp`, with firewall protection. The public and backend
+ports must be different in the same host network namespace.
 
-### Clients can connect but get no traffic
+### AWG fails to start: `Line unrecognized: ListenAddr`
 
-1. Verify the proxy's `backend` address matches AWG's actual listen address:
+`ListenAddr` is not supported by standard AmneziaWG tools. Remove that line
+from `/etc/amnezia/amneziawg/awg0.conf`, keep `ListenPort = 51821`, and apply the
+[backend firewall rules](MANUAL_DEPLOYMENT.md#firewall-checklist). If the
+interface is down, start its service after correcting the config:
+
+```bash
+sudo systemctl start awg-quick@awg0
+sudo awg show awg0 listen-port
+```
+
+### Clients cannot connect through the proxy
+
+1. Point the client's `Endpoint` at the proxy's public address and UDP port,
+   not the backend port. Keep client/server keys and AWG obfuscation parameters
+   consistent, and verify the interface uses AWG 1.0 or 2.0, not AWG 3.0+.
+2. Verify the backend port and listeners:
    ```bash
-   sudo wg show awg0
+   sudo awg show awg0 listen-port
+   sudo ss -lunp | grep -E '51820|51821'
    ```
-2. Check the proxy log for session errors:
+   A wildcard AWG listener (`0.0.0.0` or `[::]`) can still receive traffic sent
+   to loopback. It does not by itself explain a failed proxy connection.
+   `127.0.0.1` works only when the backend is reachable in the proxy's network
+   namespace; use the appropriate [Docker/private-host topology](MANUAL_DEPLOYMENT.md#choose-a-topology).
+3. Check both services for errors:
    ```bash
-   sudo journalctl -u amneziawg-proxy -n 50
+   sudo journalctl -u awg-quick@awg0 -u amneziawg-proxy -n 100 --no-pager
    ```
-3. Ensure no firewall rule is blocking the loopback path:
+4. Check the active firewall rules. Allow the public proxy port and the
+   proxy-to-backend path while denying external access to the backend port.
+   See the [firewall checklist](MANUAL_DEPLOYMENT.md#firewall-checklist).
+5. After a connection attempt, check whether AWG records a handshake:
    ```bash
-   sudo iptables -L -n | grep 51821
+   sudo awg show awg0 latest-handshakes
+   sudo awg show awg0 transfer
    ```
+   If a handshake succeeds but tunneled traffic does not pass, check AWG
+   routing, `AllowedIPs`, forwarding/NAT, DNS, and MTU separately. Do not post
+   full configs or `awg showconf` output; they contain private or preshared keys.
 
 ### AWG packets are not being transformed
 
