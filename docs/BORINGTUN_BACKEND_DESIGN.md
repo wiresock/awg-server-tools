@@ -950,9 +950,10 @@ responses or QUIC handshake continuation.
 
 - BoringTun already shapes the prefix where the packet is built; a proxy rewriting it again
   is redundant under AWG 2.0 and breaks AWG 3.x header protection.
-- The proxy design rebinds AWG to a loopback backend port. BoringTun has no bind-address
-  option and always listens on `0.0.0.0` and `[::]` (FACT), so the backend port would stay
-  publicly reachable.
+- The proxy uses a separate backend port, reached over loopback in the same-host
+  layout. This does not itself restrict the backend listener. BoringTun has no
+  bind-address option and always listens on `0.0.0.0` and `[::]` (FACT), so the backend
+  port would need explicit firewall isolation to prevent direct external access.
 - BoringTun never answers loopback probes, and the proxy forwards from loopback, so the two
   responders would interact unpredictably.
 

@@ -227,8 +227,11 @@ resemble* a known, allowed protocol instead of merely looking random.
 
 ### Install
 
-The proxy installer detects the AWG interface, rebinds AmneziaWG to loopback,
-builds the binary, and installs a systemd service. One command does it all:
+The proxy installer detects the AWG interface, moves it to a separate backend
+port, builds the binary, and installs a systemd service. It does **not** install
+firewall rules or guarantee that the backend is loopback-only. Restrict access
+to the backend port before running the installer; see the
+[firewall checklist](amneziawg-proxy/doc/MANUAL_DEPLOYMENT.md#firewall-checklist).
 
 ```bash
 curl -fLO https://raw.githubusercontent.com/wiresock/awg-server-tools/main/amneziawg-proxy.sh
@@ -265,8 +268,9 @@ and packet-level walkthroughs are in
 
 ### How It Works
 
-After install, all client traffic flows through the proxy, which AmneziaWG no
-longer exposes directly:
+With client endpoints pointed at the proxy and the backend port protected by
+firewall rules, VPN traffic follows this same-host path. The loopback address
+below is the proxy's destination, not an exclusive AWG bind address:
 
 ```
                          ┌───────────────────────────────────┐
