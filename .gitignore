@@ -1,2 +1,5 @@
 __pycache__/
 *.py[cod]
+
+# mdBook build output
+docs/book/
