@@ -217,7 +217,13 @@ Example include wrapper (`docs/src/web-panel/install.md`):
 ```markdown
 {{#include ../../../amneziawg-web/docs/INSTALL.md}}
 ```
-(Relative links inside included files will need checking; mdbook-linkcheck in CI catches breakage.)
+Relative links inside included files are rewritten at build time by the
+`include-map` preprocessor (`docs/mdbook-include-map.py`, hooked from
+`book.toml`). It expands `{{#include}}` before mdBook's built-in `links`
+preprocessor, maps known source files onto book chapters, reuses
+`docs/src/images/` for web-panel screenshots, and turns other repo paths into
+`https://github.com/wiresock/awg-server-tools/blob/main/...` links. Check with
+`python3 docs/mdbook-include-map.py --check` from the repository root (same cwd as `mdbook build docs`). mdbook-linkcheck in CI remains a useful extra net.
 
 ## CI addition (sketch)
 

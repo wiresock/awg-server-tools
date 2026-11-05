@@ -16,3 +16,10 @@ no-section-label = true
 
 [output.html.search]
 enable = true
+
+[preprocessor.include-map]
+# Expand {{#include}} and rewrite relative links/images for the chapter path.
+# See mdbook-include-map.py. Runs before the built-in links preprocessor.
+command = "python3 docs/mdbook-include-map.py"
+before = ["links"]
+
