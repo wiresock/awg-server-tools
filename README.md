@@ -122,8 +122,13 @@ After installation:
 
 - The client config is saved to `~/awg0-client-<name>.conf`; import it into any
   AmneziaWG client.
-- The web panel listens on `127.0.0.1:8080` by default. Change
-  `AWG_WEB_LISTEN` or use a reverse proxy for remote access.
+- The web panel listens on `127.0.0.1:8080` by default. Keep that localhost
+  binding. From your computer, run
+  `ssh -N -L 8080:127.0.0.1:8080 user@server`, then open
+  `http://localhost:8080` and sign in. For always-on remote access, put a
+  TLS-terminating reverse proxy in front of the localhost listener on a
+  private network — do **not** expose the panel directly on a public
+  interface (see [Panel install](amneziawg-web/docs/INSTALL.md)).
 - Re-run `sudo ./amneziawg-install.sh` to manage clients interactively.
 
 **Clients (non-interactive):**

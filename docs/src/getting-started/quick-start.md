@@ -65,7 +65,7 @@ sudo ./amneziawg-proxy.sh
 - VPN server is running
 - AWG 2.0 remains active by default; [AWG 3.1](../installer/awg3.md) requires an explicit migration after backend capability checks pass (do not enable AWG 3.x if using `amneziawg-proxy`)
 - A client config file is generated at `~/awg0-client-<name>.conf`
-- (If installed) Web panel listens on `127.0.0.1:8080` by default. From your computer, run `ssh -N -L 8080:127.0.0.1:8080 user@server`, then open `http://localhost:8080` and sign in.
+- (If installed) Web panel listens on `127.0.0.1:8080` by default. Keep that localhost binding. From your computer, run `ssh -N -L 8080:127.0.0.1:8080 user@server`, then open `http://localhost:8080` and sign in. For always-on remote access, use a TLS-terminating reverse proxy on a private network — do **not** expose the panel directly on a public interface (see [web panel install](../web-panel/install.md)).
 
 ---
 

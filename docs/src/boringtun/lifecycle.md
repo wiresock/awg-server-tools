@@ -16,7 +16,7 @@ leave the installed release alone. A host installed by an earlier version, with
 moves it to the one this version pins; until then `--backend-status` reports
 `upgrade_available=yes`. The first two have no imitation mode `auto`, although they report the
 same version (`0.7.1`) as the others: the installer asks the binary itself and refuses `auto` on
-them (see [Built-in protocol imitation](#built-in-protocol-imitation-boringtun-only)).
+them (see [Built-in protocol imitation](imitation.md)).
 `gb94943906b11` has `auto`, so a rollback to it keeps `auto`, without the newer learning from
 datagrams that also fit the AmneziaWG framing.
 

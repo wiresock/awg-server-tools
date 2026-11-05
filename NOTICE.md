@@ -186,5 +186,5 @@ distributed by this project.
 ## Trademarks
 
 The project names (AmneziaWG, WireGuard, BoringTun and others) are used only to
-identify the software they refer to; see the disclaimer in the
-[README](README.md#disclaimer). The licenses above grant no trademark rights.
+identify the software they refer to; see the
+[disclaimer](docs/src/project/disclaimer.md). The licenses above grant no trademark rights.
