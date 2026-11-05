@@ -18,6 +18,20 @@ The repository was renamed from `wiresock/amneziawg-install` to
 services, and paths. See [repository rename and compatibility](project/repository-rename.md)
 for updating Git remotes and verifying older releases.
 
+## Web panel preview
+
+**Peer overview** — connection status, traffic counters, expiration dates, and
+active standalone proxy sessions.
+
+![Web panel showing peers, traffic counters, and active proxy sessions](images/peer-overview.png)
+
+**Peer details** — configuration download and QR actions, editable client
+settings, and traffic usage over time.
+
+![Peer details showing configuration exports, the edit form, and traffic history](images/peer-details.png)
+
+See the [web panel documentation](web-panel/README.md) for features and setup.
+
 ## How it works
 
 - **`amneziawg-install.sh`** — **required.** Installs the VPN server with the selected backend, generates obfuscation parameters, creates client configs, and can transactionally enable AWG 3.1 after capability checks or return the installation to AWG 2.0. The CLI also retains legacy AWG 3.0 support.

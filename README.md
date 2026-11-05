@@ -30,6 +30,20 @@ disguise VPN traffic as QUIC, DNS, SIP or STUN.
 > imitation requires [WireSock Secure Connect](https://www.wiresock.net/) 3.5+;
 > standard AmneziaWG clients still benefit from server-side obfuscation.
 
+## Web panel preview
+
+**Peer overview** — connection status, traffic counters, expiration dates, and
+active standalone proxy sessions.
+
+![Web panel showing peers, traffic counters, and active proxy sessions](amneziawg-web/docs/screenshots/peer-overview.png)
+
+**Peer details** — configuration download and QR actions, editable client
+settings, and traffic usage over time.
+
+![Peer details showing configuration exports, the edit form, and traffic history](amneziawg-web/docs/screenshots/peer-details.png)
+
+See the [web panel documentation](amneziawg-web/README.md) for features and setup.
+
 ## Supported distributions
 
 The installer's OS check (`checkOS` in `amneziawg-install.sh`) accepts:
@@ -41,7 +55,7 @@ The installer's OS check (`checkOS` in `amneziawg-install.sh`) accepts:
 | Linux Mint | 21 | ✅ |
 | Fedora | 39 | ❌ temporarily disabled |
 | AlmaLinux / Rocky Linux | 9 | ❌ temporarily disabled |
-| CentOS | 9 | ❌ untested, not recommended |
+| CentOS | 9 | ⚠️ untested, not recommended |
 
 Fresh installs on Fedora, AlmaLinux and Rocky Linux are **temporarily
 disabled** because verified AmneziaWG 2.0 packages are not currently available

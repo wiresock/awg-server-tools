@@ -41,7 +41,7 @@ are not supported. Other architectures are refused before anything is changed.
   checks it against SHA-256 values embedded in the script before extracting
   anything; then it checks the archive's layout, its `MANIFEST`, the binary's
   SHA-256 and `boringtun-cli --version`. No "latest" lookup and no GitHub API.
-  The release notes and [adoption evidence](../../BORINGTUN_ADOPTION_2026-10-27.md)
+  The release notes and [adoption evidence](adoption.md)
   describe the verified provenance and exact hashes.
 - The binary into `/usr/local/lib/amneziawg-install/boringtun/`, and two
   generated helpers into `/usr/local/libexec/amneziawg-install/` that supervise

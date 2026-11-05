@@ -20,6 +20,7 @@
   - [Upgrade and rollback](boringtun/lifecycle.md)
   - [Protocol imitation](boringtun/imitation.md)
   - [Release artifacts](boringtun/artifacts.md)
+  - [Adoption evidence](boringtun/adoption.md)
   - [Migration](boringtun/migration.md)
   - [Notices](boringtun/notices.md)
 

@@ -9,7 +9,7 @@ Supported Linux distributions (from the installer's `checkOS`):
 | Linux Mint | 21 | ✅ |
 | Fedora | 39 | ❌ temporarily disabled |
 | AlmaLinux / Rocky Linux | 9 | ❌ temporarily disabled |
-| CentOS | 9 | ❌ untested, not recommended |
+| CentOS | 9 | ⚠️ untested, not recommended |
 
 Fresh installs on Fedora, AlmaLinux and Rocky Linux are **temporarily
 disabled** because verified AmneziaWG 2.0 packages are not currently available
