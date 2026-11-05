@@ -1,0 +1,41 @@
+# Build the mdBook docs site and fail on broken in-book links/images.
+# Catches README.md → README.html vs index.html mismatches that the
+# source-level include-map check cannot see.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  MDBOOK_VERSION: "0.4.43"
+
+jobs:
+  mdbook:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install mdBook
+        run: |
+          set -euo pipefail
+          archive="mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -sSL \
+            "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/${archive}" \
+            | tar -xz
+          sudo install -m 755 mdbook /usr/local/bin/mdbook
+          mdbook --version
+
+      - name: Source include-map check
+        run: python3 docs/mdbook-include-map.py --check
+
+      - name: Build book
+        run: mdbook build docs
+
+      - name: Rendered HTML link check
+        run: python3 docs/mdbook-include-map.py --check-html

@@ -19,7 +19,8 @@ enable = true
 
 [preprocessor.include-map]
 # Expand {{#include}} and rewrite relative links/images for the chapter path.
-# See mdbook-include-map.py. Runs before the built-in links preprocessor.
+# README.md chapter links become index.html (mdBook's rendered name).
+# See mdbook-include-map.py (--check / --check-html). Runs before "links".
 command = "python3 docs/mdbook-include-map.py"
 before = ["links"]
 

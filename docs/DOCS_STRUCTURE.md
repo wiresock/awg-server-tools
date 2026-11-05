@@ -222,10 +222,25 @@ Relative links inside included files are rewritten at build time by the
 `book.toml`). It expands `{{#include}}` before mdBook's built-in `links`
 preprocessor, maps known source files onto book chapters, reuses
 `docs/src/images/` for web-panel screenshots, and turns other repo paths into
-`https://github.com/wiresock/awg-server-tools/blob/main/...` links. Check with
-`python3 docs/mdbook-include-map.py --check` from the repository root (same cwd as `mdbook build docs`). mdbook-linkcheck in CI remains a useful extra net.
+`https://github.com/wiresock/awg-server-tools/blob/main/...` links. Links to
+in-book chapters named `README.md` are emitted as `index.html`, because mdBook
+renders those chapters as `index.html` (a bare `README.md` link would become
+the nonexistent `README.html`).
+
+Checks (from the repository root, same cwd as `mdbook build docs`):
+
+```bash
+python3 docs/mdbook-include-map.py --check        # source / include map
+mdbook build docs
+python3 docs/mdbook-include-map.py --check-html   # rendered docs/book
+```
+
+`.github/workflows/docs.yml` runs the same three steps on pushes and PRs to
+`main` (mdBook 0.4.43 from the upstream release tarball). Optional
+mdbook-linkcheck remains a useful extra net.
 
 ## CI addition (sketch)
 
-Add a `docs.yml` workflow: install mdbook (+ mdbook-linkcheck), run
-`mdbook build docs`, and deploy `docs/book` to GitHub Pages on pushes to `main`.
+`.github/workflows/docs.yml` already builds the book and runs the source +
+rendered HTML link checks. Remaining follow-up: deploy `docs/book` to GitHub
+Pages on pushes to `main` (optional mdbook-linkcheck).
