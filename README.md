@@ -2,86 +2,84 @@
 
 **Deploy, manage, and obfuscate AmneziaWG VPN servers on Linux.**
 
-A [WireSock](https://www.wiresock.net/) toolkit for installing and managing AmneziaWG VPN servers, client configurations, and traffic obfuscation. Supports the **kernel backend** by default and an experimental **BoringTun userspace backend**. New installations use **AmneziaWG 2.0**, with optional support for **AWG 3.1**.
-
-Extend your setup with a **web-based management panel** for client administration, traffic monitoring, and configuration exports. The panel also supports optional [email delivery](amneziawg-web/docs/EMAIL_DELIVERY.md) of client configurations or expiring download links, with recipient preview and a separately configured public HTTPS endpoint.
-
-For advanced traffic camouflage, use **BoringTun's built-in protocol imitation** or the standalone **UDP obfuscation proxy** (kernel backend, AWG 1.0/2.0 only) to disguise VPN traffic as QUIC, DNS, SIP, or STUN.
+A [WireSock](https://www.wiresock.net/) toolkit for installing and managing
+AmneziaWG VPN servers, client configurations, and traffic obfuscation. It
+supports the **kernel backend** by default and an experimental **BoringTun
+userspace backend**. New installations use **AmneziaWG 2.0**, with an optional,
+explicit migration to **AWG 3.1**. An optional web panel handles client
+administration, traffic monitoring, configuration exports and optional email
+delivery, and BoringTun's built-in imitation or the standalone UDP proxy can
+disguise VPN traffic as QUIC, DNS, SIP or STUN.
 
 **Choose backend → Install VPN → (optional) Web panel → Manage clients**
 
-——
+> The repository was renamed from `wiresock/amneziawg-install` to
+> `wiresock/awg-server-tools`. Existing installations keep the same commands,
+> services, and paths. See [Repository rename](docs/REPOSITORY_RENAME.md).
 
-The repository was renamed from `wiresock/amneziawg-install` to
-`wiresock/awg-server-tools`. Existing installations keep the same commands,
-services, and paths. See [repository rename and compatibility](docs/REPOSITORY_RENAME.md)
-for updating Git remotes and verifying older releases.
+## Components
 
-## 📖 Background
+| Script | What it does | Docs |
+|---|---|---|
+| `amneziawg-install.sh` | Installs the AmneziaWG server (kernel or BoringTun backend), manages clients, AWG 2.0 / 3.x protocol mode and BoringTun imitation. | [Installer guide](docs/src/installer/README.md) |
+| `amneziawg-web.sh` | Installs, upgrades and removes the Rust web panel (clients, traffic history, exports, protocol switching, email delivery). | [Web panel](amneziawg-web/README.md) |
+| `amneziawg-proxy.sh` | Installs the UDP obfuscation proxy that makes traffic look like QUIC, DNS, STUN or SIP to DPI. **Kernel backend, AWG 1.0/2.0 only.** | [Proxy usage](amneziawg-proxy/doc/USAGE.md) |
 
-This project started from the [RomikB/amneziawg-install](https://github.com/RomikB/amneziawg-install) installer (see [Credits](#credits) for its full lineage). I needed a reliable way to stand up **AmneziaWG 2.0** servers for testing [WireSock Secure Connect](https://www.wiresock.net/), and the upstream script predated the 2.0 release — so I took it and extended it to generate and manage the new 2.0 obfuscation parameters (S3/S4 padding and the H1–H4 header ranges). It now also supports an explicit, capability-checked migration to **AmneziaWG 3.1**, while retaining AWG 2.0 defaults and preserving the mode of existing installations.
+> **⚠️** `amneziawg-proxy` is **not compatible with AWG 3.0+** (AWG 3.0 uses
+> S1–S4 padding as key material for header protection). Its full bidirectional
+> imitation requires [WireSock Secure Connect](https://www.wiresock.net/) 3.5+;
+> standard AmneziaWG clients still benefit from server-side obfuscation.
 
-Once the installer was solid, it was hard to stop:
+## Supported distributions
 
-1. **`amneziawg-install.sh`** — the original script, extended for AmneziaWG 2.0 (S3/S4, H1–H4, migration from pre-2.0 installs), optional AmneziaWG 3.0 header protection, and optional AmneziaWG 3.1 (`RandomTrailers` / `DisableCookies`).
-2. **`amneziawg-web.sh`** — a web panel for managing clients, switching between AWG 2.0 and 3.1, and configuring BoringTun's native protocol imitation without touching the CLI.
-3. **`amneziawg-proxy.sh`** — a UDP obfuscation proxy that takes traffic camouflage to the next level: it wraps AmneziaWG (AWG 1.0 or 2.0) so the datagrams on the wire look like a legitimate QUIC, DNS, STUN, or SIP service to Deep Packet Inspection (DPI).
+The installer's OS check (`checkOS` in `amneziawg-install.sh`) accepts:
 
-> **⚠️ amneziawg-proxy is compatible only with AmneziaWG 1.0 and 2.0 and is most powerful with WireSock Secure Connect 3.5+.**
-> The proxy is compatible **only with AmneziaWG 1.0 and 2.0** (it is **not compatible with AWG 3.0+** because AWG 3.0 uses S1–S4 padding as key material for header encryption). The proxy's full protocol-imitation feature set — coordinated client/server cover traffic, junk-packet shaping, and per-protocol padding — is only fully unleashed when paired with [WireSock Secure Connect](https://www.wiresock.net/) **3.5 or later** on the client side. Standard AmneziaWG clients still connect through the proxy and benefit from the server-side obfuscation, but the bidirectional imitation requires the WireSock client.
+| Distribution | Minimum version | Fresh install |
+|---|---|---|
+| Debian / Raspbian | 11 (Bullseye) | ✅ |
+| Ubuntu | 22.04 (CI-tested on 22.04, 24.04, 26.04) | ✅ |
+| Linux Mint | 21 | ✅ |
+| Fedora | 39 | ❌ temporarily disabled |
+| AlmaLinux / Rocky Linux | 9 | ❌ temporarily disabled |
+| CentOS | 9 | ❌ untested, not recommended |
 
----
+Fresh installs on Fedora, AlmaLinux and Rocky Linux are **temporarily
+disabled** because verified AmneziaWG 2.0 packages are not currently available
+for these RPM-based distributions; existing installs there can still run
+non-install operations. CentOS 9 is accepted by the installer's OS check and
+uses the same AmneziaWG COPR as other RPM-family hosts, but it is **not** a
+tested install target and is not recommended (CI does not exercise CentOS).
+The BoringTun backend requires a supported Debian/Ubuntu VM or bare-metal host
+with systemd, TUN and IPv6 socket support on x86_64, aarch64 or ARMv7
+hard-float.
 
-## Web panel preview
 
-The panel brings client management, traffic history, configuration exports, and
-proxy session visibility into one place. These screenshots show v0.1.37 with
-demonstration data: client names, addresses, and traffic are fictional.
+## Quick start
 
-**Peer overview** — connection status, traffic counters, expiration dates, and
-active standalone proxy sessions.
-
-![Web panel showing peers, traffic counters, and active proxy sessions](amneziawg-web/docs/screenshots/peer-overview.png)
-
-**Peer details** — configuration download and QR actions, editable client
-settings, and traffic usage over time.
-
-![Peer details showing configuration exports, the edit form, and traffic history](amneziawg-web/docs/screenshots/peer-details.png)
-
-See the [web panel documentation](amneziawg-web/README.md) for features and setup.
-
----
-
-## 🚀 Quick Start
-
-**VPN only (required):**
+**1. Download the installer:**
 
 ```bash
 curl -fLO https://raw.githubusercontent.com/wiresock/awg-server-tools/main/amneziawg-install.sh
 chmod +x amneziawg-install.sh
 ```
 
-Choose **one** backend for a fresh installation:
+> **TODO (future):** once signed releases with a `SHA256SUMS` file are
+> published, replace the download above with a pinned release URL and
+> `sha256sum -c SHA256SUMS --ignore-missing`. This path does **not** exist yet.
 
-**Kernel backend (default):**
+**2. Install, choosing one backend (fresh installs only):**
 
 ```bash
+# Kernel backend (default)
 sudo ./amneziawg-install.sh
-```
 
-**BoringTun userspace backend (experimental):**
-
-```bash
+# BoringTun userspace backend (experimental)
 sudo AWG_BACKEND=boringtun AWG_BORINGTUN_IMITATE_PROTOCOL=none ./amneziawg-install.sh
 ```
 
-BoringTun uses a downloaded, verified prebuilt binary instead of a kernel
-module. It requires a supported Debian/Ubuntu VM or bare-metal host with
-systemd, TUN and IPv6 socket support, on x86_64, aarch64 or ARMv7 hard-float. This selects
-BoringTun only on a fresh install; it does not migrate an existing kernel
-installation. See [BoringTun requirements and lifecycle](#-experimental-boringtun-userspace-backend).
+Choosing BoringTun does not migrate an existing kernel installation.
 
-**Add the web panel (optional):**
+**3. (Optional) Add the web panel:**
 
 ```bash
 curl -fLO https://raw.githubusercontent.com/wiresock/awg-server-tools/main/amneziawg-web.sh
@@ -89,21 +87,11 @@ chmod +x amneziawg-web.sh
 sudo ./amneziawg-web.sh install
 ```
 
-> **Note:** The web panel installer requires `git` to bootstrap the repository when run
-> standalone. If `git` is not available, clone the repository manually or use `--binary-src`
-> with a pre-built binary.
+The panel is built from Rust source and needs `git` when run standalone
+(or use `--binary-src` with a pre-built binary); `--install-rust` installs a
+toolchain if needed. See [Panel install](amneziawg-web/docs/INSTALL.md).
 
-The panel is built from Rust source, including on BoringTun hosts. Install its
-build prerequisites and use `--install-rust` if needed; BoringTun itself is
-prebuilt. See [VPN + web panel](#-advanced-setup--vpn--web-panel).
-
-BoringTun users can enable **Off / DNS / QUIC / SIP / STUN** directly under
-**Protocol imitation · BoringTun** in the panel. No standalone proxy is needed.
-**Auto** (per client, opt-in) is offered when the installed BoringTun binary
-supports it; see
-[native imitation and compatibility limits](#built-in-protocol-imitation-boringtun-only).
-
-**Add the obfuscation proxy (optional, kernel backend with AWG 1.0 or 2.0):**
+**4. (Optional) Add the obfuscation proxy (kernel backend, AWG 1.0/2.0):**
 
 ```bash
 curl -fLO https://raw.githubusercontent.com/wiresock/awg-server-tools/main/amneziawg-proxy.sh
@@ -111,1003 +99,88 @@ chmod +x amneziawg-proxy.sh
 sudo ./amneziawg-proxy.sh
 ```
 
-> Makes the VPN traffic look like QUIC/DNS/STUN/SIP to DPI. Compatible with
-> **AmneziaWG 1.0 and 2.0** (not compatible with AWG 3.0+). See
-> **[Traffic Obfuscation Proxy](#-traffic-obfuscation-proxy-amneziawg-proxy)**.
+BoringTun users don't need the proxy: enable Off / DNS / QUIC / SIP / STUN
+under **Protocol imitation · BoringTun** in the panel, or via the CLI below.
 
-✅ **After installation:**
-- VPN server is running
-- AWG 2.0 remains active by default; [AWG 3.1](#-optional-awg-30--31-mode) requires an explicit migration after backend capability checks pass (do not enable AWG 3.x if using `amneziawg-proxy`)
-- A client config file is generated at `~/awg0-client-<name>.conf`
-- (If installed) Web panel listens on `127.0.0.1:8080` by default. From your computer, run `ssh -N -L 8080:127.0.0.1:8080 user@server`, then open `http://localhost:8080` and sign in.
+## Basic usage
 
----
+After installation:
 
-## 🧠 How It Works
+- The client config is saved to `~/awg0-client-<name>.conf`; import it into any
+  AmneziaWG client.
+- The web panel listens on `127.0.0.1:8080` by default. Change
+  `AWG_WEB_LISTEN` or use a reverse proxy for remote access.
+- Re-run `sudo ./amneziawg-install.sh` to manage clients interactively.
 
-- **`amneziawg-install.sh`** — **required.** Installs the VPN server with the selected backend, generates obfuscation parameters, creates client configs, and can transactionally enable AWG 3.1 after capability checks or return the installation to AWG 2.0. The CLI also retains legacy AWG 3.0 support.
-- **`amneziawg-web.sh`** — **optional.** Unified script for:
-  - `install` — install the web panel
-  - `upgrade` — upgrade the binary
-  - `uninstall` — remove the panel
-  - `status` — show installation status
-- **`amneziawg-proxy.sh`** — **optional.** Installs and manages the UDP obfuscation proxy that fronts AmneziaWG (**AWG 1.0 or 2.0**) and makes the traffic look like QUIC, DNS, STUN, or SIP. See **[Traffic Obfuscation Proxy](#-traffic-obfuscation-proxy-amneziawg-proxy)** below.
-
----
-
-## 🤔 Choose Your Setup
-
-| Goal | What to run |
-|------|-------------|
-| VPN server only | `amneziawg-install.sh` |
-| VPN + web panel | `amneziawg-install.sh` then `amneziawg-web.sh install` |
-| Userspace VPN without a kernel module | Fresh install with `sudo AWG_BACKEND=boringtun ./amneziawg-install.sh` |
-| Userspace VPN + native imitation and web panel | Fresh BoringTun install, then `amneziawg-web.sh install`; configure imitation in the panel |
-| VPN + DPI-resistant obfuscation | `amneziawg-install.sh` then `amneziawg-proxy.sh` *(AWG 1.0 or 2.0)* |
-| Kernel VPN + panel + standalone proxy | `amneziawg-install.sh`, then `amneziawg-web.sh install`, then `amneziawg-proxy.sh` *(AWG 1.0 or 2.0)* |
-| Advanced / development | Clone the repo, then run the scripts from the checkout |
-
----
-
-## 🟢 Minimal Setup — VPN Only (Recommended)
-
-> Most users should start here.
-
-1. Update your system and reboot before installing.
-2. Run the commands from **[Quick Start](#-quick-start)**.
-3. Answer the prompts. The script installs AmneziaWG, configures the server, and generates a client config file.
-4. **Run the script again at any time** to add or remove clients.
-
----
-
-## 🟡 Advanced Setup — VPN + Web Panel
-
-> ⚠️ Requires VPN to be installed first (`amneziawg-install.sh`).
-
-Use the **[Quick Start](#-quick-start)** commands above, or clone the repository (best for teams or repeated upgrades):
+**Clients (non-interactive):**
 
 ```bash
-git clone https://github.com/wiresock/awg-server-tools.git
-cd awg-server-tools
-sudo ./amneziawg-install.sh
-sudo ./amneziawg-web.sh install
-```
-
-The installer automatically downloads required files and builds the panel.
-Add `--install-rust` if Rust is not already installed on the server.
-
-For a **fresh BoringTun host**, replace the two installation commands above
-with this sequence after cloning:
-
-```bash
-sudo AWG_BACKEND=boringtun AWG_BORINGTUN_IMITATE_PROTOCOL=none ./amneziawg-install.sh
-
-# Panel build prerequisites on supported Debian/Ubuntu hosts
-sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libssl-dev
-sudo ./amneziawg-web.sh install --install-rust
-```
-
-Keep the default localhost binding and access the panel through an SSH tunnel.
-The header separates the configured AWG version from the running backend and
-panel version. The panel offers AWG **2.0** and **3.1**; a legacy 3.0 installation
-is still recognized and can switch to either. On BoringTun hosts, the imitation
-section shows configured and verified running settings separately and uses the
-installer's compatibility checks and rollback when applying changes.
-
-See [amneziawg-web/docs/INSTALL.md](amneziawg-web/docs/INSTALL.md) for all installer options.
-
----
-
-## 🎭 Traffic Obfuscation Proxy (amneziawg-proxy)
-
-> ⚠️ Requires VPN to be installed first (`amneziawg-install.sh`).
-
-> [!IMPORTANT]
-> **Compatibility: AmneziaWG 1.0 and 2.0 (incompatible with AWG 3.0+)**
->
-> `amneziawg-proxy` is compatible **only with AmneziaWG 1.0 and 2.0** and cannot be used when AWG 3.0 mode is enabled.
->
-> In AmneziaWG 2.0, the S1–S4 padding prefix consists of arbitrary random bytes that the proxy safely replaces with cover-protocol filler bytes (QUIC, DNS, STUN, or SIP headers) while preserving the encrypted payload. Starting with AmneziaWG 3.0, the S1–S4 padding values are used as key material for header encryption (`HeaderProtectionKey`). Modifying or rewriting them in flight breaks header decryption on the peer, and the encrypted headers prevent the proxy from classifying packets.
->
-> If you plan to use `amneziawg-proxy`, keep your interface in AWG 2.0 mode (the default). Do not enable AWG 3.0 on a proxied interface.
-
-`amneziawg-proxy` is an async UDP proxy (written in Rust) that sits **in front of**
-your AmneziaWG server and disguises the traffic so that, to Deep Packet
-Inspection (DPI), the port appears to host an ordinary **QUIC, DNS, STUN, or
-SIP** service. AmneziaWG's own obfuscation already hides the WireGuard
-fingerprint; the proxy adds a second layer that makes the packets *positively
-resemble* a known, allowed protocol instead of merely looking random.
-
-> **💡 Best paired with WireSock Secure Connect 3.5+.** The proxy obfuscates
-> the **server → client** direction on its own. Bidirectional imitation — where
-> the **client → server** direction is camouflaged too — requires
-> [WireSock Secure Connect](https://www.wiresock.net/) **3.5 or later**, which
-> implements the matching client-side protocol imitation and junk-packet shaping.
-
-### Install
-
-The proxy installer detects the AWG interface, moves it to a separate backend
-port, builds the binary, and installs a systemd service. It does **not** install
-firewall rules or guarantee that the backend is loopback-only. Restrict access
-to the backend port before running the installer; see the
-[firewall checklist](amneziawg-proxy/doc/MANUAL_DEPLOYMENT.md#firewall-checklist).
-
-```bash
-curl -fLO https://raw.githubusercontent.com/wiresock/awg-server-tools/main/amneziawg-proxy.sh
-chmod +x amneziawg-proxy.sh
-sudo ./amneziawg-proxy.sh
-```
-
-Run with no arguments and it walks you through guided prompts. Run it again
-later and it shows a management menu (status, logs, reconfigure, uninstall).
-
-**Non-interactive examples.** `amneziawg-proxy.sh` forwards any flags to the
-installer (cloning the helper scripts on the fly when run standalone), so the
-one downloaded file is all you need:
-
-```bash
-# QUIC imitation (safest default) — public :51820 → loopback :51821
-sudo ./amneziawg-proxy.sh \
-  --non-interactive --listen-port 51820 --protocol quic
-
-# DNS imitation that also answers real DNS queries (run on port 53)
-sudo ./amneziawg-proxy.sh \
-  --non-interactive --listen-port 53 --protocol dns \
-  --dns-forward --dns-upstream 1.1.1.1:53
-
-# STUN imitation (port 3478, WebRTC/NAT-permissive networks)
-sudo ./amneziawg-proxy.sh \
-  --non-interactive --listen-port 3478 --protocol stun
-```
-
-Full option reference, configuration keys, and troubleshooting live in
-[amneziawg-proxy/doc/USAGE.md](amneziawg-proxy/doc/USAGE.md). Internal design
-and packet-level walkthroughs are in
-[amneziawg-proxy/doc/ARCHITECTURE.md](amneziawg-proxy/doc/ARCHITECTURE.md).
-
-### How It Works
-
-With client endpoints pointed at the proxy and the backend port protected by
-firewall rules, VPN traffic follows this same-host path. The loopback address
-below is the proxy's destination, not an exclusive AWG bind address:
-
-```
-                         ┌───────────────────────────────────┐
- VPN client ──── UDP ───►│  0.0.0.0:51820   amneziawg-proxy  │
- (DPI sees QUIC/DNS/     │            │                      │
-  STUN/SIP)              │            ▼                      │
-                         │  127.0.0.1:51821  awg0 (AmneziaWG)│
-                         └───────────────────────────────────┘
-```
-
-The proxy does two complementary things:
-
-1. **Probe response.** When a scanner or DPI box sends a protocol probe
-   (a QUIC Initial, a DNS query, a STUN Binding Request, a SIP request), the
-   proxy replies with a *valid* protocol response — a QUIC Version Negotiation,
-   a DNS answer, a STUN Binding Success, a SIP `100 Trying`. The port therefore
-   behaves exactly like the service it is pretending to be when actively
-   probed.
-2. **Padding transformation.** Every outgoing AmneziaWG 2.0 packet already carries a
-   random S1–S4 padding prefix. The proxy overwrites that prefix with
-   protocol-conformant bytes (a QUIC short header, a DNS/STUN header, SIP header
-   text) so the *leading bytes and byte-distribution* of each datagram match the
-   imitated protocol — while the encrypted WireGuard payload that follows is
-   left untouched. (Note: this relies on AmneziaWG 2.0 protocol semantics where
-   headers are plaintext and S1–S4 padding is unkeyed; in AWG 3.0+, S1–S4 padding
-   serves as key material for header encryption, so rewriting it breaks compatibility).
-
-| Mode | What DPI sees | Typical port | Good for |
-|------|---------------|--------------|----------|
-| `quic` | QUIC 1-RTT / Version Negotiation | 443 | QUIC/HTTP-3-heavy networks (safest default) |
-| `dns`  | DNS query/response (optionally real) | 53 | DNS-filtered networks |
-| `stun` | STUN Binding traffic | 3478 | WebRTC / NAT-traversal-permissive networks |
-| `sip`  | SIP signaling | 5060 | VoIP-permissive networks |
-| `auto` | Whatever the client probes for | — | Mixed-probe environments |
-
-### Traffic Examples
-
-**STUN mode — an outgoing server packet on the wire.** The padding prefix is
-rewritten as a well-formed STUN message; a packet-capture tool dissects it as
-STUN and leaves the encrypted AmneziaWG payload as trailing bytes:
-
-```
-01 01 00 1c 21 12 a4 42  4f 7a 1c …   ← STUN: Binding Success Response, msg length 0x1c, cookie 0x2112A442
-00 20 00 08 00 01 …                    ← XOR-MAPPED-ADDRESS attribute (12 B)
-80 22 00 0c …                          ← SOFTWARE attribute (16 B; fills the prefix) → 12 + 16 = 0x1c
-… encrypted AmneziaWG payload …        ← opaque ciphertext (trails the message, not parsed)
-```
-
-**QUIC mode — a probe and its response.** A DPI box sends a QUIC Initial; the
-proxy answers with a valid Version Negotiation packet, swapping the connection
-IDs per RFC 9000:
-
-```
-→  c3 00000001 04 aabbccdd 00            QUIC Initial probe (DCID=AABBCCDD)
-←  c3 00000000 00 04 aabbccdd 00000001   Version Negotiation (SCID echoes the DCID)
-```
-
-**DNS mode — a query answered for real.** With `--dns-forward`, a DNS probe is
-forwarded to the upstream resolver and the genuine answer is returned, so the
-port doubles as a working resolver while still tunneling VPN traffic.
-
-To inspect it yourself, capture on the server's public port and open the capture
-in Wireshark — frames decode cleanly as the imitated protocol, with no
-"malformed" or WireGuard markers:
-
-```bash
-sudo tcpdump -i any -w awg-proxy.pcap udp port 51820
-```
-
-### Manage / Uninstall
-
-Re-running `amneziawg-proxy.sh` on an installed host opens a management menu
-(status, logs, reconfigure, uninstall) — the simplest path, and it works from
-the single downloaded file:
-
-```bash
-sudo ./amneziawg-proxy.sh
-```
-
-From a repository checkout you can also drive the uninstaller non-interactively
-(keeps config/data by default; add `--restore-awg` to rebind AWG to the public
-port):
-
-```bash
-sudo ./amneziawg-proxy/scripts/amneziawg-proxy-uninstall.sh --force
-```
-
----
-
-## ⚙️ After Installation
-
-- **VPN client config** is saved to `~/awg0-client-<name>.conf`. Import it into any AmneziaWG client app.
-- **Web panel** listens on `127.0.0.1:8080` by default. Access it on the server at `http://127.0.0.1:8080`, or change `AWG_WEB_LISTEN` / use a reverse proxy for remote access.
-- Re-run `sudo ./amneziawg-install.sh` to add or remove VPN clients interactively.
-- Check the web panel status at any time:
-  ```bash
-  ./amneziawg-web.sh status
-  ```
-  > The `status` command does not require `sudo`.
-
----
-
-## 🔄 Maintenance
-
-All web panel lifecycle actions use the same script:
-
-**Upgrade the web panel:**
-
-```bash
-sudo ./amneziawg-web.sh upgrade
-```
-
-**Uninstall the web panel (keeps config and data):**
-
-```bash
-sudo ./amneziawg-web.sh uninstall --force
-```
-
-**Uninstall and purge all data:**
-
-```bash
-sudo ./amneziawg-web.sh uninstall --purge-config --purge-data --force
-```
-
-> The script works standalone — it automatically downloads required files when run.
-
----
-
-## ⚡ Non-Interactive Install
-
-Skip all prompts and use sensible defaults:
-
-```bash
-sudo AUTO_INSTALL=y ./amneziawg-install.sh
-```
-
-Override specific defaults with environment variables:
-
-| Variable | Default |
-|----------|---------|
-| `SERVER_PUB_IP` | Auto-detected |
-| `SERVER_PUB_NIC` | Auto-detected |
-| `SERVER_AWG_NIC` | `awg0`, or the first free `awgN` when `awg0` is in use |
-| `SERVER_AWG_IPV4` | `10.66.66.1` |
-| `SERVER_AWG_IPV6` | `fd42:42:42::1` |
-| `ENABLE_IPV6` | `y` if the host has IPv6, otherwise `n` |
-| `SERVER_PORT` | Random (49152–65535) |
-| `CLIENT_DNS_1` | `1.1.1.1` |
-| `CLIENT_DNS_2` | `1.0.0.1` |
-| `CLIENT_MTU` | Generic final inner MTU: `min(1500, uplink MTU) - 80 - S4`; budgets below `1280` are refused. Empty omits MTU; see client compatibility below. |
-| `ALLOWED_IPS` | `0.0.0.0/0, ::/0` (IPv4 only when `ENABLE_IPV6=n`) |
-| `CREATE_INITIAL_CLIENT` | `yes` in `AUTO_INSTALL`; prompted interactively |
-
-Set `ENABLE_IPV6=n` for an IPv4-only deployment: the server interface, firewall
-rules, and all generated client configs omit IPv6 (no IPv6 address, no `::/0`
-route), which avoids route-setup errors on hosts where IPv6 is disabled.
-
-The installer manages one AmneziaWG interface per host and never takes over
-one that already exists, such as the upstream tunnel of a two-hop server. An
-interface name is in use when `/etc/amnezia/amneziawg/<name>.conf` or a network
-link of that name exists. An explicit `SERVER_AWG_NIC` that is in use stops the
-installation before anything is installed; without one, the installer picks
-the first free `awgN` and says so. Later, every management action (adding,
-removing or regenerating clients, protocol changes, the web panel) refuses to
-change the config named by `SERVER_AWG_NIC` in params unless its
-`[Interface] PrivateKey` is the installation's `SERVER_PRIV_KEY`. Uninstalling
-removes only the installation's own files from `/etc/amnezia/amneziawg`
-(params, the server config, client configs and their backups); other configs
-there stay, and so does the directory then.
-
-Example:
-
-```bash
-sudo AUTO_INSTALL=y SERVER_PORT=51820 CLIENT_DNS_1=8.8.8.8 ./amneziawg-install.sh
-
-# IPv4-only server
-sudo AUTO_INSTALL=y ENABLE_IPV6=n ./amneziawg-install.sh
-
-# Persist an explicit MTU for new clients from the CLI and web panel
-sudo AUTO_INSTALL=y CLIENT_MTU=1380 ./amneziawg-install.sh
-```
-
-AmneziaWG prepends `S4` junk bytes to every transport packet (`S1`–`S3` pad
-the small handshake and cookie packets), and the automatic MTU of `awg-quick`,
-the uplink MTU minus 80, does not allow for them: full-size transport packets
-then exceed the path MTU and fragment. A new installation therefore writes
-`MTU = min(1500, <uplink MTU>) - 80 - S4` into the server
-`[Interface]`, using the smallest explicit MTU on the IPv4 and IPv6 default
-routes through `SERVER_PUB_NIC`. If those routes do not specify a usable MTU,
-it reads the NIC MTU from sysfs, falling back to 1500 when unavailable.
-It refuses a result below 1280 before writing installation state: rounding
-up does not create space on the path. It persists the same final inner value
-as the default `CLIENT_MTU`. A known smaller uplink reduces both defaults;
-a jumbo uplink does not establish a jumbo Internet path. The interactive
-installer asks for the client MTU after `S4`, pre-filled with that value.
-Omitting MTU remains supported for clients that account for S4 automatically,
-including the inspected WireSock implementation. Linux `awg-quick` does not:
-under a 1500-byte assumption its automatic 1420 value leaves room for only
-20 bytes of S4 with outer IPv4, or zero with outer IPv6. The installer and
-panel warn about this client-specific risk without rejecting omission for
-padding-aware clients. An unknown endpoint or hostname receives the IPv6 warning.
-Automatic MTU is derived on the client: reducing the server's local budget
-does not communicate that limit to the client. Even a padding-aware client
-may choose too large a value for a smaller server or remote path.
-
-`CLIENT_MTU` syntax accepts decimal integers from **1280 to 65535**, without leading
-zeros, so existing configurations remain readable. New profiles also require
-`CLIENT_MTU + S4 + 80` to fit the assumed outer budget. Set it through the environment for an
-automatic installation or at the prompt; an explicit `CLIENT_MTU=''` omits the
-`MTU` line and leaves the client MTU automatic. Lower it when the path to the
-clients carries less than 1500 bytes. The server interface MTU is written
-once, at installation. Re-runs and upgrades never change it or an existing
-`CLIENT_MTU`; when the pre-2.0 migration assigns a new `S4`, the installer
-prints the recommended MTU instead of applying it.
-
-For an existing installation, choose a final inner value that fits S4 and the
-path budget, for example `CLIENT_MTU='1300'` with S4=120 and a 1500-byte budget,
-in the root-owned
-`/etc/amnezia/amneziawg/params` file. The CLI and web panel use that value for
-subsequently generated clients, including explicit CLI regeneration. Existing
-client files stay unchanged until regenerated. Remove the setting or use
-`CLIENT_MTU=''` to omit the MTU line again. Old params files without this key
-retain their current behavior, even if `CLIENT_MTU` is exported in the environment.
-Web generation requires the updated web binary and privileged helper.
-
-New profiles are refused when `1420 - S4 < 1280`, for IPv4,
-IPv6, hostname and unknown endpoints alike, even if an explicit MTU was supplied. This prevents the observed
-`S4=148` / effective MTU `1272` failure where WireSock rejected 1280-byte IP
-packets. S4 has a hard maximum of 140; normal generation stops at 128 for headroom.
-Known smaller budgets and caller-supplied final-inner MTUs further limit fresh
-draws before random selection. The 1420 value here is already
-an inner baseline after an 80-byte framing allowance; it is not a measured
-outer PMTU. If the **outer** budget is 1420, the corresponding conservative
-inner budget is `1420 − 80 − S4`, not `1420 − S4`.
-
-Existing values and downloaded profiles remain unchanged. The CLI and peer
-page warn about an unsafe budget and client-specific compatibility; listing, removal, startup and
-upgrades continue. Creating or regenerating profiles that exceed the core budget is refused before
-keys or client files are written. Coordinate the server, every generated
-profile and copies already installed on devices before migrating settings.
-Protocol changes and recovery retain existing S4/MTU settings; completing
-those operations does not certify their packet-size budget.
-Do not change H4 to adjust packet size: it is a fixed-size identifier, while
-S4 is transport padding.
-
-Generic/Linux `CLIENT_MTU` is a **final inner value**. The inspected older
-WireSock source treats explicit `MTU` as a **pre-S4 baseline**: with
-`MTU=1420` and `S4=128`, its effective inner MTU is 1292 before any smaller
-transport-capacity clamp. Exporting 1292 directly to that client deducts S4
-again, leaving 1164. The CLI and panel warn when this would leave less than
-1280. Do not inflate generic profiles to 1420: Linux uses that number unchanged.
-A change to WireSock's explicit-MTU semantics is proposed separately; this
-update neither implements nor depends on an unreleased client fix. Verify
-the installed client version and coordinate migration before importing an
-explicit generic profile. No client-specific export format is introduced.
-Fresh installation uses the known local uplink ceiling. Later CLI/web client
-creation checks the nominal 1500-byte budget and stored client MTU; it does not
-detect a subsequent reduction of the uplink or remote path MTU.
-Remote PMTU is unmeasured. `RandomTrailers` uses a learned packet-size window:
-an MTU edit alone does not shrink that window, and old or oversized peer
-traffic can invalidate a nominal budget. Coordinate fresh tunnel state on
-both ends and validate the actual path. No existing configuration is silently
-rewritten by these diagnostics.
-
----
-
-## 🤖 Non-Interactive Client Management
-
-The install script also supports non-interactive flags for automation and scripting:
-
-```bash
-# Add a new client
 sudo ./amneziawg-install.sh --add-client alice
-
-# Remove a client
 sudo ./amneziawg-install.sh --remove-client alice
-
-# List all clients
 sudo ./amneziawg-install.sh --list-clients
 ```
 
----
-
-## 🔐 Optional AWG 3.0 / 3.1 Mode
-
-> [!WARNING]
-> **Incompatible with amneziawg-proxy:**
-> Do **not** enable AWG 3.0 or AWG 3.1 if you are using `amneziawg-proxy`. Because AmneziaWG 3.0+ incorporates the S1–S4 padding values as key material for header protection, the proxy's padding transformations corrupt header decryption and break packet classification.
->
-> If you require `amneziawg-proxy`, keep your interface in AWG 2.0 mode (the default). If an interface was already migrated to AWG 3.0 or 3.1, revert it to AWG 2.0 using `sudo ./amneziawg-install.sh --disable-awg3` (or via the web panel under **AWG protocol**) before setting up or running the proxy.
-
-Fresh installs and parameter files created by earlier releases use AWG 2.0 by
-default. Installing or upgrading this project never changes an existing
-interface's protocol mode. Existing AWG 3.0 installations stay on 3.0 until
-you explicitly enable AWG 3.1.
+**Protocol mode (AWG 2.0 is the default; never changed implicitly):**
 
 ```bash
-# Missing protocol state is reported as 2
 sudo ./amneziawg-install.sh --protocol-status
-
-# Legacy AWG 3.0: probe the selected backend, then migrate the server and clients
-sudo ./amneziawg-install.sh --enable-awg3
-
-# Enable AWG 3.1 (AWG 3.0 plus RandomTrailers; DisableCookies stays off)
-sudo ./amneziawg-install.sh --enable-awg31
-
-# Atomically remove AWG 3.x-only fields and return every config to AWG 2.0
-sudo ./amneziawg-install.sh --disable-awg3
+sudo ./amneziawg-install.sh --enable-awg31   # AWG 3.1 — not with amneziawg-proxy
+sudo ./amneziawg-install.sh --disable-awg3   # return every config to AWG 2.0
 ```
 
-AWG 3.0 header protection is interface-wide and cannot communicate with AWG
-2.0 clients on the same interface. AWG 3.1 is AWG 3.0 plus `RandomTrailers`
-(must match on every peer) and optional `DisableCookies` (server-sent Cookie
-Reply / anti-DoS; default `off`). Enabling a mode creates or keeps one shared
-header key, validates all generated configs, and updates the server plus every
-recoverable client config as one transaction. If capability validation, file
-replacement, service restart, or the process itself fails, the previous state
-is restored. Redistribute every client config after a migration. The web panel
-offers confirmed switches to AWG 2.0 and 3.1 under **AWG protocol**. Legacy
-AWG 3.0 remains available through the CLI, but cannot be selected in the panel.
-
-When `RandomTrailers` is on, upstream recommends identical `S1`–`S4` values to
-reduce packet-type misdetection. The installer warns if they differ and does
-not rewrite existing S-values.
-
-**What this installer implements**
-
-| Mode | Fields |
-| --- | --- |
-| AWG 2.0 | `Jc`, `Jmin`, `Jmax`, `S1`–`S4`, `H1`–`H4` |
-| AWG 3.0 | AWG 2.0 plus `HeaderProtectionKey`, optional `ContentPaddingAddition`, `RekeyAfterTime`, `RekeyTimeout`, `RejectAfterTime`, `KeepaliveTimeout` |
-| AWG 3.1 | AWG 3.0 plus `RandomTrailers` and `DisableCookies` |
-
-Clients and the server must run AWG 3.1-capable implementations (`amneziawg-tools`
-plus the running kernel module, or an equivalent 3.1 userspace stack). The
-installer does not trust package version strings; it probes by applying the
-fields to a temporary interface and reading them back. `I1`–`I5` (CPS) are
-intentionally not generated, persisted, or migrated. Upstream also defines
-optional `MaxHandshakeAttempts`; this installer does not manage that field
-(same as the existing AWG 3.0 mode). Externally added `I1`–`I5` or
-`MaxHandshakeAttempts` lines are left in place during protocol rewrites.
-
----
-
-## 🧪 Experimental: BoringTun Userspace Backend
-
-> [!WARNING]
-> **Experimental.** The kernel module stays the default and the recommended
-> backend. BoringTun is chosen only by an explicit `AWG_BACKEND=boringtun` on a
-> **fresh** install, and existing installations are never moved to it.
-
-Instead of the AmneziaWG kernel module (built with DKMS), a server can run
-[WireSock BoringTun](https://github.com/Wiresock-Foundation/wiresock-boringtun),
-a userspace AmneziaWG implementation that serves the interface through a TUN
-device. The VPN backend uses a prebuilt binary: no Rust toolchain, DKMS or
-kernel headers are needed for BoringTun itself. The optional web panel has its
-own Rust build prerequisites.
+**BoringTun backend:**
 
 ```bash
-# Fresh install with the BoringTun backend
-sudo AWG_BACKEND=boringtun AUTO_INSTALL=y ./amneziawg-install.sh
-
-# Interactive install with the BoringTun backend
-sudo AWG_BACKEND=boringtun ./amneziawg-install.sh
-```
-
-**Where it runs:** Debian 11+ and Ubuntu 22.04+ hosts (virtual machines or bare
-metal) with systemd, on x86_64, aarch64 or ARMv7-A with VFPv3-D16 hard-float,
-with `/dev/net/tun` and the IPv6 socket family available. ARMv7 requires an
-`armhf` userspace; a 64-bit kernel with 32-bit armhf userspace selects that
-ARMv7 binary. Original Pi 1 and Pi Zero ARMv6 CPUs are unsupported. ARMv7 release
-validation uses emulation and interop tests, not physical Pi hardware; this does
-not establish ARM32 support for the optional web/proxy stack. Containers and LXC
-are not supported. Other architectures are refused before anything is changed.
-
-**What it installs:**
-
-- `amneziawg-tools` from the Amnezia PPA with `--no-install-recommends`, so the
-  kernel module package (`amneziawg-dkms`) is not pulled in, plus `nftables`,
-  `iptables` and `qrencode`. No `amneziawg`, DKMS, headers or `deb-src` sources.
-- `boringtun-cli` from the fork's immutable public release
-  [`boringtun-cli-0.7.1-ga92909c49920-b101`](https://github.com/Wiresock-Foundation/wiresock-boringtun/releases/tag/boringtun-cli-0.7.1-ga92909c49920-b101),
-  built from WireSock BoringTun `a92909c49920e12de11fb0e066192b8f39b5b212`. The
-  installer downloads the archive for its architecture from that exact URL and
-  checks it against SHA-256 values embedded in the script before extracting
-  anything; then it checks the archive's layout, its `MANIFEST`, the binary's
-  SHA-256 and `boringtun-cli --version`. No "latest" lookup and no GitHub API.
-  The release notes and [adoption evidence](docs/BORINGTUN_ADOPTION_2026-10-27.md)
-  describe the verified provenance and exact hashes.
-- The binary into `/usr/local/lib/amneziawg-install/boringtun/`, and two
-  generated helpers into `/usr/local/libexec/amneziawg-install/` that supervise
-  the daemon inside the usual `awg-quick@<interface>` service.
-
-Before any VPN configuration is written, a preflight starts a temporary
-BoringTun instance with the chosen AWG 2.0 parameters and removes it again. If
-the download, a check or the preflight fails, nothing is configured. If the
-service does not start, the installer stops with BoringTun diagnostics; it
-never falls back to the kernel module.
-
-**Managing it:** everything else works as usual: clients, `--enable-awg3`,
-`--enable-awg31`, `--disable-awg3` and uninstall. Use `systemctl` or this
-script to start and stop the interface: a plain `awg-quick up awg0` does not
-start BoringTun. A newer installer version never replaces an installed
-BoringTun binary on its own: only `--upgrade-boringtun` does (see below). Exporting
-`AWG_BACKEND` has no effect on an existing installation, whichever backend it
-uses.
-
-**Kernel module on the host:** if the AmneziaWG kernel module is loaded, the
-install refuses and never unloads it. If the module is only installed (for
-example `amneziawg-dkms` from an earlier kernel install), `awg-quick` would load
-it instead of starting BoringTun, so the install asks before blocking it with
-`/etc/modprobe.d/amneziawg-install-boringtun.conf`
-(`install amneziawg /bin/false`); with `AUTO_INSTALL`, set
-`AWG_BORINGTUN_BLOCK_KERNEL_MODULE=y` to agree. Uninstalling removes that file.
-Kernel module packages that the BoringTun install did not install are never
-removed, and neither is `/etc/modules-load.d/amneziawg.conf`.
-
-**Uninstall:** it removes only what it can prove is this installation's: a
-UAPI socket that a process may still serve, or a helper script changed after
-the install, is left in place and reported. If a step fails, or the service's
-teardown did not finish (for example PostDown hooks that may have run only in
-part), the configuration in `/etc/amnezia/amneziawg` is kept, so running the
-installer again offers the uninstall again once the cause is fixed.
-
-**Not with the standalone proxy:** BoringTun cannot run behind
-`amneziawg-proxy`, because it always listens on every address. The install
-refuses while the proxy (or its `proxy.toml`) is present, and the proxy
-installer refuses a BoringTun host. Keep the kernel backend for proxy setups.
-
-**Web panel:** a BoringTun host needs a web panel whose copy of this script
-(`/usr/local/bin/amneziawg-install.sh`) is at least this version; the install
-refuses while an older copy is installed. Install or upgrade the panel and its
-privileged helper together from the same checkout. The header reports the
-configured protocol and verified running BoringTun release, without a proxy
-status entry. The panel manages clients, AWG 2.0/3.1 transitions and native
-imitation. Authentication and the default localhost binding apply to these
-controls as well.
-
-### Upgrading and rolling back the BoringTun binary
-
-```bash
-# Move to the BoringTun release this installer version pins
+sudo ./amneziawg-install.sh --backend-status
+sudo ./amneziawg-install.sh --set-boringtun-imitation <none|dns|quic|sip|stun|auto> [hostname]
 sudo ./amneziawg-install.sh --upgrade-boringtun
-
-# Go back to the release that was current before
 sudo ./amneziawg-install.sh --rollback-boringtun
 ```
 
-**Explicit only.** Running a newer `amneziawg-install.sh` never switches the binary, and
-neither does anything else it does: clients, protocol changes, imitation changes and the menu
-leave the installed release alone. A host installed by an earlier version, with
-`boringtun-cli-0.7.1-g71d88784ad29-b1`, `boringtun-cli-0.7.1-gae2ab44e9a68-b1` or
-`boringtun-cli-0.7.1-gb94943906b11-b1`, keeps running that release until `--upgrade-boringtun`
-moves it to the one this version pins; until then `--backend-status` reports
-`upgrade_available=yes`. The first two have no imitation mode `auto`, although they report the
-same version (`0.7.1`) as the others: the installer asks the binary itself and refuses `auto` on
-them (see [Built-in protocol imitation](#built-in-protocol-imitation-boringtun-only)).
-`gb94943906b11` has `auto`, so a rollback to it keeps `auto`, without the newer learning from
-datagrams that also fit the AmneziaWG framing.
-
-**What each command targets.**
-- **Upgrade:** only the release pinned in the installer itself, never a "latest" lookup.
-  Moving to a newer BoringTun means a newer installer with a reviewed pin.
-  - When the pin is already installed, its links are consistent and the helper scripts are
-    up to date, the upgrade changes nothing.
-  - When the pin is already installed but the helper scripts are older, the upgrade only
-    refreshes them and says so. A stopped service stays stopped, and a running one is not
-    restarted for it.
-  - If an interrupted switch left `previous` naming the same release, the upgrade removes only
-    that link. Any older release directory stays, unmanaged, and is never guessed back as the
-    rollback target.
-- **Rollback:** only the release that was current before the last upgrade or rollback. It
-  takes no release argument.
-
-The store manages at most two releases, `current` and `previous`, so two rollbacks in a row
-toggle back and forth. Other release directories can remain, for example after an
-interrupted switch. They are unmanaged: reported, never used, never removed automatically.
-
-Both commands first refresh the installer's two generated helper scripts, because helpers
-from earlier versions don't accept the names of later builds. That includes an upgrade that
-finds the pin already installed.
-
-**What a switch does.**
-1. The upgrade downloads and verifies the pinned release exactly as a fresh install does,
-   beside the running one.
-2. Before anything changes, the target binary is validated on temporary instances against this
-   server as it is now:
-   - the current AWG protocol mode;
-   - the protocol imitation;
-   - the server config and every client config.
-
-   A rollback is refused, without changing anything, when the older binary does not accept
-   today's settings (for example a protocol mode enabled after the upgrade). With imitation
-   `auto` configured, a rollback to a binary without it is refused before anything else:
-   select a fixed imitation or `none` first, then roll back.
-3. `current` and `previous` are switched atomically, and an active service is restarted and
-   checked: the right binary, its TUN device, UAPI, listen port, imitation and peers.
-4. A stopped or failed service is switched but not started.
-5. If the restart or the check fails, both links are restored and the previous binary is
-   restarted and checked.
-
-Params, client configs, the imitation and the listen port never change.
-
-**Status.** `--backend-status` adds:
-- `previous_release`, `rollback_available` and `upgrade_available`. `rollback_available=yes`
-  means a previous release is there, passes the store check and runs the configured imitation
-  (`auto` needs a binary that has it); the rollback itself still validates it against today's
-  settings and can refuse;
-- `daemon_release`, the release the running daemon executes, which shows a service that still
-  runs an old binary;
-- `unmanaged_releases`: release directories neither link names, which are reported but never
-  removed automatically;
-- `imitation_auto_support`: `supported`, `unsupported` or `unknown`, whether the installed
-  binary runs imitation `auto`, from the binary's own answer.
-
-**Builds.** A later build of the same BoringTun source commit (for example `-b2`) is stored
-under its own name, so it can sit beside build 1. Hosts installed before this version keep
-their store as it is.
-
-### Built-in protocol imitation (BoringTun only)
-
-A BoringTun server can shape the S1–S4 prefixes of the packets it sends as
-`dns`, `quic`, `sip` or `stun`, and answer probes of that service on its listen
-port, or, with `auto`, choose one of those for each client. This uses
-BoringTun's own imitation; it needs no proxy. The default is `none`, and the
-kernel backend has no imitation at all.
+**Web panel lifecycle:**
 
 ```bash
-# Choose it on a fresh BoringTun install (an interactive install asks)
-sudo AWG_BACKEND=boringtun AWG_BORINGTUN_IMITATE_PROTOCOL=dns \
-  AWG_BORINGTUN_IMITATE_DOMAIN=example.com AUTO_INSTALL=y ./amneziawg-install.sh
-
-# Change it later: none, dns, quic, sip, stun or auto, and a hostname for dns, quic or sip
-sudo ./amneziawg-install.sh --set-boringtun-imitation quic cdn.example.org
-sudo ./amneziawg-install.sh --set-boringtun-imitation auto
-sudo ./amneziawg-install.sh --set-boringtun-imitation none
-
-# Show the backend, the imitation and the running daemon (key=value, no secrets)
-sudo ./amneziawg-install.sh --backend-status
+./amneziawg-web.sh status                 # no sudo needed
+sudo ./amneziawg-web.sh upgrade
+sudo ./amneziawg-web.sh uninstall --force # keeps config and data
+sudo ./amneziawg-web.sh uninstall --purge-config --purge-data --force
 ```
 
-The management menu of a BoringTun host shows the imitation and offers
-**7) Change BoringTun protocol imitation**. The hostname is optional: without
-one, BoringTun chooses its own. It must be a plain host name of letters,
-digits, hyphens and dots.
+**Proxy:** re-run `sudo ./amneziawg-proxy.sh` for the management menu (status,
+logs, reconfigure, uninstall).
 
-The web panel exposes the same transaction under **Protocol imitation ·
-BoringTun**. Choose **Off**, **DNS**, **QUIC**, **SIP**, **STUN** or **Auto**,
-optionally enter a hostname for DNS/QUIC/SIP, and confirm the brief VPN restart.
-Saved and verified running settings are shown separately. Changing imitation
-preserves the AWG version and client configurations.
+## Documentation
 
-**`auto` (opt-in).** BoringTun picks `dns`, `quic`, `sip` or `stun` separately
-for each authenticated peer, from the imitation datagrams that peer's client
-sends before its handshake, so clients with different imitation settings can
-share one server and port. What to know:
+| Topic | Link |
+|---|---|
+| Non-interactive install & all env vars | [docs/src/installer/non-interactive.md](docs/src/installer/non-interactive.md) |
+| AWG 3.0 / 3.1 mode | [docs/src/installer/awg3.md](docs/src/installer/awg3.md) |
+| Obfuscation parameters | [docs/src/reference/obfuscation-parameters.md](docs/src/reference/obfuscation-parameters.md) |
+| BoringTun backend & imitation | [docs/src/boringtun/README.md](docs/src/boringtun/README.md) |
+| Web panel | [amneziawg-web/README.md](amneziawg-web/README.md), [deployment](amneziawg-web/docs/DEPLOYMENT.md), [email delivery](amneziawg-web/docs/EMAIL_DELIVERY.md) |
+| Proxy | [usage](amneziawg-proxy/doc/USAGE.md), [architecture](amneziawg-proxy/doc/ARCHITECTURE.md), [manual deployment](amneziawg-proxy/doc/MANUAL_DEPLOYMENT.md) |
+| Versioning | [docs/VERSIONING.md](docs/VERSIONING.md) |
+| Docs site map (mdBook) | [docs/DOCS_STRUCTURE.md](docs/DOCS_STRUCTURE.md) |
+| Licensing | [docs/LICENSING.md](docs/LICENSING.md), [NOTICE.md](NOTICE.md) |
 
-- It is **best effort** and needs **recognizable client traffic**. A client
-  that sends no DNS, QUIC, SIP or STUN pre-handshake datagrams (a standard
-  AmneziaWG client, for example), or whose datagrams are lost, leaves its peer
-  unresolved. Even a datagram that arrives may not count: one that also fits
-  this server's AmneziaWG S/H framing, as a client's own imitation datagrams
-  can depending on the S1–S4 and H1–H4 values, is tried as AmneziaWG traffic
-  first. The release this installer pins
-  (`boringtun-cli-0.7.1-ga92909c49920-b101`) still learns from it, but only when
-  every such reading is refused for a reason that establishes nothing (a failed
-  mac1, an unknown peer, index or session, no matching handshake, a failed
-  decryption); after any other outcome it never counts as a hint, and the
-  earlier release `boringtun-cli-0.7.1-gb94943906b11-b1` never does. Such a
-  datagram is never answered as a probe. A peer for which nothing was learned is
-  padded with random S padding, as with `none`; it may still be learned at a
-  later handshake. A learned protocol is kept for the peer and survives roaming.
-- A working tunnel, and `auto` configured and running, do not show that any
-  peer is imitated. The status shows `auto` as configured and running, and
-  nothing per peer: BoringTun does not report which protocol a peer learned.
-- It does **not detect S1–S4, H1–H4** or any other AmneziaWG setting; clients
-  still need this server's values. It takes no hostname (BoringTun uses its own
-  generated ones), and the installer and panel refuse one.
-- Probes: the listen port may answer DNS, QUIC and STUN probes as those
-  imitations do; SIP gets no reply.
-- **Header protection is not relaxed.** Under AWG 3.0/3.1 a learned `dns` or
-  `stun` has the nonce trade-offs below, and a learned `sip` is not activated
-  while any of S1–S4 is 31 bytes or more: that peer stays unresolved with random
-  padding. Nothing is disabled and the S/H framing is never changed
-  automatically, so `auto`, unlike `sip`, is accepted at any S size.
-- It needs a BoringTun release that has it: the one this installer pins
-  (`boringtun-cli-0.7.1-ga92909c49920-b101`) or the earlier
-  `boringtun-cli-0.7.1-ge94c04f3f4fd-b1` and
-  `boringtun-cli-0.7.1-gb94943906b11-b1`. Releases predating those report
-  the same version but refuse `auto`; the installer asks the installed binary,
-  and refuses `auto` before changing anything, pointing to
-  `--upgrade-boringtun`. `--backend-status` reports this as
-  `imitation_auto_support`.
 
-A change is one transaction under the same lock as client changes. The new
-settings are validated on a temporary BoringTun instance. The running service
-is then restarted and checked: the verified daemon, its TUN link, its UAPI, the
-same listen port, and the new imitation on its command line. If anything
-fails, the previous files are restored exactly and the service is restarted
-with the previous imitation. A stopped or failed service is only updated, not
-started. Imitation is a server setting: **client configs do not change**, and it
-is kept when you switch between AWG 2.0, 3.0 and 3.1.
+## Contributing
 
-What to expect:
-
-- **Server side only.** Standard AmneziaWG clients keep sending plain
-  AmneziaWG. Only the server's packets are shaped, unless the client imitates
-  too (for example WireSock Secure Connect).
-- **Probe replies.** DNS queries get `SERVFAIL`. STUN Binding Requests get a
-  Binding Success about 2.6× their size, so the reply can be reflected at a
-  spoofed source. QUIC Initials of 1200 bytes or more get Version Negotiation,
-  but only when they offer a version real servers don't (QUIC v1 and v2 get no
-  reply). SIP gets no reply. All replies share a 16 KiB/s budget, and loopback,
-  link-local, multicast and broadcast sources are never answered.
-- **The port stays the same.** The installer never moves it, because a new port
-  needs new client configs. Imitation looks most plausible on the protocol's
-  usual port.
-- **AWG 3.0 / 3.1.** Header protection takes its nonce from the first 12 bytes
-  of each S prefix, and imitation shapes those bytes:
-  - `dns` leaves 16 random bits, so header masks repeat within a few hundred
-    datagrams.
-  - `stun` leaves 32 random bits.
-  - `quic` keeps a random nonce.
-
-  Payload encryption is unaffected. BoringTun refuses `sip` with header
-  protection while any of S1–S4 is 31 bytes or more, and so does the installer,
-  both when you choose `sip` and when you enable AWG 3.x under `sip`. Enabling an
-  imitation under AWG 3.x from the menu asks for confirmation.
-- **S sizes.** A short S prefix is only partly shaped. The thresholds are:
-  - `dns`: 32 bytes, or the hostname's length + 33 for a query that names it;
-  - `stun`: 20 bytes;
-  - `sip`: 31 bytes;
-  - `quic`: 1 byte.
-
-  The installer warns about shorter prefixes but never changes S sizes.
-
----
-
-## 📦 Requirements
-
-Supported Linux distributions:
-
-- Debian ≥ 11
-- Ubuntu ≥ 22.04 (CI-tested on 22.04, 24.04, and 26.04)
-
-### Ubuntu 26.04 PPA compatibility
-
-When the Amnezia PPA does not publish a `resolute` suite, the Ubuntu 26.04
-(Resolute) installer uses the PPA's signed Ubuntu 24.04 (`noble`) suite as a
-temporary, narrowly scoped fallback:
-
-- The native `resolute` suite is checked first on every install or management
-  run. Once it is published, the installer automatically stops using the
-  fallback.
-- Network failures and unexpected HTTP responses do **not** trigger the
-  fallback. Both native PPA metadata endpoints must explicitly report that the
-  suite is absent.
-- Normal APT signature verification remains enabled. The installer does not
-  add `trusted=yes` or allow insecure repositories.
-- The fallback is allowed on `amd64`, `arm64`, `armhf`, `ppc64el`, `riscv64`,
-  and `s390x`, where the required package indexes are published. It is rejected
-  on `i386`, which lacks `amneziawg-tools`.
-- Runtime module loading is continuously tested on the GitHub-hosted Ubuntu
-  26.04 `amd64` image. Other listed architectures have package-index coverage
-  but are not runtime-tested by this repository's CI.
-
-Uninstalling AmneziaWG removes only source entries that exactly match the
-Amnezia PPA, including a fallback entry left by an interrupted older install.
-Unrelated APT sources in the same file are preserved.
-
-Ubuntu kernels such as `7.0.0-1017-azure` backport UDP tunnel API changes that
-the upstream AmneziaWG module's version checks do not recognize. During Debian
-and Ubuntu kernel-backend installation or module repair, the installer replaces
-the two known compatibility macros in the installed DKMS source with checks of
-the actual function signatures. This supports both older and backported APIs.
-If package configuration failed before the fix was applied, the same package
-transaction is retried once. Rerunning an interrupted install patches existing
-source before prerequisite package operations. The patched source also supports
-later kernel rebuilds; replacing the DKMS package can replace that source.
-Unrecognized or newer upstream macros are left unchanged. CI builds against both
-the running kernel and the latest Azure headers.
-
-Temporarily disabled:
-
-- Fedora (RPM-based)
-- AlmaLinux (RPM-based)
-- Rocky Linux (RPM-based)
-
-Reason: verified AmneziaWG 2.0 packages are not currently available for these RPM-based distributions. Please watch this repository's releases and README for support status updates.
-
-Source builds require approximately 2 GiB of free space for `amneziawg-web`
-and 1 GiB for `amneziawg-proxy`. Their install and upgrade scripts inspect the
-Cargo target filesystem, free inodes, CPU count, and available memory before
-building. On constrained hosts they use one Cargo job and, when the source
-filesystem is too small, place build artifacts on a suitable disk-backed
-filesystem automatically.
-
-To select a specific build filesystem, create a writable directory on an
-executable mount and pass it explicitly:
-
-```bash
-sudo env AMNEZIAWG_BUILD_ROOT=/path/with/free-space ./amneziawg-web.sh upgrade
-sudo env AMNEZIAWG_BUILD_ROOT=/path/with/free-space ./amneziawg-proxy.sh upgrade
-```
-
-An explicit `CARGO_TARGET_DIR` is also supported, but is treated as strict: the
-operation fails with a diagnostic if that target does not meet the build
-requirements.
-
----
-
-<details>
-<summary>⚙️ AmneziaWG 2.0 Parameters</summary>
-
-### Obfuscation Parameters
-
-AmneziaWG 2.0 adds S3/S4 and H1–H4 range parameters for enhanced traffic obfuscation. The installer generates all values automatically.
-
-| Parameter | Range | Constraint |
-|-----------|-------|------------|
-| Jc | 1–128 | — |
-| Jmin | 1–1280 | Jmin ≤ Jmax |
-| Jmax | 1–1280 | Jmin ≤ Jmax |
-| S1 | 15–150 | S1 + 56 ≠ S2 and S2 + 56 ≠ S1 |
-| S2 | 15–150 | S1 + 56 ≠ S2 and S2 + 56 ≠ S1 |
-| S3 | 15–150 | S3 + 56 ≠ S4 and S4 + 56 ≠ S3 |
-| S4 | 15–150 (15–140 behind an IPv6 endpoint or a hostname) | S3 + 56 ≠ S4 and S4 + 56 ≠ S3 |
-| H1–H4 | 5–2147483647 | Ranges must not overlap |
-
-H parameters accept a range (`min-max`) or a single value.
-
-These are the ranges the installer generates and accepts at install time.
-When it loads an existing installation it also keeps two kinds of values set
-by hand in `params` (keep `awg0.conf` matching, then regenerate the clients):
-
-- `S3` and `S4` from 0 upwards (still at most 150, with the same `+ 56`
-  rules). The protocol allows padding below 15, and a small `S4` saves MTU.
-- The standard WireGuard headers `H1=1`, `H2=2`, `H3=3`, `H4=4`, exactly in
-  that order. These turn off header obfuscation, so the installer never
-  generates them and prints a warning on every run. Any other value below 5
-  is rejected.
-
-Hand-set values outside these rules are reported by name before the
-installer offers to replace them; answer `N` to keep the files unchanged.
-
-`S4` is prepended to every transport packet. Fresh installs generate15–128,
-and manual selection allows at most140. A smaller known uplink or explicit
-generic client MTU further limits the range. The server and generic client
-default to `min(1500, uplink MTU) - 80 - S4`, without rounding below1280.
-Linux automatic MTU leaves room for S4 up to 20 behind an IPv4 endpoint and zero
-behind an IPv6 endpoint or hostname under the nominal 1500-byte budget;
-omission remains allowed with a warning because padding-aware clients use
-different calculations. S3 and S4 input is interpreted as decimal, including
-values with leading zeros; `S4=0120` therefore means 120 bytes and recommends
-an MTU of 1300 on a 1500-byte path. See
-[Non-Interactive Install](#-non-interactive-install).
-
-</details>
-
-<details>
-<summary>🔁 Migration from Pre-2.0</summary>
-
-Run the installer on an existing pre-2.0 installation. It detects the need for migration and prompts before proceeding.
-
-**Important:** All existing client configs become incompatible after migration. Regenerate them using option 1 (Add a new user) in the management menu.
-
-Migration steps:
-1. Creates `.bak` backup files before making any changes.
-2. Generates new S3/S4 values with bidirectional constraint validation.
-3. Converts single H values to range format (or regenerates if overlapping).
-4. Updates server config and params file atomically.
-5. Renames outdated client configs with `.old` suffix.
-6. Reloads the running VPN service (if active).
-
-Backups are restored automatically if migration fails.
-
-</details>
-
-<details>
-<summary>🔒 Security Notes</summary>
-
-- **Shell injection prevention** — params file values are safely shell-quoted.
-- **Atomic writes** — config updates use a temp file + rename to prevent corruption on interruption.
-- **Filesystem boundary protection** — client config search uses `-xdev` to stay within the config filesystem.
-
-</details>
-
----
+See [CONTRIBUTING.md](CONTRIBUTING.md) (and
+[amneziawg-web/CONTRIBUTING.md](amneziawg-web/CONTRIBUTING.md) for the panel).
+Contributions are accepted under the same license.
 
 ## Credits
 
-The installer descends from
-[angristan/wireguard-install](https://github.com/angristan/wireguard-install),
-adapted for AmneziaWG in
-[RomikB/amneziawg-install](https://github.com/RomikB/amneziawg-install) and
-copied from there as
-[Varckin/amneziawg-install](https://github.com/Varckin/amneziawg-install), whose
-history this repository continues. See [NOTICE.md](NOTICE.md) for details.
-
-## Disclaimer
-
-This is an independent, community-maintained project. It is **not affiliated
-with, endorsed by, sponsored by, or otherwise associated with** Amnezia
-([amnezia.org](https://amnezia.org/)), the Amnezia VPN application, or the
-Amnezia Free VPN service. The project merely builds on the open-source
-**AmneziaWG** protocol and tooling. "Amnezia", "AmneziaWG", and any related
-names, logos, and trademarks are the property of their respective owners and are
-used here only for identification.
-
-Likewise, this installer is provided as-is with no warranty (see License); you
-are responsible for how you deploy and use it.
+Derived from [angristan/wireguard-install](https://github.com/angristan/wireguard-install)
+through [RomikB/amneziawg-install](https://github.com/RomikB/amneziawg-install)
+and [Varckin/amneziawg-install](https://github.com/Varckin/amneziawg-install), whose history this repository continues. See [NOTICE.md](NOTICE.md) for the full lineage.
 
 ## License
 
-The code and documentation in this repository are licensed under the
-[MIT License](LICENSE), which permits use, modification and redistribution,
-including in commercial and proprietary products, provided the copyright and
-permission notices are kept. It comes without warranty.
-
-- **Original authors keep their rights.** The installer is derived from the
-  projects listed under [Credits](#credits); the notices of angristan, Roman
-  Zakharchuk and Markus Varckin are kept in [`LICENSE`](LICENSE) and in the
-  script itself, next to that of Vadim Smirnov, who develops the project under
-  the trade name WireSock. Every contributor keeps the copyright in their
-  contribution.
-- **Third-party software keeps its own license.** BoringTun (BSD-3-Clause), the
-  Rust crates the components use, and AmneziaWG's kernel module and tools
-  (GPL-2.0, installed by the system package manager and not distributed here)
-  are not relicensed by this project. The BoringTun release archives include
-  BoringTun's license and those of the crates linked into it (known gaps are
-  listed in [`docs/LICENSING.md`](docs/LICENSING.md#known-gaps)).
-- **Where to look.** [`NOTICE.md`](NOTICE.md) explains the origin and every
-  notice; [`docs/LICENSING.md`](docs/LICENSING.md) covers reuse,
-  redistribution and attribution; per-file SPDX metadata follows
-  [REUSE](https://reuse.software) and is checked in CI.
-- **Redistributing.** Keep `LICENSE` and the notices in the files you copy, and
-  meet the license terms of any third-party component you also ship.
-
-Contributions are accepted under the same license; see
-[`CONTRIBUTING.md`](CONTRIBUTING.md).
+[MIT](LICENSE). Original authors keep their notices (angristan, Roman
+Zakharchuk, Markus Varckin, Vadim Smirnov d/b/a WireSock). Third-party software
+(BoringTun — BSD-3-Clause; Rust crates; AmneziaWG kernel module and tools —
+GPL-2.0, not distributed here) keeps its own license. Per-file SPDX metadata
+follows [REUSE](https://reuse.software) and is checked in CI. See
+[docs/LICENSING.md](docs/LICENSING.md).

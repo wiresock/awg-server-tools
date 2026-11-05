@@ -1,0 +1,18 @@
+[book]
+title = "WireSock AWG Server Tools"
+authors = ["WireSock"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/wiresock/awg-server-tools"
+edit-url-template = "https://github.com/wiresock/awg-server-tools/edit/main/docs/{path}"
+site-url = "/awg-server-tools/"
+no-section-label = true
+
+[output.html.search]
+enable = true
