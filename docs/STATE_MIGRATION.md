@@ -173,9 +173,9 @@ restoring a usable panel.
    Normal `systemctl` management and panel/operator configuration changes are
    supported after finalization. Subsequent archive import/activation calls
    are no-ops **only when the trusted local params/server config still exist
-   and match the interface and server keys in the manifest-verified archived
-   params**. Missing files after uninstall, malformed params or a different
-   identity fail explicitly, without replaying policy or restoring anything.
+   and match the interface and server private key in the manifest-verified
+   archived params**. Missing files after uninstall, malformed literal params or
+   a different identity fail explicitly, without replaying policy or restoring anything.
    An intact finalized installation may be active/enabled and have ordinary
    port/address/peer edits; old receipts/policy are not replayed.
    Ongoing expiry enforcement remains the panel/operator's responsibility.
@@ -226,9 +226,16 @@ it does not stop the VPN or remove the installed configuration.
 Uninstall **retains** migration journals and finalized tombstones and prints a
 reminder. Automatically deleting them would silently reopen old policy replay
 and erase recovery/forensic data. A tombstone alone is not evidence of a live
-installation: a later import/activation checks local params, interface name,
-server public/private identity and the server config's `[Interface]` private key.
-Missing/unsafe files or different identity return non-zero with a recovery hint.
+installation: a later import/activation checks the interface name and private
+key in local params against the manifest-verified archived params, and requires
+the server config's `[Interface]` private key to match too. These private keys
+and the interface are authoritative; equal private keys identify the same server
+without needing a locally installed backend to derive a public key. A stale,
+missing or malformed literal cached `SERVER_PUB_KEY` only produces a warning
+**after all authoritative checks pass**; it is neither trusted nor repaired.
+Unsafe literal syntax still fails, and normal archive/export params validation
+remains strict. Missing/unsafe files or a different private key/interface return
+non-zero with a recovery hint.
 The guard does not compare mutable peer lists, ports or old receipt hashes, so
 ordinary post-finalization management still works without stale policy replay.
 
@@ -248,6 +255,11 @@ Reset is distinct from purge: it **removes that archive's finalized tombstone
 and journal**, deliberately permitting a fresh import. It requires explicit
 `--confirm-policy-replay`, a valid finalized journal/digest, no local params or
 server `.conf` files, and a queryable inactive/failed, non-enabled VPN unit.
+Reset takes the same exclusive client lifecycle lock as import/purge before
+checking journal/installation state and holds it through deletion; a competing
+lifecycle operation fails without changing the journal. Any blocking root
+`.conf` files (including symlinks) are listed by shell-escaped filename, not
+contents, so whitespace/control characters cannot disguise the diagnostic.
 Unknown service state, remaining installation files, unsafe paths or unexpected
 journal entries fail closed. It never uninstalls/stops a service or overwrites a
 live installation; normal fresh-import preflight still applies afterward.
@@ -298,8 +310,11 @@ a simulated enabled-unit reboot (not a real host reboot), post-finalization
 operator edits/purge, real-clock expiry crossing without mocking the comparison,
 RAM staging, streaming export, and producer/consumer failure cleanup. Finalized
 identity tests cover missing params/config after simulated uninstall, different
-public/private keys or interface, normal mutable edits, reset safety and a fresh
-quarantined import after explicit reset.
+private keys or interface, cached-public-key warning-only handling after valid
+private-key checks, normal mutable edits, reset safety and a fresh quarantined
+import after explicit reset. Real `flock` contention tests verify reset holds the
+lifecycle lock through preconditions/deletion and releases it on failure; reset
+diagnostics cover multiple filenames, spaces, control characters and symlinks.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.
 CI installs age and runs this suite.

@@ -580,6 +580,91 @@ if awgStatePurgeJournal "$DIGEST"; then exit 13; fi
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
         self.assertNotIn(b'secret', result.stdout.replace(b'non-secret', b''))
 
+    def test_reset_real_lifecycle_lock_contention_preconditions_deletion_and_release(self):
+        # Use the production directory-inode flock, not an acquisition mock.
+        # Only host paths/discovery are redirected to this isolated fixture.
+        shell = r'''
+set -euo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/target"
+AWG_STATE_JOURNAL_DIR="$ROOT/journals"
+DIGEST="$(printf 'c%.0s' {1..64})"
+JOURNAL="$AWG_STATE_JOURNAL_DIR/$DIGEST"
+mkdir -p "$JOURNAL/recovery"
+printf 'awg0\n' >"$JOURNAL/finalized"
+printf sensitive >"$JOURNAL/recovery/snapshot"
+isRoot() { return 0; }
+isWebPanelInstalled() { return 1; }
+resolveClientLifecycleLockDir() { printf '%s\n' "$ROOT/lifecycle"; }
+assert_locked() {
+    if flock -xn "$ROOT/lifecycle" -c true; then echo 'ERROR: lifecycle lock not held' >&2; return 97; fi
+}
+awgStateTrustedPath() { assert_locked; }
+systemctl() {
+    assert_locked
+    case "$2" in
+        --property=ActiveState) printf 'inactive\n' ;;
+        --property=UnitFileState) printf 'disabled\n' ;;
+        *) return 96 ;;
+    esac
+}
+rm() { assert_locked; printf 'rm\n' >>"$ROOT/deletions"; command rm "$@"; }
+rmdir() { assert_locked; printf 'rmdir\n' >>"$ROOT/deletions"; command rmdir "$@"; }
+acquireClientLifecycleLock
+if awgStatePurgeJournal "$DIGEST" --reset-finalized; then exit 10; fi
+[[ -f "$JOURNAL/finalized" && -f "$JOURNAL/recovery/snapshot" && ! -e "$ROOT/deletions" ]]
+assert_locked # The failed contender must not release the original holder.
+releaseClientLifecycleLock
+awgStatePurgeJournal "$DIGEST" --reset-finalized
+[[ ! -e "$JOURNAL" ]]
+[[ "$(command -p cat "$ROOT/deletions")" == *rmdir* ]]
+flock -xn "$ROOT/lifecycle" -c true # Released after successful deletion.
+mkdir -p "$JOURNAL" "$AMNEZIAWG_DIR"
+printf 'awg0\n' >"$JOURNAL/finalized"
+printf retained >"$AMNEZIAWG_DIR/params"
+if awgStatePurgeJournal "$DIGEST" --reset-finalized; then exit 11; fi
+[[ -f "$JOURNAL/finalized" ]]
+flock -xn "$ROOT/lifecycle" -c true # Released after a precondition failure too.
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'another client or protocol management operation', result.stderr)
+        self.assertNotIn(b'lifecycle lock not held', result.stderr)
+
+    def test_reset_reports_all_blocking_config_paths_without_printing_contents(self):
+        target = self.root / 'target'
+        target.mkdir()
+        for name in ('awg0.conf', 'old note.conf', 'bad\nname.conf', 'escape\x1b[31m.conf'):
+            (target / name).write_text(KEY)
+        (target / 'dangling.conf').symlink_to(self.root / 'absent')
+        shell = r'''
+set -euo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/target"
+AWG_STATE_JOURNAL_DIR="$ROOT/journals"
+DIGEST="$(printf 'd%.0s' {1..64})"
+JOURNAL="$AWG_STATE_JOURNAL_DIR/$DIGEST"
+mkdir -p "$JOURNAL"
+printf 'awg0\n' >"$JOURNAL/finalized"
+isRoot() { return 0; }
+awgStateTrustedPath() { return 0; }
+acquireClientLifecycleLock() { return 0; }
+releaseClientLifecycleLock() { return 0; }
+systemctl() { echo 'unexpected service query' >&2; return 99; }
+if awgStatePurgeJournal "$DIGEST" --reset-finalized; then exit 10; fi
+[[ -f "$JOURNAL/finalized" && -f "$AMNEZIAWG_DIR/awg0.conf" ]]
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        for name in (b'awg0.conf', b'old\\ note.conf', b'bad\\nname.conf', b'dangling.conf'):
+            self.assertIn(name, result.stderr)
+        self.assertNotIn(b'bad\nname.conf', result.stderr)
+        self.assertNotIn(b'\x1b', result.stderr)
+        self.assertNotIn(KEY.encode(), result.stdout + result.stderr)
+        self.assertNotIn(b'unexpected service query', result.stderr)
+
     def test_staging_prefers_private_ram_backed_directory_with_safe_fallback(self):
         shell = r'''
 set -euo pipefail
@@ -839,6 +924,16 @@ if [[ "$OPTION" == --enable-at-boot ]]; then
     awgStateCommand --import-state "$ROOT/state.tar.gz" || exit 16
     awgStateCommand --activate-state "$ROOT/state.tar.gz" --enable-at-boot || exit 17
     cmp "$SERVER_AWG_CONF" "$ROOT/finalized.conf" || exit 18
+    cp "$AMNEZIAWG_DIR/params" "$ROOT/original-public-cache"
+    python3 - "$AMNEZIAWG_DIR/params" <<'STALE_PUBLIC_CACHE'
+from pathlib import Path
+import base64, re, sys
+path = Path(sys.argv[1])
+path.write_text(re.sub(r"(?m)^SERVER_PUB_KEY=.*$", "SERVER_PUB_KEY='" + base64.b64encode(b'Z' * 32).decode() + "'", path.read_text()))
+STALE_PUBLIC_CACHE
+    awgStateCommand --import-state "$ROOT/state.tar.gz" || exit 39
+    cmp "$SERVER_AWG_CONF" "$ROOT/finalized.conf" || exit 40
+    cp "$ROOT/original-public-cache" "$AMNEZIAWG_DIR/params"
     cp "$JOURNAL/steps" "$ROOT/finalized-steps"
     awgStatePurgeJournal "${JOURNAL##*/}" || exit 19
     [[ ! -e "$JOURNAL/receipt" && -f "$JOURNAL/finalized" ]] || exit 20
@@ -854,7 +949,7 @@ from pathlib import Path
 import base64, re, sys
 path = Path(sys.argv[1])
 text = path.read_text()
-path.write_text(re.sub(r"(?m)^SERVER_PUB_KEY=.*$", "SERVER_PUB_KEY='" + base64.b64encode(b'Z' * 32).decode() + "'", text))
+path.write_text(re.sub(r"(?m)^SERVER_PRIV_KEY=.*$", "SERVER_PRIV_KEY='" + base64.b64encode(b'Z' * 32).decode() + "'", text))
 OTHER_IDENTITY
         if awgStateCommand --import-state "$ROOT/state.tar.gz"; then exit 37; fi
         cp "$ROOT/saved-params" "$AMNEZIAWG_DIR/params"
@@ -962,6 +1057,7 @@ fi
                     self.assertIn('finalized', (root / 'finalized-steps').read_text())
                     self.assertIn(b'already finalized; archived policy is not replayed', result.stdout)
                     self.assertIn(b'--purge-state-journal', result.stdout)
+                    self.assertIn(b'WARNING: cached SERVER_PUB_KEY', result.stderr)
                     self.assertEqual((root / 'events').read_text(), 'validate\nsysctl\nstart\nenable\nstop\nstart\n')
                 elif mode == '--activate-state':
                     self.assertEqual((root / 'at-start.conf').read_text(), clean)
@@ -986,8 +1082,33 @@ fi
             b'PrivateKey = ' + KEY.encode(), b'PrivateKey = ' + KEY.encode() + b' # same identity'))
         self.run_helper('local-identity', expected, local, conf)
         other = base64.b64encode(b'Z' * 32).decode().encode()
-        for field, old, new in ((b'SERVER_PUB_KEY', PUB.encode(), other),
-                                 (b'SERVER_PRIV_KEY', KEY.encode(), other),
+        valid_conf = conf.read_bytes()
+        for cached in (other, b'stale-cache', None):
+            data = self.files['vpn/params']
+            if cached is None:
+                data = b'\n'.join(line for line in data.split(b'\n') if not line.startswith(b'SERVER_PUB_KEY='))
+            else:
+                data = data.replace(b"SERVER_PUB_KEY='" + PUB.encode() + b"'", b"SERVER_PUB_KEY='" + cached + b"'")
+            local.write_bytes(data)
+            result = self.run_helper('local-identity', expected, local, conf)
+            self.assertIn(b'WARNING: cached SERVER_PUB_KEY', result.stderr)
+            self.assertNotIn(other, result.stderr)
+            self.assertNotIn(KEY.encode(), result.stderr)
+            if cached is None or cached == b'stale-cache':
+                self.run_helper('params', local, ok=False)  # Import/export parsing remains strict.
+            # Non-authoritative metadata never masks either private-key mismatch.
+            local.write_bytes(data.replace(b"SERVER_PRIV_KEY='" + KEY.encode() + b"'",
+                                          b"SERVER_PRIV_KEY='" + other + b"'"))
+            result = self.run_helper('local-identity', expected, local, conf, ok=False)
+            self.assertIn(b'different server identity', result.stderr)
+            self.assertNotIn(b'WARNING: cached SERVER_PUB_KEY', result.stderr)
+            local.write_bytes(data)
+            conf.write_bytes(valid_conf.replace(KEY.encode(), other))
+            result = self.run_helper('local-identity', expected, local, conf, ok=False)
+            self.assertIn(b'different server identity', result.stderr)
+            self.assertNotIn(b'WARNING: cached SERVER_PUB_KEY', result.stderr)
+            conf.write_bytes(valid_conf)
+        for field, old, new in ((b'SERVER_PRIV_KEY', KEY.encode(), other),
                                  (b'SERVER_AWG_NIC', b'awg0', b'awg1')):
             with self.subTest(field=field):
                 local.write_bytes(self.files['vpn/params'].replace(field + b"='" + old + b"'", field + b"='" + new + b"'"))

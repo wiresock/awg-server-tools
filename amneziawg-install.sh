@@ -3381,7 +3381,7 @@ def key(value):
         return False
 
 
-def params(data):
+def params(data, validate_public_key=True):
     result = {}
     for line in data.decode('utf-8').splitlines():
         if not line or line.startswith('#'):
@@ -3406,7 +3406,7 @@ def params(data):
     for name in ('SERVER_AWG_NIC', 'SERVER_PUB_NIC'):
         require(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}', result.get(name, '')),
                 'invalid interface name')
-    for name in ('SERVER_PRIV_KEY', 'SERVER_PUB_KEY'):
+    for name in (('SERVER_PRIV_KEY', 'SERVER_PUB_KEY') if validate_public_key else ('SERVER_PRIV_KEY',)):
         require(key(result.get(name)), 'invalid server key')
     for name, version in (('SERVER_AWG_IPV4', 4), ('SERVER_AWG_IPV6', 6)):
         require(ipaddress.ip_address(result[name]).version == version, 'invalid server address')
@@ -3722,8 +3722,10 @@ def local_identity_matches(expected_path, params_path, config_path):
     # only: normal post-finalization port/address/peer/hook edits remain allowed.
     try:
         expected = params(Path(expected_path).read_bytes())
-        local = params(Path(params_path).read_bytes())
-        for name in ('SERVER_AWG_NIC', 'SERVER_PUB_KEY', 'SERVER_PRIV_KEY'):
+        # Cached public metadata is not identity. Both installed private keys
+        # must still match the manifest-verified archive; no backend dependency.
+        local = params(Path(params_path).read_bytes(), validate_public_key=False)
+        for name in ('SERVER_AWG_NIC', 'SERVER_PRIV_KEY'):
             require(local[name] == expected[name], 'identity mismatch')
         text = Path(config_path).read_text(encoding='utf-8')
         require('\x00' not in text and '\r' not in text, 'invalid config encoding')
@@ -3740,6 +3742,8 @@ def local_identity_matches(expected_path, params_path, config_path):
                 if sep and name.strip() == 'PrivateKey':
                     keys.append(value.strip())
         require(interfaces == 1 and keys == [expected['SERVER_PRIV_KEY']], 'config identity mismatch')
+        if local.get('SERVER_PUB_KEY') != expected['SERVER_PUB_KEY']:
+            print('WARNING: cached SERVER_PUB_KEY differs or is missing; ignoring public-key metadata only because interface and both private keys match the archive.', file=sys.stderr)
     except (ValueError, OSError, UnicodeError, KeyError, TypeError):
         raise StatePolicyError('finalized local params/server config are invalid or belong to a different server identity; refusing stale archive replay') from None
 
@@ -4175,12 +4179,15 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 	set +x
 	umask 077
 	local DIGEST="$1" OPTION="${2:-}" JOURNAL ENTRY FINALIZED=0 INTERFACE ACTIVE UNIT_STATE
+	local -a BLOCKING_CONFIGS=()
 	isRoot || exit 1
 	[[ "${DIGEST}" =~ ^[0-9a-f]{64}$ ]] || exit 1
-	JOURNAL="${AWG_STATE_JOURNAL_DIR}/${DIGEST}"
-	awgStateTrustedPath "${JOURNAL}" && [[ -d "${JOURNAL}" && ! -L "${JOURNAL}" ]] || exit 1
+	# Purge and reset share the same lock as import. Acquire before examining
+	# journal/installation/service preconditions and retain it through deletion.
 	acquireClientLifecycleLock || exit 1
 	trap releaseClientLifecycleLock EXIT
+	JOURNAL="${AWG_STATE_JOURNAL_DIR}/${DIGEST}"
+	awgStateTrustedPath "${JOURNAL}" && [[ -d "${JOURNAL}" && ! -L "${JOURNAL}" ]] || exit 1
 	if [[ -f "${JOURNAL}/finalized" && ! -L "${JOURNAL}/finalized" ]] &&
 		awgStateTrustedPath "${JOURNAL}/finalized" && [[ -s "${JOURNAL}/finalized" ]]; then
 		FINALIZED=1
@@ -4196,11 +4203,15 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 			exit 1
 		fi
 		for ENTRY in "${AMNEZIAWG_DIR}/"*.conf; do
-			if [[ -e "${ENTRY}" || -L "${ENTRY}" ]]; then
-				echo 'ERROR: local server configuration remains; reset never removes or overwrites an installation.' >&2
-				exit 1
-			fi
+			[[ ! -e "${ENTRY}" && ! -L "${ENTRY}" ]] || BLOCKING_CONFIGS+=("${ENTRY}")
 		done
+		if (( ${#BLOCKING_CONFIGS[@]} )); then
+			echo 'ERROR: local server configuration remains; reset never removes or overwrites an installation. Blocking file(s):' >&2
+			# Escape whitespace/control characters; filenames are data, not logs
+			# that may inject terminal escapes. Never print configuration contents.
+			printf '  %q\n' "${BLOCKING_CONFIGS[@]}" >&2
+			exit 1
+		fi
 		# Unknown service state is NOT proof that an old interface is stopped.
 		if ! ACTIVE="$(systemctl show --property=ActiveState --value "awg-quick@${INTERFACE}.service")" ||
 			! UNIT_STATE="$(systemctl show --property=UnitFileState --value "awg-quick@${INTERFACE}.service")"; then
