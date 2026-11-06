@@ -3338,6 +3338,676 @@ EOF
 AWG_PARAMS_KEYS="SERVER_PUB_IP SERVER_PUB_NIC SERVER_AWG_NIC SERVER_AWG_IPV4 SERVER_AWG_IPV6 SERVER_PORT SERVER_PRIV_KEY SERVER_PUB_KEY CLIENT_DNS_1 CLIENT_DNS_2 CLIENT_MTU ALLOWED_IPS ENABLE_IPV6 SERVER_AWG_JC SERVER_AWG_JMIN SERVER_AWG_JMAX SERVER_AWG_S1 SERVER_AWG_S2 SERVER_AWG_S3 SERVER_AWG_S4 SERVER_AWG_H1 SERVER_AWG_H2 SERVER_AWG_H3 SERVER_AWG_H4 AWG_BACKEND AWG_PROTOCOL_VERSION AWG_HEADER_PROTECTION_KEY AWG_CONTENT_PADDING_ADDITION AWG_REKEY_AFTER_TIME AWG_REKEY_TIMEOUT AWG_REJECT_AFTER_TIME AWG_KEEPALIVE_TIMEOUT AWG_RANDOM_TRAILERS AWG_DISABLE_COOKIES"
 AWG_PARAMS_BORINGTUN_KEYS="AWG_BORINGTUN_IMITATE_PROTOCOL AWG_BORINGTUN_IMITATE_DOMAIN"
 
+# State migration is an internal install mode, NEVER inherited from the environment.
+_AWG_STATE_IMPORT_DIR=""
+AWG_STATE_JOURNAL_DIR="/var/lib/amneziawg-install/state-imports"
+AWG_STATE_PROXY_CONFIG="/etc/amneziawg-proxy/proxy.toml"
+
+# Foreign archives are data, including params and awg-quick shell hooks. Keep the
+# verifier embedded so curl/download users do not need a second helper file.
+function awgStateArchive() {
+	python3 - "${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}" "$@" <<'AWG_STATE_PY'
+# Standard-library only. This code is embedded so a downloaded installer stays standalone.
+import base64
+import hashlib
+import io
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import sys
+import tarfile
+import zlib
+
+MAX_FILE = 256 * 1024 * 1024
+MAX_TOTAL = 512 * 1024 * 1024
+KEYS = set(sys.argv[1].split())
+
+
+def require(ok, message):
+    if not ok:
+        raise ValueError(message)
+
+
+def key(value):
+    try:
+        return len(base64.b64decode(value, validate=True)) == 32
+    except (ValueError, TypeError):
+        return False
+
+
+def params(data):
+    result = {}
+    for line in data.decode('utf-8').splitlines():
+        if not line or line.startswith('#'):
+            continue
+        name, sep, value = line.partition('=')
+        require(sep and name in KEYS and name not in result, 'unknown/duplicate params key')
+        # Only simple literals are accepted, not the shell language. No eval/source/shlex.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        require(re.fullmatch(r'[A-Za-z0-9_./+:=,\[\] -]*', value) is not None,
+                'nonliteral params value')
+        require(len(value) <= 4096, 'oversized params value')
+        result[name] = value
+    result.setdefault('AWG_BACKEND', 'kernel')
+    result.setdefault('AWG_PROTOCOL_VERSION', '2')
+    result.setdefault('CLIENT_MTU', '')
+    result.setdefault('ENABLE_IPV6', '')
+    result.setdefault('AWG_BORINGTUN_IMITATE_PROTOCOL', 'none')
+    result.setdefault('AWG_BORINGTUN_IMITATE_DOMAIN', '')
+    require(result['AWG_BACKEND'] in ('kernel', 'boringtun'), 'unsupported backend')
+    require(result['AWG_PROTOCOL_VERSION'] in ('2', '3', '3.1'), 'unsupported protocol')
+    for name in ('SERVER_AWG_NIC', 'SERVER_PUB_NIC'):
+        require(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}', result.get(name, '')),
+                'invalid interface name')
+    for name in ('SERVER_PRIV_KEY', 'SERVER_PUB_KEY'):
+        require(key(result.get(name)), 'invalid server key')
+    for name, version in (('SERVER_AWG_IPV4', 4), ('SERVER_AWG_IPV6', 6)):
+        require(ipaddress.ip_address(result[name]).version == version, 'invalid server address')
+    require(re.fullmatch(r'[0-9]{1,5}', result['SERVER_PORT']) and
+            1 <= int(result['SERVER_PORT']) <= 65535, 'invalid port')
+    require(result['ENABLE_IPV6'] in ('', 'y', 'n'), 'invalid IPv6 flag')
+    for name, value in result.items():
+        if name.startswith('SERVER_AWG_') and name not in (
+                'SERVER_AWG_NIC', 'SERVER_AWG_IPV4', 'SERVER_AWG_IPV6'):
+            require(re.fullmatch(r'[0-9]{1,10}(?:-[0-9]{1,10})?', value),
+                    'invalid obfuscation value')
+        if name in ('CLIENT_MTU',) and value:
+            require(re.fullmatch(r'[0-9]{1,5}', value) and 576 <= int(value) <= 65535, 'invalid MTU')
+    require(result['AWG_BORINGTUN_IMITATE_PROTOCOL'] in
+            ('none', 'dns', 'quic', 'sip', 'stun', 'auto'), 'invalid imitation')
+    domain = result['AWG_BORINGTUN_IMITATE_DOMAIN']
+    require(not domain or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,252}', domain),
+            'invalid imitation domain')
+    return result
+
+
+INTERFACE = set('Address MTU ListenPort PrivateKey Jc Jmin Jmax S1 S2 S3 S4 H1 H2 H3 H4 I1 I2 I3 I4 I5 HeaderProtectionKey ContentPaddingAddition RekeyAfterTime RekeyTimeout RejectAfterTime KeepaliveTimeout RandomTrailers DisableCookies FwMark Table DNS SaveConfig'.split())
+PEER = set('PublicKey PresharedKey AllowedIPs Endpoint PersistentKeepalive'.split())
+HOOKS = set('PreUp PostUp PreDown PostDown'.split())
+
+
+def config(data, state=None, blocked=frozenset()):
+    text = data.decode('utf-8')
+    require('\x00' not in text and '\r' not in text, 'invalid config encoding')
+    # Carry leading peer-name comments with THAT peer when reconciling policy.
+    # Otherwise deleting peer A can leave A's marker attached to peer B.
+    groups, current = [], []
+    for line in text.splitlines(keepends=True):
+        if line.strip() in ('[Interface]', '[Peer]'):
+            leading = []
+            while current and (not current[-1].strip() or current[-1].lstrip().startswith('#')):
+                leading.insert(0, current.pop())
+            if current:
+                groups.append(''.join(current))
+            current = leading
+        current.append(line)
+    if current:
+        groups.append(''.join(current))
+    output, fields, sections, peer_keys = [], {}, [], set()
+    for group in groups:
+        values, kind, lines = {}, None, []
+        for line in group.splitlines(keepends=True):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                lines.append(line)
+                continue
+            if stripped in ('[Interface]', '[Peer]'):
+                require(kind is None, 'repeated config section')
+                kind = stripped[1:-1]
+                lines.append(line)
+                continue
+            name, sep, value = stripped.partition('=')
+            name, value = name.strip(), value.strip()
+            require(kind and sep, 'invalid config line')
+            if name in HOOKS:
+                require(kind == 'Interface' and state is not None, 'client/peer hooks unsupported')
+                continue  # NEVER execute commands supplied by an archive.
+            require(name in (INTERFACE if kind == 'Interface' else PEER), 'unknown config field')
+            require(name not in values, 'duplicate config field')
+            require(value and len(value) <= 8192 and not any(ord(c) < 32 for c in value),
+                    'invalid config field')
+            values[name] = value
+            if name in ('PrivateKey', 'PublicKey', 'PresharedKey', 'HeaderProtectionKey'):
+                require(key(value), 'invalid config key')
+            if name in ('Address', 'AllowedIPs'):
+                for address in value.split(','):
+                    ipaddress.ip_interface(address.strip())
+            if name == 'Table':
+                require(value in ('auto', 'off') or value.isdecimal(), 'invalid table')
+            if name in ('MTU', 'ListenPort', 'PersistentKeepalive'):
+                require(re.fullmatch(r'[0-9]{1,5}', value) and int(value) <= 65535, 'invalid config number')
+            if name == 'SaveConfig':
+                require(value.lower() == 'false', 'SaveConfig=true is not supported for migration')
+            lines.append(line)
+        if kind:
+            sections.append(kind)
+            if kind == 'Interface':
+                require(not fields, 'multiple interfaces')
+                fields = values
+            else:
+                require('PublicKey' in values and values['PublicKey'] not in peer_keys, 'missing/duplicate peer public key')
+                peer_keys.add(values['PublicKey'])
+                if values['PublicKey'] in blocked:
+                    continue
+        output.extend(lines)
+    require(sections and sections[0] == 'Interface' and sections.count('Interface') == 1,
+            'single interface required')
+    if state is not None:
+        require(fields.get('PrivateKey') == state['SERVER_PRIV_KEY'] and
+                fields.get('ListenPort') == state['SERVER_PORT'], 'params/config mismatch')
+        addresses = [ipaddress.ip_interface(v.strip()) for v in fields.get('Address', '').split(',')]
+        ipv4 = [v for v in addresses if v.version == 4]
+        ipv6 = [v for v in addresses if v.version == 6]
+        require(len(ipv4) == 1 and ipv4[0].ip == ipaddress.ip_address(state['SERVER_AWG_IPV4'])
+                and ipv4[0].network.prefixlen == 24, 'unsupported/mismatched IPv4 subnet')
+        require(len(ipv6) <= 1 and all(v.ip == ipaddress.ip_address(state['SERVER_AWG_IPV6'])
+                and v.network.prefixlen == 64 for v in ipv6), 'unsupported/mismatched IPv6 subnet')
+        for suffix in ('JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'):
+            field = {'JC': 'Jc', 'JMIN': 'Jmin', 'JMAX': 'Jmax'}.get(suffix, suffix)
+            require(fields.get(field) == state.get('SERVER_AWG_' + suffix), 'obfuscation mismatch')
+            protocol_fields = dict(HeaderProtectionKey='AWG_HEADER_PROTECTION_KEY',
+            ContentPaddingAddition='AWG_CONTENT_PADDING_ADDITION', RekeyAfterTime='AWG_REKEY_AFTER_TIME',
+            RekeyTimeout='AWG_REKEY_TIMEOUT', RejectAfterTime='AWG_REJECT_AFTER_TIME',
+            KeepaliveTimeout='AWG_KEEPALIVE_TIMEOUT', RandomTrailers='AWG_RANDOM_TRAILERS',
+            DisableCookies='AWG_DISABLE_COOKIES')
+        for field, name in protocol_fields.items():
+            expected = state.get(name, '')
+            require(fields.get(field, '') == expected, 'protocol fields mismatch')
+    return ''.join(output).encode()
+
+
+def member_name(name):
+    return (name in ('vpn/params', 'vpn/server.conf', 'web/database.sqlite', 'web/env.conf',
+                     'proxy/proxy.toml', 'manifest.json') or
+            re.fullmatch(r'clients/[A-Za-z0-9_][A-Za-z0-9_.-]{0,90}\.conf', name) is not None)
+
+
+def unique_json(pairs):
+    result = {}
+    for name, value in pairs:
+        require(name not in result, 'duplicate JSON key')
+        result[name] = value
+    return result
+
+
+def validate_manifest(manifest, files):
+    require(type(manifest.get('schema_version')) is int and manifest['schema_version'] == 1,
+            'unsupported schema')
+    require(type(manifest.get('files')) is dict and set(manifest['files']) == set(files),
+            'manifest file inventory mismatch')
+    require({'vpn/params', 'vpn/server.conf'} <= set(files), 'missing VPN state')
+    for name, data in files.items():
+        require(manifest['files'][name] == hashlib.sha256(data).hexdigest(), 'checksum mismatch')
+    state = params(files['vpn/params'])
+    require(manifest.get('backend') == state['AWG_BACKEND'] and
+            manifest.get('protocol') == state['AWG_PROTOCOL_VERSION'] and
+            manifest.get('interface') == state['SERVER_AWG_NIC'], 'manifest/params mismatch')
+    config(files['vpn/server.conf'], state)
+    for name in files:
+        if name.startswith('clients/'):
+            config(files[name])
+    return state
+
+
+def read_archive(path):
+    files, total = {}, 0
+    with tarfile.open(path, 'r:gz') as archive:
+        for index, member in enumerate(archive):
+            require(index < 20000 and member.isfile() and member_name(member.name) and
+                    member.name not in files and not member.pax_headers,
+                    'unsafe/duplicate tar member (paths, links and special files are forbidden)')
+            require(0 <= member.size <= MAX_FILE, 'oversized tar member')
+            total += member.size
+            require(total <= MAX_TOTAL, 'oversized archive')
+            files[member.name] = archive.extractfile(member).read()
+    require('manifest.json' in files, 'missing manifest')
+    manifest = json.loads(files.pop('manifest.json'), object_pairs_hook=unique_json)
+    require(type(manifest) is dict, 'invalid manifest')
+    state = validate_manifest(manifest, files)
+    return manifest, files, state
+
+
+def main():
+    mode, path, *args = sys.argv[2:]
+    if mode == 'params':
+        state = params(Path(path).read_bytes())
+        for name, value in state.items():
+            sys.stdout.buffer.write(name.encode() + b'\0' + value.encode() + b'\0')
+    elif mode == 'pack':
+        root = Path(path)
+        files = {}
+        for file in root.rglob('*'):
+            require(not file.is_symlink(), 'symlink in staging tree')
+            if file.is_file():
+                name = file.relative_to(root).as_posix()
+                require(member_name(name) and name != 'manifest.json', 'unknown staging file')
+                require(file.stat().st_size <= MAX_FILE, 'oversized staging file')
+                files[name] = file.read_bytes()
+                require(sum(map(len, files.values())) <= MAX_TOTAL, 'oversized staging tree')
+        state = params(files['vpn/params'])
+        manifest = dict(schema_version=1, backend=state['AWG_BACKEND'],
+                        protocol=state['AWG_PROTOCOL_VERSION'], interface=state['SERVER_AWG_NIC'],
+                        versions={'installer_format': 'state-v1', 'installer_sha256': args[2] if len(args) > 2 else 'unknown', 'awg_tools': args[1],
+                                  'panel': 'not-probed'},
+                        files={name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
+                        limitations=['Panel/mail/proxy files are recovery-only; not activated by import.',
+                                     'No TLS keys, binaries, systemd units, sessions or firewall dumps.'])
+        validate_manifest(manifest, files)
+        files['manifest.json'] = json.dumps(manifest, sort_keys=True, indent=2).encode()
+        with tarfile.open(args[0], 'w:gz', format=tarfile.USTAR_FORMAT) as archive:
+            for name, data in sorted(files.items()):
+                member = tarfile.TarInfo(name)
+                member.size, member.mode = len(data), 0o600
+                archive.addfile(member, io.BytesIO(data))
+    elif mode in ('verify', 'unpack', 'inspect'):
+        manifest, files, state = read_archive(path)
+        if mode == 'inspect':
+            print(json.dumps(manifest, sort_keys=True, indent=2))
+        if mode == 'unpack':
+            # All names/types/sizes/checksums are validated BEFORE the first write.
+            root = Path(args[0])
+            root.mkdir(mode=0o700)
+            for name, data in files.items():
+                dest = root / name
+                dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                with dest.open('xb') as handle:
+                    handle.write(data)
+                dest.chmod(0o600)
+            (root / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
+    elif mode == 'prepare':
+        root = Path(path)
+        state = params((root / 'vpn/params').read_bytes())
+        blocked = set()
+        db_path = root / 'web/database.sqlite'
+        if db_path.exists():
+            # Read-only DB; never restore a foreign queue or run panel migrations here.
+            with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+                db.execute('PRAGMA trusted_schema=OFF')
+                require(db.execute("SELECT type FROM sqlite_master WHERE name='peers'").fetchone() == ('table',),
+                        'peer policy must be a real table')
+                blocked = {row[0] for row in db.execute(
+                    "SELECT public_key FROM peers WHERE disabled != 0 OR archived != 0 "
+                    "OR (expires_at IS NOT NULL AND (julianday(expires_at) IS NULL "
+                    "OR julianday(expires_at) <= julianday('now')))")}
+        data = (root / 'vpn/server.conf').read_bytes()
+        # Hooks must remain in Interface, not be appended below the last Peer.
+        clean = config(data, state, blocked).decode()
+        match = re.search(r'(?m)^\s*\[Peer\]\s*$', clean)
+        position = match.start() if match else len(clean)
+        if match:
+            prefix = clean[:position].splitlines(keepends=True)
+            while prefix and (not prefix[-1].strip() or prefix[-1].lstrip().startswith('#')):
+                position -= len(prefix.pop())
+        (root / 'interface.conf').write_text(clean[:position].rstrip() + '\n')
+        (root / 'peers.conf').write_text('\n' + clean[position:])
+    else:
+        raise ValueError('unknown archive operation')
+
+
+try:
+    main()
+except (ValueError, KeyError, OSError, UnicodeError, tarfile.TarError, sqlite3.Error, EOFError, TypeError, OverflowError, zlib.error):
+    # Do not echo foreign config, SQL, passphrases or private values in diagnostics.
+    print('ERROR: invalid or unsupported state archive/data', file=sys.stderr)
+    sys.exit(1)
+AWG_STATE_PY
+}
+
+# Read allowlisted, validated literals as NUL-delimited data; no imported file is
+# sourced, including during installation. Re-serialize only our in-memory values.
+function awgStateReadParams() {
+	local FILE="$1" RECORDS="$2" NAME VALUE
+	awgStateArchive params "${FILE}" >"${RECORDS}" || return 1
+	for NAME in ${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}; do
+		unset "${NAME}"
+	done
+	while IFS= read -r -d '' NAME && IFS= read -r -d '' VALUE; do
+		printf -v "${NAME}" '%s' "${VALUE}"
+	done <"${RECORDS}"
+	validatePersistedAwgBackendState && validatePersistedAwgProtocolState && validateClientMtu
+}
+
+function awgStateDependencies() { # <allow-install: 0|1>
+	local TOOL MISSING=0
+	for TOOL in age python3 sqlite3; do
+		command -v "${TOOL}" >/dev/null 2>&1 || MISSING=1
+	done
+	((MISSING)) || return 0
+	if [[ "$1" != 1 ]]; then
+		echo 'ERROR: install age, python3 and sqlite3 first (read-only operations do not install packages).' >&2
+		return 1
+	fi
+	enable_apt_ipv4
+	apt-get update && apt-get install -y age python3 sqlite3
+	local STATUS=$?
+	disable_apt_ipv4
+	return "${STATUS}"
+}
+
+function awgStateWriteInstallState() {
+	local OLD_UMASK
+	OLD_UMASK="$(umask)"
+	umask 077
+	mkdir -p "${AMNEZIAWG_DIR}/clients" || return 1
+	chmod 700 "${AMNEZIAWG_DIR}" "${AMNEZIAWG_DIR}/clients" || return 1
+	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	serializeParams "${AMNEZIAWG_DIR}/params" || return 1
+	local DERIVED_KEY
+	DERIVED_KEY="$(printf '%s\n' "${SERVER_PRIV_KEY}" | awg pubkey)" || return 1
+	[[ "${DERIVED_KEY}" == "${SERVER_PUB_KEY}" ]] || {
+		echo 'ERROR: server public/private key mismatch.' >&2
+		return 1
+	}
+	# The original config is retained in the encrypted archive/recovery files.
+	# Only host hooks change; keys, peers, addresses, MTU and protocol fields do not.
+	cat "${_AWG_STATE_IMPORT_DIR}/interface.conf" >"${SERVER_AWG_CONF}" || return 1
+	writeFirewallRules >>"${SERVER_AWG_CONF}" || return 1
+	cat "${_AWG_STATE_IMPORT_DIR}/peers.conf" >>"${SERVER_AWG_CONF}" || return 1
+	local FILE
+	for FILE in "${_AWG_STATE_IMPORT_DIR}/clients/"*.conf; do
+		[[ -f "${FILE}" ]] || continue
+		install -m 600 -- "${FILE}" "${AMNEZIAWG_DIR}/clients/" || return 1
+	done
+	chmod 600 "${AMNEZIAWG_DIR}/params" "${SERVER_AWG_CONF}" || return 1
+	umask "${OLD_UMASK}"
+	mkdir -p "$(dirname "${AWG_SYSCTL_FILE}")" || return 1
+	printf 'net.ipv4.ip_forward = 1\n' >"${AWG_SYSCTL_FILE}" || return 1
+	if [[ "${ENABLE_IPV6}" == y ]]; then
+		printf 'net.ipv6.conf.all.forwarding = 1\n' >>"${AWG_SYSCTL_FILE}" || return 1
+	fi
+	chmod 644 "${AWG_SYSCTL_FILE}"
+	# Do not apply forwarding or firewall rules until the operator verifies/fences.
+}
+
+# Export expects the normal service locations. A custom DB/env is resolved from
+# the effective unit using existing read-only resolvers, not by sourcing env.conf.
+function awgStateSnapshotPanel() {
+	local STAGE="$1" DB ENV_FILE WORKDIR
+	isWebPanelInstalled || return 0
+	DB="$(readWebPanelSetting AWG_WEB_DB)" || return 1
+	[[ -n "${DB}" ]] || DB="$(readWebPanelExecStartSetting --db)" || return 1
+	[[ -n "${DB}" ]] || DB=awg-web.db
+	if [[ "${DB}" != /* ]]; then
+		WORKDIR="$(resolveWebPanelWorkingDirectory)" || return 1
+		DB="${WORKDIR}/${DB}"
+	fi
+	# URL/query DB formats need an explicit resolver; never guess and omit peers.
+	if [[ "${DB}" == *'?'* || "${DB}" == *'sqlite:'* || ! -f "${DB}" || -L "${DB}" ]]; then
+		echo 'ERROR: panel database path is unsupported/missing; export refused.' >&2
+		return 1
+	fi
+	command -v sqlite3 >/dev/null 2>&1 || {
+		echo 'ERROR: sqlite3 is required for the panel online backup.' >&2
+		return 1
+	}
+	mkdir -p "${STAGE}/web" || return 1
+	# Use .backup, never copy a live WAL-mode DB. Destination is a private mktemp path.
+	sqlite3 -readonly "${DB}" ".timeout 10000" ".backup '${STAGE}/web/database.sqlite'" || return 1
+	ENV_FILE="$(resolveWebPanelEnvFile)" || return 1
+	if [[ -n "${ENV_FILE}" && -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]]; then
+		install -m 600 -- "${ENV_FILE}" "${STAGE}/web/env.conf" || return 1
+	fi
+	echo 'NOTE: panel DB/env included for recovery only; automatic panel/mail restore is TODO.' >&2
+}
+
+function awgStateExport() { # <destination> <private work directory>
+	local DEST="$1" WORK="$2" FILE BASE VERSION
+	local -a CANDIDATES=()
+	[[ ! -e "${DEST}" && ! -L "${DEST}" ]] || {
+		echo 'ERROR: export destination already exists.' >&2
+		return 1
+	}
+	acquireClientLifecycleLock || return 1
+	awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || { echo 'ERROR: unsafe source params path.' >&2; return 1; }
+	awgStateReadParams "${AMNEZIAWG_DIR}/params" "${WORK}/records" || return 1
+	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	local -a CONFIGS=("${AMNEZIAWG_DIR}/"*.conf)
+	[[ ${#CONFIGS[@]} -eq 1 && -f "${SERVER_AWG_CONF}" && ! -L "${SERVER_AWG_CONF}" ]] || {
+		echo 'ERROR: export requires exactly one server interface.' >&2
+		return 1
+	}
+	mkdir -p "${WORK}/stage/vpn" "${WORK}/stage/clients" || return 1
+	install -m 600 -- "${AMNEZIAWG_DIR}/params" "${WORK}/stage/vpn/params" || return 1
+	install -m 600 -- "${SERVER_AWG_CONF}" "${WORK}/stage/vpn/server.conf" || return 1
+	collectAwgClientConfigCandidates CANDIDATES || return 1
+	for FILE in "${CANDIDATES[@]}"; do
+		BASE="${FILE##*/}"
+		# Conflicting same-name copies must be resolved by the operator, not guessed.
+		if [[ -f "${WORK}/stage/clients/${BASE}" ]]; then
+			cmp -s -- "${FILE}" "${WORK}/stage/clients/${BASE}" || {
+				echo 'ERROR: conflicting client config copies.' >&2
+				return 1
+			}
+		else
+			install -m 600 -- "${FILE}" "${WORK}/stage/clients/${BASE}" || return 1
+		fi
+	done
+	awgStateSnapshotPanel "${WORK}/stage" || return 1
+	if [[ -f "${AWG_STATE_PROXY_CONFIG}" && ! -L "${AWG_STATE_PROXY_CONFIG}" ]]; then
+		mkdir -p "${WORK}/stage/proxy" || return 1
+		install -m 600 -- "${AWG_STATE_PROXY_CONFIG}" "${WORK}/stage/proxy/proxy.toml" || return 1
+		echo 'NOTE: default proxy config included for recovery only; custom proxy paths/TLS are TODO.' >&2
+	fi
+	VERSION="$(awg --version 2>/dev/null || printf unknown)"
+	awgStateArchive pack "${WORK}/stage" "${WORK}/state.tar.gz" "${VERSION}" "$(sha256sum "${BASH_SOURCE[0]}" | cut -d ' ' -f1)" || return 1
+	# age reads and confirms its passphrase on /dev/tty. No secret shell variable,
+	# command argument, environment value or log entry ever contains it.
+	age --passphrase --output "${WORK}/encrypted" "${WORK}/state.tar.gz" || return 1
+	# Link publishes atomically without overwriting a concurrent destination.
+	local PUBLISH
+	PUBLISH="$(mktemp "$(dirname -- "${DEST}")/.awg-state.XXXXXXXX")" || return 1
+	if ! install -m 600 -- "${WORK}/encrypted" "${PUBLISH}" || ! ln -- "${PUBLISH}" "${DEST}"; then
+		rm -f -- "${PUBLISH}"
+		return 1
+	fi
+	rm -f -- "${PUBLISH}"
+	echo 'Encrypted state archive created. Keep it offline; it grants full VPN access.'
+}
+
+# No symlink components or non-root-writable ancestors for privileged output.
+function awgStateTrustedPath() {
+	local NODE="$1" OWNER MODE
+	[[ "${NODE}" == /* ]] || return 1
+	while [[ "${NODE}" != / ]]; do
+		[[ ! -L "${NODE}" ]] || return 1
+		if [[ -e "${NODE}" ]]; then
+			OWNER="$(stat -c %u -- "${NODE}")" || return 1
+			MODE="$(stat -c %a -- "${NODE}")" || return 1
+			[[ "${OWNER}" == 0 ]] && (( (8#${MODE} & 022) == 0 )) || return 1
+		fi
+		NODE="$(dirname -- "${NODE}")"
+	done
+}
+
+function awgStateImportPreflight() {
+	local NIC="$1" WORK="$2" FILE
+	for FILE in "${AWG_SYSCTL_FILE}" "${AWG_MODULES_LOAD_FILE}" "${AWG_BT_MODPROBE_OVERRIDE}" "${AWG_SYSTEMD_UNIT_DIR}"; do
+		awgStateTrustedPath "${FILE}" || { echo 'ERROR: unsafe privileged output path.' >&2; return 1; }
+	done
+	if systemctl is-active --quiet "awg-quick@${SERVER_AWG_NIC}" || systemctl is-enabled --quiet "awg-quick@${SERVER_AWG_NIC}"; then
+		echo 'ERROR: target VPN service is already active/enabled.' >&2
+		return 1
+	fi
+	awgStateTrustedPath "${AMNEZIAWG_DIR}" || { echo 'ERROR: unsafe target config path.' >&2; return 1; }
+	[[ "${NIC}" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,14}$ ]] || {
+		echo 'ERROR: set SERVER_PUB_NIC to the target public interface.' >&2
+		return 1
+	}
+	ip link show dev "${NIC}" >/dev/null 2>&1 || {
+		echo 'ERROR: target public interface does not exist.' >&2
+		return 1
+	}
+	# An import never replaces another installation, even with the same backend.
+	# The only exception is a verified, unchanged successful rerun (checked first).
+	if [[ -d "${AMNEZIAWG_DIR}" ]]; then
+		for FILE in "${AMNEZIAWG_DIR}/"* "${AMNEZIAWG_DIR}/".[!.]* "${AMNEZIAWG_DIR}/"..?*; do
+			[[ ! -e "${FILE}" && ! -L "${FILE}" ]] || {
+				echo 'ERROR: target configuration directory is not empty; refusing to replace an installation.' >&2
+				return 1
+			}
+		done
+	fi
+	if ip link show dev "${SERVER_AWG_NIC}" >/dev/null 2>&1; then
+		echo 'ERROR: target VPN interface is already in use.' >&2
+		return 1
+	fi
+	command -v ss >/dev/null 2>&1 || { echo 'ERROR: iproute2 (ss) is required.' >&2; return 1; }
+	ss -H -lun "sport = :${SERVER_PORT}" >"${WORK}/ports" || return 1
+	[[ ! -s "${WORK}/ports" ]] || { echo 'ERROR: target UDP port is already in use.' >&2; return 1; }
+	# A pre-existing unit/drop-in could run arbitrary local commands on activation.
+	for FILE in "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service" "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service.d"; do
+		[[ ! -e "${FILE}" && ! -L "${FILE}" ]] || {
+			echo 'ERROR: target VPN unit/drop-in already exists.' >&2
+			return 1
+		}
+	done
+}
+
+# Transaction owns a fresh config directory and newly generated units only.
+# Packages, signed apt sources and verified BoringTun binaries are deliberately
+# not uninstalled on failure; no VPN service is enabled or started by import.
+function awgStateImportTransaction() (
+	local STAGE="$1" JOURNAL="$2" COMMITTED=0 CONFIG_EXISTED=0 FILE INDEX=0
+	local -a TRACKED=("${AWG_SYSCTL_FILE}" "${AWG_MODULES_LOAD_FILE}" "${AWG_BT_MODPROBE_OVERRIDE}")
+	[[ -d "${AMNEZIAWG_DIR}" ]] && CONFIG_EXISTED=1
+	mkdir -p "${JOURNAL}/before" || exit 1
+	for FILE in "${TRACKED[@]}"; do
+		[[ ! -L "${FILE}" ]] || exit 1
+		if [[ -e "${FILE}" ]]; then
+			[[ -f "${FILE}" ]] || exit 1
+			cp -p -- "${FILE}" "${JOURNAL}/before/${INDEX}" || exit 1
+		fi
+		INDEX=$((INDEX + 1))
+	done
+	function stateImportFinish() {
+		local STATUS=$? FILE INDEX=0
+		if (( ! COMMITTED )); then
+			printf '%s\n' rollback >>"${JOURNAL}/steps"
+			rm -f -- "${JOURNAL}/receipt"
+			# The clean install hook returns before systemctl enable/start.
+			rm -rf -- "${AMNEZIAWG_DIR}" "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service.d"
+			rm -f -- "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service"
+			((CONFIG_EXISTED)) && mkdir -m 700 -p "${AMNEZIAWG_DIR}"
+			for FILE in "${TRACKED[@]}"; do
+				if [[ -f "${JOURNAL}/before/${INDEX}" ]]; then
+					cp -p -- "${JOURNAL}/before/${INDEX}" "${FILE}" || true
+				else
+					rm -f -- "${FILE}"
+				fi
+				INDEX=$((INDEX + 1))
+			done
+			systemctl daemon-reload || true
+			echo "ERROR: import rolled back config/unit changes; inspect ${JOURNAL}/steps. Packages may remain installed." >&2
+		fi
+		return "${STATUS}"
+	}
+	trap stateImportFinish EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	printf '%s\n' install-packages >>"${JOURNAL}/steps"
+	_AWG_STATE_IMPORT_DIR="${STAGE}"
+	# Run normally rather than under `if`/`!`: preserve failure propagation in the
+	# install functions. The outer transaction handles their exits and failures.
+	set -e
+	installAmneziaWG
+	printf '%s\n' validate-installed-protocol >>"${JOURNAL}/steps"
+	ensureAwgBackendReady 0
+	mkdir -p "${STAGE}/validate"
+	validateStagedAwgConfigs "${STAGE}/validate" --label imported-server "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	printf '%s\n' restore-complete-quarantined >>"${JOURNAL}/steps"
+	# Preserve recovery-only panel/proxy files privately. Never source env.conf,
+	# start the panel, replay the mail queue or expose a proxy listener.
+	mkdir -p "${JOURNAL}/recovery"
+	for FILE in web proxy vpn; do
+		[[ ! -d "${STAGE}/${FILE}" ]] || cp -a -- "${STAGE}/${FILE}" "${JOURNAL}/recovery/"
+	done
+	# Receipt includes the target NIC and archive identity, plus target file hashes.
+	printf '%s\n' "${SERVER_PUB_NIC}" >"${JOURNAL}/nic"
+	sha256sum "${AMNEZIAWG_DIR}/params" "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" >"${JOURNAL}/receipt"
+	for FILE in "${AMNEZIAWG_DIR}/clients/"*.conf; do
+		[[ ! -f "${FILE}" ]] || sha256sum "${FILE}" >>"${JOURNAL}/receipt"
+	done
+	printf '%s\n' committed >>"${JOURNAL}/steps"
+	COMMITTED=1
+)
+
+function awgStateCommand() (
+	# xtrace must not echo imported private keys during printf -v/serialization.
+	set +x
+	umask 077
+	local MODE="$1" ARCHIVE="$2" DRY="${3:-}" WORK NIC="${SERVER_PUB_NIC:-}" ID JOURNAL
+	isRoot || exit 1
+	checkOS
+	[[ "${ID:-}" == debian || "${ID:-}" == ubuntu ]] || {
+		echo 'ERROR: state migration supports Debian/Ubuntu only.' >&2
+		exit 1
+	}
+	local ALLOW_INSTALL=1
+	[[ "${MODE}" == --inspect-state || "${DRY}" == --dry-run ]] && ALLOW_INSTALL=0
+	awgStateDependencies "${ALLOW_INSTALL}" || exit 1
+	WORK="$(mktemp -d /tmp/awg-state.XXXXXXXX)" || exit 1
+	trap 'rm -rf -- "${WORK}"; releaseClientLifecycleLock' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	if [[ "${MODE}" == --export-state ]]; then
+		awgStateExport "${ARCHIVE}" "${WORK}"
+		exit $?
+	fi
+	[[ -f "${ARCHIVE}" && ! -L "${ARCHIVE}" ]] || { echo 'ERROR: archive must be a regular file.' >&2; exit 1; }
+	# Bound decrypted staging even before inspecting the tar headers.
+	(ulimit -f 614400; age --decrypt --output "${WORK}/state.tar.gz" "${ARCHIVE}") || exit 1
+	if [[ "${MODE}" == --inspect-state ]]; then
+		awgStateArchive inspect "${WORK}/state.tar.gz"
+		exit $?
+	fi
+	awgStateArchive unpack "${WORK}/state.tar.gz" "${WORK}/stage" || exit 1
+	awgStateReadParams "${WORK}/stage/vpn/params" "${WORK}/records" || exit 1
+	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	SERVER_AWG_IPV6="$(normalizeIPv6 "${SERVER_AWG_IPV6}")" || exit 1
+	# Derive IPv6 routing from the exact server config rather than stale params.
+	if serverConfigHasIPv6Address "${WORK}/stage/vpn/server.conf"; then ENABLE_IPV6=y; else ENABLE_IPV6=n; fi
+	if [[ -z "${NIC}" ]]; then
+		NIC="$(ip -4 route show default | awk '{for(i=1;i<NF;i++) if($i=="dev") {print $(i+1); exit}}')"
+		[[ -n "${NIC}" ]] || NIC="$(ip -6 route show default | awk '{for(i=1;i<NF;i++) if($i=="dev") {print $(i+1); exit}}')"
+	fi
+	ID="$(sha256sum "${WORK}/stage/manifest.json")"; ID="${ID%% *}"
+	JOURNAL="${AWG_STATE_JOURNAL_DIR}/${ID}"
+	awgStateTrustedPath "${JOURNAL}" || { echo 'ERROR: unsafe journal path.' >&2; exit 1; }
+	if [[ -f "${JOURNAL}/receipt" ]]; then
+		if [[ "$(<"${JOURNAL}/nic")" == "${NIC}" ]] && sha256sum -c --status "${JOURNAL}/receipt"; then
+			echo 'This archive is already imported; target files are unchanged. No changes made.'
+			exit 0
+		fi
+		echo 'ERROR: previous import differs from current target state; refusing to overwrite.' >&2
+		exit 1
+	fi
+	awgStateImportPreflight "${NIC}" "${WORK}" || exit 1
+	awgStateArchive prepare "${WORK}/stage" || exit 1
+	SERVER_PUB_NIC="${NIC}"
+	printf 'Plan: install %s backend, AWG %s, interface %s, UDP %s, uplink %s.\n' "${AWG_BACKEND}" "${AWG_PROTOCOL_VERSION}" "${SERVER_AWG_NIC}" "${SERVER_PORT}" "${NIC}"
+	echo 'Restore original keys/profiles; replace host hooks; remove disabled/archived/expired peers.'
+	echo 'Leave VPN stopped/disabled. Panel/mail/proxy files are recovery-only (automatic restore TODO).'
+	[[ "${DRY}" != --dry-run ]] || exit 0
+	acquireClientLifecycleLock || exit 1
+	# Repeat under lock to close the preflight/installation race.
+	awgStateImportPreflight "${NIC}" "${WORK}" || exit 1
+	mkdir -p "${AWG_STATE_JOURNAL_DIR}" || exit 1
+	[[ ! -L "${AWG_STATE_JOURNAL_DIR}" && ! -L "${JOURNAL}" ]] || exit 1
+	mkdir -p "${JOURNAL}" || exit 1
+	chmod 700 "${AWG_STATE_JOURNAL_DIR}" "${JOURNAL}" || exit 1
+	awgStateImportTransaction "${WORK}/stage" "${JOURNAL}"
+	local STATUS=$?
+	[[ ${STATUS} -eq 0 ]] || exit "${STATUS}"
+	echo "Imported in quarantine. Journal/recovery: ${JOURNAL}"
+	echo 'Before DNS cutover: fence the old server, inspect firewall hooks, and test a client handshake.'
+	echo "Then explicitly enable/start awg-quick@${SERVER_AWG_NIC}; import does not activate traffic."
+	echo 'Clients using literal IP endpoints still need updated profiles; DNS re-resolution depends on the client.'
+)
+
 function awgParamsCanonicalKeys() { # <backend>
 	local KEYS="${AWG_PARAMS_KEYS}"
 	[[ "${1:-}" != "${AWG_BACKEND_BORINGTUN}" ]] || KEYS+=" ${AWG_PARAMS_BORINGTUN_KEYS}"
@@ -8002,6 +8672,8 @@ function installBoringtunHost() {
 		echo -e "${RED}ERROR: could not write the BoringTun service files for awg-quick@${SERVER_AWG_NIC}.${NC}" >&2
 		exit 1
 	fi
+	# State imports stay stopped and disabled until an explicit operator cutover.
+	[[ -z "${_AWG_STATE_IMPORT_DIR}" ]] || return 0
 	systemctl enable "awg-quick@${SERVER_AWG_NIC}"
 	if systemctl start "awg-quick@${SERVER_AWG_NIC}"; then
 		if _awgBtCheckServedByBoringtun "${SERVER_AWG_NIC}"; then
@@ -8860,6 +9532,7 @@ function firstFreeAwgInterfaceName() {
 }
 
 function installQuestions() {
+	[[ -z "${_AWG_STATE_IMPORT_DIR}" ]] || return 0
 	validateClientMtu || exit 1
 	# Fresh installs remain on AWG 2.0 regardless of caller environment. AWG 3.0
 	# and AWG 3.1 can be enabled only after installation through the explicit
@@ -9599,6 +10272,10 @@ ${AWG_PROTOCOL_FIELDS}"
 # keys, params, the server configuration with its firewall hooks, and the
 # forwarding sysctls.
 function writeAwgServerInstallState() {
+	if [[ -n "${_AWG_STATE_IMPORT_DIR}" ]]; then
+		awgStateWriteInstallState
+		return $?
+	fi
 	# Refuse an impossible candidate before creating directories, keys or params.
 	validateFreshInstallMtu || return 1
 	# Ensure configuration directory exists
@@ -9659,8 +10336,10 @@ function writeAwgServerInstallState() {
 
 function installAmneziaWG() {
 	ensureSupportedInstallDistro
-	selectFreshInstallBackend || exit 1
-	selectFreshInstallImitation || exit 1
+	if [[ -z "${_AWG_STATE_IMPORT_DIR}" ]]; then
+		selectFreshInstallBackend || exit 1
+		selectFreshInstallImitation || exit 1
+	fi
 	if [[ "${AWG_BACKEND}" == "${AWG_BACKEND_BORINGTUN}" ]]; then
 		installBoringtunHost
 		return
@@ -9819,6 +10498,8 @@ EOF
 	# Always enable the service so it starts on next boot. Even if modprobe fails
 	# now (e.g., missing kernel headers), a reboot after installing headers or
 	# running dkms autoinstall will load the module via the ExecStartPre override.
+	# State imports stay stopped and disabled until an explicit operator cutover.
+	[[ -z "${_AWG_STATE_IMPORT_DIR}" ]] || return 0
 	systemctl enable "awg-quick@${SERVER_AWG_NIC}"
 
 	if modprobe amneziawg; then
@@ -14104,6 +14785,14 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	#
 	# Requires AmneziaWG to be already installed (params file must exist).
 	case "${1:-}" in
+		--export-state|--inspect-state|--import-state)
+			if [[ $# -ne 2 && ! ( "$1" == --import-state && $# -eq 3 && "$3" == --dry-run ) ]] || [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+				echo 'Usage: amneziawg-install.sh --export-state <file> | --inspect-state <file> | --import-state <file> [--dry-run]' >&2
+				exit 1
+			fi
+			awgStateCommand "$@"
+			exit $?
+			;;
 		--upgrade-boringtun|--rollback-boringtun)
 			if [[ $# -ne 1 ]]; then
 				echo "Usage: amneziawg-install.sh --upgrade-boringtun" >&2
