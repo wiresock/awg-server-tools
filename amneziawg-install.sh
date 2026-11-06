@@ -2956,16 +2956,15 @@ function isWebPanelInstalled() {
 	return 1
 }
 
-# Use the web database directory as the stable cross-process lifecycle lock.
-# Unlike AWG_CONFIG_DIR it exists for the panel's lifetime, including when no
-# client has been created yet. Standalone installer use (no panel env file)
-# retains the config-directory fallback.
+# The installer always locks its independent persistent directory first. When
+# a panel exists it additionally locks the database directory inode used by
+# native panel operations. Never create client/install directories for locking.
 function resolveClientLifecycleLockDir() {
 	local env_file database_path exec_database_path exec_setting_rc working_dir database_parent
 	env_file="$(resolveWebPanelEnvFile)" || return 1
 
 	if ! isWebPanelInstalled; then
-		resolveWebPanelConfigDir
+		printf '%s\n' "${INSTALLER_LIFECYCLE_LOCK_DIR}"
 		return
 	fi
 
@@ -4209,7 +4208,7 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 			echo 'ERROR: local server configuration remains; reset never removes or overwrites an installation. Blocking file(s):' >&2
 			# Escape whitespace/control characters; filenames are data, not logs
 			# that may inject terminal escapes. Never print configuration contents.
-			printf '  %q\n' "${BLOCKING_CONFIGS[@]}" >&2
+			LC_ALL=C printf '  %q\n' "${BLOCKING_CONFIGS[@]}" >&2
 			exit 1
 		fi
 		# Unknown service state is NOT proof that an old interface is stopped.
@@ -14843,27 +14842,18 @@ function manageBoringtunMenu() {
 #
 # On error, prints a message to stderr and exits with a non-zero code.
 
+# Root-owned, independent of VPN/client/panel installation and retained across
+# rollback/uninstall/reset. Do not remove/recreate this inode while commands run.
+INSTALLER_LIFECYCLE_LOCK_DIR="/var/lib/amneziawg-install/lifecycle"
 CLIENT_LIFECYCLE_LOCK_FD=""
+CLIENT_PANEL_LIFECYCLE_LOCK_FD=""
 
-# Acquire the same non-blocking lifecycle lock used by amneziawg-web. The
-# persistent state directory is opened read-only, its descriptor identity
-# is revalidated against the path, and the descriptor is locked. The root-run
-# CLI therefore never creates, truncates, chowns, or chmods a service-writable
-# lock pathname. Mutating callers run in a subshell so the descriptor is closed
-# automatically; the interactive menu preloader releases it explicitly.
-function acquireClientLifecycleLock() {
-	local lock_dir panel_installed=0
-	local old_umask dir_identity descriptor_identity descriptor_path
-	lock_dir="$(resolveClientLifecycleLockDir)" || return 1
-	if isWebPanelInstalled; then
-		panel_installed=1
-	fi
-
-	if ! command -v flock >/dev/null 2>&1; then
-		echo "ERROR: flock is required for serialized client lifecycle operations" >&2
-		return 1
-	fi
-	if [[ ! -e "${lock_dir}" && "${panel_installed}" -eq 1 ]]; then
+# Open directory inodes read-only, validate descriptor/path identity, and lock
+# non-blockingly. Never create/chown/chmod a service-writable lock pathname.
+function acquireClientLifecycleDirectoryLock() { # <dir> <fd-variable> <create>
+	local lock_dir="$1" create="$3" old_umask dir_identity descriptor_identity descriptor_path lock_fd
+	local -n result_fd="$2"
+	if [[ ! -e "${lock_dir}" && "${create}" != 1 ]]; then
 		echo "ERROR: web panel lifecycle directory '${lock_dir}' does not exist" >&2
 		return 1
 	fi
@@ -14881,32 +14871,87 @@ function acquireClientLifecycleLock() {
 		echo "ERROR: refusing unsafe client lifecycle directory '${lock_dir}'" >&2
 		return 1
 	fi
-	if ! exec {CLIENT_LIFECYCLE_LOCK_FD}< "${lock_dir}"; then
+	# Only the independent installer inode is root-private; the panel database
+	# directory deliberately belongs to its service user and is never modified.
+	if [[ "${create}" == 1 ]]; then
+		local owner mode
+		owner="$(command stat -c %u -- "${lock_dir}")" || return 1
+		mode="$(command stat -c %a -- "${lock_dir}")" || return 1
+		if [[ "${owner}" != "${EUID}" ]] || (( (8#${mode} & 022) != 0 )); then
+			echo 'ERROR: installer lifecycle directory must be owned by the current user and not group/world writable' >&2
+			return 1
+		fi
+	fi
+	if ! exec {lock_fd}< "${lock_dir}"; then
 		echo "ERROR: could not open client lifecycle directory '${lock_dir}'" >&2
 		return 1
 	fi
-	descriptor_path="/proc/${BASHPID}/fd/${CLIENT_LIFECYCLE_LOCK_FD}"
+	descriptor_path="/proc/${BASHPID}/fd/${lock_fd}"
 	dir_identity="$(stat -Lc '%d:%i' -- "${lock_dir}" 2>/dev/null || true)"
 	descriptor_identity="$(stat -Lc '%d:%i' -- "${descriptor_path}" 2>/dev/null || true)"
 	if [[ -L "${lock_dir}" || ! -d "${lock_dir}" || -z "${dir_identity}" || \
 		-z "${descriptor_identity}" || "${dir_identity}" != "${descriptor_identity}" ]]; then
-		exec {CLIENT_LIFECYCLE_LOCK_FD}>&-
+		exec {lock_fd}>&-
 		echo "ERROR: client lifecycle directory changed while it was opened" >&2
 		return 1
 	fi
-	if ! flock -xn "${CLIENT_LIFECYCLE_LOCK_FD}"; then
-		exec {CLIENT_LIFECYCLE_LOCK_FD}>&-
+	if ! flock -xn "${lock_fd}"; then
+		exec {lock_fd}>&-
 		echo "ERROR: another client or protocol management operation is already in progress" >&2
 		return 1
+	fi
+	result_fd="${lock_fd}"
+}
+
+# Every installer lifecycle caller takes the stable root-private lock. Keep the
+# existing panel directory lock too: native Rust operations hold that inode
+# across DB/config updates and privileged helper calls. Both are non-blocking,
+# acquired in this order; partial failures release the first lock immediately.
+# Mutating callers use subshells; the menu preloader releases explicitly.
+function acquireClientLifecycleLock() {
+	local panel_dir
+	if ! command -v flock >/dev/null 2>&1; then
+		echo "ERROR: flock is required for serialized client lifecycle operations" >&2
+		return 1
+	fi
+	acquireClientLifecycleDirectoryLock "${INSTALLER_LIFECYCLE_LOCK_DIR}" CLIENT_LIFECYCLE_LOCK_FD 1 || return 1
+	if ! panel_dir="$(resolveClientLifecycleLockDir)"; then
+		releaseClientLifecycleLock
+		return 1
+	fi
+	if [[ "${panel_dir}" != "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]]; then
+		if ! acquireClientLifecycleDirectoryLock "${panel_dir}" CLIENT_PANEL_LIFECYCLE_LOCK_FD 0; then
+			releaseClientLifecycleLock
+			return 1
+		fi
 	fi
 }
 
 function releaseClientLifecycleLock() {
+	if [[ -n "${CLIENT_PANEL_LIFECYCLE_LOCK_FD:-}" ]]; then
+		exec {CLIENT_PANEL_LIFECYCLE_LOCK_FD}>&- || true
+		CLIENT_PANEL_LIFECYCLE_LOCK_FD=""
+	fi
 	if [[ -n "${CLIENT_LIFECYCLE_LOCK_FD:-}" ]]; then
 		exec {CLIENT_LIFECYCLE_LOCK_FD}>&- || true
 		CLIENT_LIFECYCLE_LOCK_FD=""
 	fi
 }
+
+# The main fresh-install entry owns the same lock as reset/import/client ops.
+# Import calls the underlying installer hook directly under its existing lock;
+# it must not recursively acquire a second independent flock descriptor.
+function runLockedFreshInstall() (
+	acquireClientLifecycleLock || return 1
+	trap releaseClientLifecycleLock EXIT
+	if [[ -e "${AMNEZIAWG_DIR}/params" || -L "${AMNEZIAWG_DIR}/params" ]]; then
+		echo 'ERROR: installation state changed; params now exists. Rerun the installer for management.' >&2
+		return 1
+	fi
+	# Existing hand-made interfaces remain supported: installQuestions chooses a
+	# free NIC and writeAwgServerInstallState refuses to overwrite its config.
+	installAmneziaWG
+)
 
 # The initial interactive menu needs loaded values for display, but must not
 # hold the lifecycle lock while waiting for input. Mutating menu actions reload
@@ -15327,6 +15372,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 		loadParamsForManagementMenu || exit 1
 		manageMenu
 	else
-		installAmneziaWG
+		runLockedFreshInstall
 	fi
 fi

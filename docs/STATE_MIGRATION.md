@@ -221,6 +221,32 @@ after purge. Repeated purge is safe. Forced purge of an unfinalized journal
 removes it entirely and abandons that import's recovery/reconciliation path;
 it does not stop the VPN or remove the installed configuration.
 
+### Lifecycle serialization (including a fresh standalone host)
+
+All installer lifecycle operations use the persistent, root-private directory
+inode `/var/lib/amneziawg-install/lifecycle`, opened read-only and locked with
+non-blocking `flock`. It is **outside** the VPN/client installation tree, so
+acquiring a lock for reset or a fresh import does not create `clients/` or make
+fresh-target preflight reject its own side effects. Rollback, uninstall and
+journal reset/purge retain this inode. Do not delete/recreate it while commands
+may run; stop all older installer commands before upgrading the script.
+
+When a panel is configured, the installer **also** acquires the existing panel
+SQLite parent-directory inode lock, resolved with the panel's effective
+`--database-url`/environment/working-directory rules. This preserves serialization
+with native Rust creation/removal/expiry/DB updates and their privileged helper
+calls, without changing the panel's locking protocol or permissions. The helper's
+per-interface config lock remains unchanged. Installer locks are acquired in
+root-private-then-panel order, both non-blockingly; a partial failure releases
+the first immediately. No service-writable lock file is created or modified.
+
+Normal fresh installation now takes the same lock and rechecks params under it,
+so it cannot race a reset/import or another fresh installation. If params appear
+before acquisition, rerun for management. Existing unrelated interface configs
+remain supported by the existing free-NIC selection and no-overwrite checks.
+Import reuses the underlying installation hook under its existing lock, not the
+new interactive-entry wrapper, avoiding recursive acquisition.
+
 ### Restoring the same archive after uninstall (explicit reset)
 
 Uninstall **retains** migration journals and finalized tombstones and prints a
@@ -258,8 +284,9 @@ server `.conf` files, and a queryable inactive/failed, non-enabled VPN unit.
 Reset takes the same exclusive client lifecycle lock as import/purge before
 checking journal/installation state and holds it through deletion; a competing
 lifecycle operation fails without changing the journal. Any blocking root
-`.conf` files (including symlinks) are listed by shell-escaped filename, not
-contents, so whitespace/control characters cannot disguise the diagnostic.
+`.conf` files (including symlinks) are listed by byte-escaped filename using
+`LC_ALL=C` shell quoting, not contents, so whitespace/control characters and
+Unicode bidi controls cannot disguise the diagnostic.
 Unknown service state, remaining installation files, unsafe paths or unexpected
 journal entries fail closed. It never uninstalls/stops a service or overwrites a
 live installation; normal fresh-import preflight still applies afterward.
@@ -313,8 +340,12 @@ identity tests cover missing params/config after simulated uninstall, different
 private keys or interface, cached-public-key warning-only handling after valid
 private-key checks, normal mutable edits, reset safety and a fresh quarantined
 import after explicit reset. Real `flock` contention tests verify reset holds the
-lifecycle lock through preconditions/deletion and releases it on failure; reset
-diagnostics cover multiple filenames, spaces, control characters and symlinks.
+lifecycle lock through preconditions/deletion and releases it on failure. Fresh
+import/rollback and reset→fresh-import orchestration now use production lock
+acquisition, not mocks. Tests cover ordinary fresh-install/reset contention,
+under-lock params rechecks, retained standalone inodes and the panel database
+lock compatibility/partial-failure release. Reset diagnostics cover multiple
+filenames, spaces, control characters, Unicode bidi controls and symlinks.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.
 CI installs age and runs this suite.

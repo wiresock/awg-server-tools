@@ -596,7 +596,7 @@ printf 'awg0\n' >"$JOURNAL/finalized"
 printf sensitive >"$JOURNAL/recovery/snapshot"
 isRoot() { return 0; }
 isWebPanelInstalled() { return 1; }
-resolveClientLifecycleLockDir() { printf '%s\n' "$ROOT/lifecycle"; }
+INSTALLER_LIFECYCLE_LOCK_DIR="$ROOT/lifecycle"
 assert_locked() {
     if flock -xn "$ROOT/lifecycle" -c true; then echo 'ERROR: lifecycle lock not held' >&2; return 97; fi
 }
@@ -635,7 +635,7 @@ flock -xn "$ROOT/lifecycle" -c true # Released after a precondition failure too.
     def test_reset_reports_all_blocking_config_paths_without_printing_contents(self):
         target = self.root / 'target'
         target.mkdir()
-        for name in ('awg0.conf', 'old note.conf', 'bad\nname.conf', 'escape\x1b[31m.conf'):
+        for name in ('awg0.conf', 'old note.conf', 'bad\nname.conf', 'escape\x1b[31m.conf', 'bidi\u202ename.conf'):
             (target / name).write_text(KEY)
         (target / 'dangling.conf').symlink_to(self.root / 'absent')
         shell = r'''
@@ -662,8 +662,104 @@ if awgStatePurgeJournal "$DIGEST" --reset-finalized; then exit 10; fi
             self.assertIn(name, result.stderr)
         self.assertNotIn(b'bad\nname.conf', result.stderr)
         self.assertNotIn(b'\x1b', result.stderr)
+        self.assertNotIn('\u202e'.encode(), result.stderr)
+        self.assertIn(b'bidi\\342\\200\\256name.conf', result.stderr)
         self.assertNotIn(KEY.encode(), result.stdout + result.stderr)
         self.assertNotIn(b'unexpected service query', result.stderr)
+
+    def test_stable_lock_preserves_native_panel_database_serialization(self):
+        shell = r"""
+set -euo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/target"
+INSTALLER_LIFECYCLE_LOCK_DIR="$ROOT/lifecycle"
+WEB_PANEL_SYSTEMD_UNIT="$ROOT/web.service"
+WEB_PANEL_ENV_FILE="$ROOT/absent.env"
+systemctl() { return 1; }
+mkdir -p "$ROOT/panel-state"
+printf '[Service]\nEnvironment=AWG_WEB_DB=%s/panel-state/panel.db\n' "$ROOT" >"$WEB_PANEL_SYSTEMD_UNIT"
+[[ "$(resolveClientLifecycleLockDir)" == "$ROOT/panel-state" ]]
+acquireClientLifecycleLock
+if flock -xn "$INSTALLER_LIFECYCLE_LOCK_DIR" -c true; then exit 10; fi
+if flock -xn "$ROOT/panel-state" -c true; then exit 11; fi
+if (acquireClientLifecycleLock); then exit 12; fi
+releaseClientLifecycleLock
+# Native Rust uses flock on this same read-only database-directory inode.
+exec {native_fd}< "$ROOT/panel-state"
+flock -xn "$native_fd"
+if acquireClientLifecycleLock; then exit 13; fi
+flock -xn "$INSTALLER_LIFECYCLE_LOCK_DIR" -c true # Partial acquisition released.
+[[ ! -e "$AMNEZIAWG_DIR" ]]
+exec {native_fd}>&-
+acquireClientLifecycleLock
+releaseClientLifecycleLock
+before="$(stat -c '%d:%i' "$INSTALLER_LIFECYCLE_LOCK_DIR")"
+rm "$WEB_PANEL_SYSTEMD_UNIT"
+[[ "$(resolveClientLifecycleLockDir)" == "$INSTALLER_LIFECYCLE_LOCK_DIR" ]]
+acquireClientLifecycleLock
+releaseClientLifecycleLock
+[[ "$(stat -c '%d:%i' "$INSTALLER_LIFECYCLE_LOCK_DIR")" == "$before" && ! -e "$AMNEZIAWG_DIR" ]]
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'another client or protocol management operation', result.stderr)
+
+    def test_fresh_install_and_reset_share_real_lock_and_recheck_state(self):
+        shell = r"""
+set -euo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/target"
+INSTALLER_LIFECYCLE_LOCK_DIR="$ROOT/lifecycle"
+AWG_STATE_JOURNAL_DIR="$ROOT/journals"
+DIGEST="$(printf 'e%.0s' {1..64})"
+JOURNAL="$AWG_STATE_JOURNAL_DIR/$DIGEST"
+mkdir -p "$JOURNAL"
+printf 'awg0\n' >"$JOURNAL/finalized"
+isRoot() { return 0; }
+isWebPanelInstalled() { return 1; }
+awgStateTrustedPath() { return 0; }
+systemctl() { echo 'unexpected service query' >&2; return 99; }
+installAmneziaWG() {
+    if flock -xn "$INSTALLER_LIFECYCLE_LOCK_DIR" -c true; then return 90; fi
+    # Simulate reset arriving while an ordinary fresh install owns the lock.
+    if awgStatePurgeJournal "$DIGEST" --reset-finalized; then return 91; fi
+    [[ -f "$JOURNAL/finalized" && ! -e "$AMNEZIAWG_DIR" ]] || return 92
+    printf 'install\n' >>"$ROOT/installed"
+    mkdir -p "$AMNEZIAWG_DIR"
+    printf 'new installation\n' >"$AMNEZIAWG_DIR/params"
+}
+acquireClientLifecycleLock
+if runLockedFreshInstall; then exit 10; fi
+[[ ! -e "$ROOT/installed" && ! -e "$AMNEZIAWG_DIR" ]]
+releaseClientLifecycleLock
+runLockedFreshInstall
+[[ "$(<"$ROOT/installed")" == install && -f "$AMNEZIAWG_DIR/params" ]]
+if runLockedFreshInstall; then exit 11; fi # Recheck params under the lock.
+[[ "$(<"$ROOT/installed")" == install ]]
+flock -xn "$INSTALLER_LIFECYCLE_LOCK_DIR" -c true
+rm "$AMNEZIAWG_DIR/params"
+ln -s "$ROOT/absent" "$AMNEZIAWG_DIR/params"
+if runLockedFreshInstall; then exit 12; fi
+flock -xn "$INSTALLER_LIFECYCLE_LOCK_DIR" -c true
+[[ -L "$AMNEZIAWG_DIR/params" && -f "$JOURNAL/finalized" ]]
+rm "$AMNEZIAWG_DIR/params"
+printf 'hand-made interface\n' >"$AMNEZIAWG_DIR/old.conf"
+installAmneziaWG() {
+    if flock -xn "$INSTALLER_LIFECYCLE_LOCK_DIR" -c true; then return 93; fi
+    [[ "$(<"$AMNEZIAWG_DIR/old.conf")" == 'hand-made interface' ]] || return 94
+    printf 'new installation\n' >"$AMNEZIAWG_DIR/params"
+}
+runLockedFreshInstall # Existing unrelated configs are not a new restriction.
+[[ "$(<"$AMNEZIAWG_DIR/old.conf")" == 'hand-made interface' ]]
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'another client or protocol management operation', result.stderr)
+        self.assertIn(b'installation state changed', result.stderr)
+        self.assertNotIn(b'unexpected service query', result.stderr)
+        self.assertIn('runLockedFreshInstall\n\tfi\nfi\n', SCRIPT.read_text())
 
     def test_staging_prefers_private_ram_backed_directory_with_safe_fallback(self):
         shell = r'''
@@ -717,8 +813,8 @@ isRoot() { return 0; }
 checkOS() { OS=debian; ID=debian; }
 awgStateDependencies() { return 0; }
 awgStateTrustedPath() { return 0; } # Tests run below /tmp, not a privileged path.
-acquireClientLifecycleLock() { return 0; }
-releaseClientLifecycleLock() { return 0; }
+INSTALLER_LIFECYCLE_LOCK_DIR="$ROOT/lifecycle"
+isWebPanelInstalled() { return 1; }
 age() { [[ "$1" == --decrypt && "$2" == --output ]] || return 1; cp -- "$4" "$3"; }
 ip() {
     [[ "$*" == 'link show dev ens99' ]] && return 0
@@ -745,6 +841,10 @@ installAmneziaWG() {
 awgStateCommand --import-state "$ROOT/state.tar.gz" --dry-run >"$ROOT/dry-run.out" || exit 10
 [[ ! -e "$AMNEZIAWG_DIR" && ! -e "$AWG_STATE_JOURNAL_DIR" && ! -e "$ROOT/install.log" ]] || exit 11
 [[ "$(<"$AWG_SYSCTL_FILE")" == 'original sysctl' ]] || exit 12
+FAIL_INSTALL=1
+awgStateCommand --import-state "$ROOT/state.tar.gz"
+[[ $? -ne 0 && ! -e "$AMNEZIAWG_DIR" && -d "$INSTALLER_LIFECYCLE_LOCK_DIR" ]] || exit 41
+[[ "$(grep -c '^install$' "$ROOT/install.log")" == 1 ]] || exit 42
 mkdir -m 755 "$AMNEZIAWG_DIR"
 FAIL_INSTALL=1
 awgStateCommand --import-state "$ROOT/state.tar.gz"
@@ -752,11 +852,12 @@ awgStateCommand --import-state "$ROOT/state.tar.gz"
 [[ -d "$AMNEZIAWG_DIR" && ! -e "$AMNEZIAWG_DIR/params" && "$(stat -c %a "$AMNEZIAWG_DIR")" == 700 && ! -e "$AWG_SYSTEMD_UNIT_DIR/awg-quick@awg0.service.d" ]] || exit 14
 [[ "$(<"$AWG_SYSCTL_FILE")" == 'original sysctl' ]] || exit 15
 FAIL_INSTALL=0
+rmdir "$AMNEZIAWG_DIR" || exit 43 # Truly fresh successful import with the retained lock inode.
 awgStateCommand --import-state "$ROOT/state.tar.gz" || exit 16
 [[ -f "$AMNEZIAWG_DIR/params" && -f "$AMNEZIAWG_DIR/awg0.conf" ]] || exit 17
-[[ "$(grep -c '^install$' "$ROOT/install.log")" == 2 ]] || exit 18
+[[ "$(grep -c '^install$' "$ROOT/install.log")" == 3 ]] || exit 18
 awgStateCommand --import-state "$ROOT/state.tar.gz" || exit 19
-[[ "$(grep -c '^install$' "$ROOT/install.log")" == 2 ]] || exit 20
+[[ "$(grep -c '^install$' "$ROOT/install.log")" == 3 ]] || exit 20
 ! grep -Eq '^(start|enable|restart) ' "$ROOT/systemctl.log" || exit 21
 printf '\n# local change\n' >>"$AMNEZIAWG_DIR/awg0.conf"
 awgStateCommand --import-state "$ROOT/state.tar.gz"
@@ -872,8 +973,8 @@ isRoot() { return 0; }
 checkOS() { OS=debian; ID=debian; }
 awgStateDependencies() { return 0; }
 awgStateTrustedPath() { return 0; }
-acquireClientLifecycleLock() { return 0; }
-releaseClientLifecycleLock() { return 0; }
+INSTALLER_LIFECYCLE_LOCK_DIR="$ROOT/lifecycle"
+isWebPanelInstalled() { return 1; }
 age() { cp -- "$4" "$3"; }
 installAmneziaWG() { echo 'must not reinstall' >&2; return 99; }
 ensureAwgBackendReady() { [[ "$1" == 0 ]]; }
@@ -962,6 +1063,7 @@ OTHER_IDENTITY
         cp "$ROOT/saved-server" "$SERVER_AWG_CONF"
         # Simulate uninstall: service stopped/disabled and local files removed;
         # retain the finalized tombstone exactly as the real uninstaller does.
+        before_uninstall_lock_inode="$(stat -c '%d:%i' "$INSTALLER_LIFECYCLE_LOCK_DIR")"
         systemctl stop awg-quick@awg0
         systemctl disable awg-quick@awg0
         rm -rf -- "$AMNEZIAWG_DIR"
@@ -990,7 +1092,7 @@ OTHER_IDENTITY
         if awgStatePurgeJournal "${JOURNAL##*/}" --reset-finalized; then exit 31; fi
         rm "$ROOT/enabled"
         awgStatePurgeJournal "${JOURNAL##*/}" --reset-finalized || exit 32
-        [[ ! -e "$JOURNAL" ]] || exit 33
+        [[ ! -e "$JOURNAL" && ! -e "$AMNEZIAWG_DIR" && "$(stat -c '%d:%i' "$INSTALLER_LIFECYCLE_LOCK_DIR")" == "$before_uninstall_lock_inode" ]] || exit 33
         AWG_SYSTEMD_UNIT_DIR="$ROOT/units"
         AWG_MODULES_LOAD_FILE="$ROOT/modules/awg.conf"
         AWG_BT_MODPROBE_OVERRIDE="$ROOT/modprobe/awg.conf"
