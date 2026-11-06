@@ -4169,7 +4169,7 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force]
 		esac
 	done
 	for ENTRY in before recovery receipt nic steps; do
-		rm -rf --one-file-system -- "${JOURNAL}/${ENTRY}" || exit 1
+		rm -rf --one-file-system -- "${JOURNAL:?}/${ENTRY:?}" || exit 1
 	done
 	if (( FINALIZED )); then
 		echo 'Purged plaintext recovery/rollback material; retained only the non-secret finalized tombstone.'
