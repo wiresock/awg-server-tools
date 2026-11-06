@@ -14900,6 +14900,7 @@ function acquireClientLifecycleDirectoryLock() { # <dir> <fd-variable> <create>
 		echo "ERROR: another client or protocol management operation is already in progress" >&2
 		return 1
 	fi
+	# shellcheck disable=SC2034 # nameref output sets the caller's descriptor variable
 	result_fd="${lock_fd}"
 }
 

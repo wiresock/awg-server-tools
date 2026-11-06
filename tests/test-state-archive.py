@@ -640,6 +640,7 @@ flock -xn "$ROOT/lifecycle" -c true # Released after a precondition failure too.
         (target / 'dangling.conf').symlink_to(self.root / 'absent')
         shell = r'''
 set -euo pipefail
+export LC_ALL=C.UTF-8 # Reproduce bidi passthrough in the caller's UTF-8 locale.
 source "$1"
 ROOT="$2"
 AMNEZIAWG_DIR="$ROOT/target"
