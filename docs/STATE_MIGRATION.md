@@ -40,12 +40,30 @@ The existing installer's distribution/version and signed AWG package handling
 is reused. age availability is required; there is no unverified binary download
 fallback.
 
+## Timestamps and peer decisions
+
+`--inspect-state` emits the manifest as JSON with a `peer_plan` object.
+`--dry-run` prints a JSON plan before the host-install plan. Both show the
+export timestamp, the destination evaluation time, per-peer **migrate/drop**
+decisions (name, expiry, reason), and migrate/drop counts. Import, unchanged-
+receipt reruns and activation log the same policy decisions. Inspection and
+planning do not authorize traffic; activation always checks the clock again.
+
+Archives older than **7 days** produce a warning, not a rejection. Export time
+in the future relative to the destination clock fails closed: synchronize/check
+both hosts' clocks before retrying. Missing, malformed or non-UTC export times
+are rejected before extraction; timestamp-less archives from the earlier,
+unreleased prototype must be **re-exported**, not assigned an invented time.
+Peer expiry timestamps accept timezone-aware RFC3339 and are displayed in UTC.
+No deadline is extended by the age of the archive or time spent quarantined.
+
 ## What is carried
 
 The encrypted payload is a gzip tar containing only regular files:
 
 - `manifest.json`: schema version 1, protocol, backend, interface, installer
-  SHA-256, AWG tools version, per-file SHA-256 inventory. The panel version is
+  SHA-256, AWG tools version, per-file SHA-256 inventory, and mandatory
+  `exported_at` (UTC ISO 8601, `YYYY-MM-DDTHH:MM:SSZ`, at snapshot packaging). The panel version is
   currently recorded as `not-probed`, not guessed.
 - `vpn/params` and `vpn/server.conf`: exact source bytes, including server keys,
   PSKs, obfuscation and protocol fields. Imported params are parsed as literals
@@ -61,7 +79,8 @@ The encrypted payload is a gzip tar containing only regular files:
   precedence over `AWG_WEB_DB`; absent settings use `awg-web.db`. Relative paths
   use the service working directory.
   Unsupported SQLite URL/query formats fail export rather than silently omit
-  the DB. `web/env.conf` is copied from the existing env-file resolver.
+  the DB. Per-peer `expires_at` values remain in this snapshot; no remaining
+  lifetime is reset on the destination. `web/env.conf` is copied from the existing env-file resolver.
 - `proxy/proxy.toml`: the default `/etc/amneziawg-proxy/proxy.toml`, if present.
 
 ### Companion path inventory and deliberate gaps
@@ -104,19 +123,21 @@ restoring a usable panel.
 2. Preflight validates target paths, free UDP port, existing interface/unit and
    installation conflicts. The archive selects its original protocol/backend;
    this is not an in-place replacement or a backend/protocol conversion tool.
-3. Exclude disabled, archived, **removal-pending** peers and **every peer with
-   any expiry**, including future deadlines, using the panel DB snapshot.
-   A failed manual removal must not resurrect its peer. The required columns
-   `public_key`, `disabled`, `archived`, `removal_pending`, `expires_at` must exist;
-   incompatible schemas fail closed with a missing-column diagnostic. NULL
-   policy flags are excluded conservatively too. Commented peers stay commented.
-   Original profiles remain available but do not authorize traffic on their own.
-   **Future-expiring peers are deliberately not authorized by this CLI MVP:**
-   without a restored, running panel there is no live expiry enforcement. This
-   prevents expiry during quarantine or after activation from leaving traffic
-   authorized. These peers need a separately restored enforcement-capable panel
-   before they can be re-enabled; this prototype does not do that restoration.
-   Policy is only as recent as the snapshot (later bans are not magically known).
+3. Exclude disabled, archived and **removal-pending** peers using the panel DB
+   snapshot. Compare every expiry with the **destination host's current UTC
+   clock**, not the export time: already expired (`expires_at <= now`) peers
+   are dropped; future-expiry peers migrate normally, with their original
+   deadline unchanged. A malformed/naive expiry is dropped rather than guessed.
+   Decisions include the peer's name and expiry. A failed manual removal must
+   not resurrect its peer. Required columns `public_key`, `disabled`, `archived`,
+   `removal_pending`, `expires_at` must exist; incompatible schemas fail closed
+   with a missing-column diagnostic. NULL policy flags are excluded too.
+   Commented peers stay commented; profiles alone do not authorize traffic.
+   **Ongoing expiry enforcement after activation depends on restoring the panel
+   (or on the operator).** This prototype does not restore that enforcement or
+   install a background expiry timer, but it does not block future-expiry users
+   from migrating. Policy is only as recent as the snapshot: later bans or
+   deadline changes are not magically known.
 4. Reuse package/backend installation via an internal hook, preserving keys and
    protocol parameters. On BoringTun, reinstall and verify the pinned release.
    No initial client is generated. Temporary capability-probe keys are unrelated
@@ -134,10 +155,12 @@ restoring a usable panel.
    `--activate-state <same-archive>`**, not a manual `systemctl start/enable`.
    Activation decrypts/verifies the archive again, holds the lifecycle lock,
    verifies unchanged local receipts and **re-runs peer-policy reconciliation
-   immediately before startup**. It filters the current local config (removals
-   only), never rebuilds peers from the old snapshot, and preserves receipt-
-   verified generated host hooks. It then validates the backend/protocol,
-   applies the forwarding sysctls and starts the service. Only after that,
+   at activation and again after backend validation/sysctl application,
+   immediately before startup**. Peers whose expiry passed during quarantine
+   or validation are dropped then. It filters the current local config
+   (removals only), never rebuilds peers from the old snapshot, and preserves
+   receipt-verified generated host hooks. Import also refreshes expiry after
+   package installation before recording its receipt. Only after that,
    verify a real client handshake before DNS cutover. Do not run both servers
    as active authorities for the same identity.
 8. Activation does **not** enable the unit at boot. Use the same activation
@@ -172,7 +195,9 @@ are done automatically.
 `python3 tests/test-state-archive.py` checks literal parsing/injection, malicious
 members/links, checksums/schema/protocol/backend mismatch, exact file roundtrip,
 hook removal, snapshot CLI/env/default precedence, missing policy columns,
-failed manual removal, expired/future-expiry activation, no-resurrection reruns,
+failed manual removal, UTC manifest timestamp/clock sanity and old-archive warnings,
+per-peer inspection/dry-run counts, expired/future-expiry activation (including
+deadlines passing in quarantine or backend validation), no-resurrection reruns,
 dry-run, quarantine, rollback modes and idempotency using isolated host mocks.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.

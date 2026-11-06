@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 """Untrusted archive tests; no root, VPN, package manager or network required."""
 from contextlib import closing
+from datetime import datetime, timezone
 import base64
 import copy
 import hashlib
@@ -58,7 +59,7 @@ def state_fixture():
 
 
 def manifest(files):
-    return dict(schema_version=1, backend='kernel', protocol='2', interface='awg0',
+    return dict(schema_version=1, exported_at=datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'), backend='kernel', protocol='2', interface='awg0',
                 files={k: hashlib.sha256(v).hexdigest() for k, v in files.items()})
 
 
@@ -98,6 +99,112 @@ class ArchiveTests(unittest.TestCase):
             self.assertNotIn(KEY.encode(), result.stderr)
         return result
 
+    def add_policy(self, rows):
+        database = self.root / 'fixture-policy.sqlite'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, removal_pending INTEGER, expires_at TEXT, display_name TEXT)')
+            db.executemany('INSERT INTO peers VALUES(?,?,?,?,?,?)', rows)
+        self.files['web/database.sqlite'] = database.read_bytes()
+        make_tar(self.tar, self.files)
+
+    def test_manifest_timestamp_required_validated_and_future_clock_rejected(self):
+        for value in (None, 42, '2026-13-01T00:00:00Z', '2026-01-01T00:00:00',
+                      '2026-01-01T00:00:00+00:00', '2999-01-01T00:00:00Z'):
+            with self.subTest(value=value):
+                meta = manifest(self.files)
+                if value is None:
+                    del meta['exported_at']
+                else:
+                    meta['exported_at'] = value
+                make_tar(self.tar, self.files, meta)
+                destination = self.root / 'must-not-extract'
+                result = self.run_helper('unpack', self.tar, destination, ok=False)
+                self.assertFalse(destination.exists())
+                if value == '2999-01-01T00:00:00Z':
+                    self.assertIn(b'future relative to this host', result.stderr)
+                else:
+                    self.assertIn(b'exported_at', result.stderr)
+
+    def test_old_archive_warning_and_inspect_timestamp(self):
+        meta = manifest(self.files)
+        meta['exported_at'] = '2000-01-01T00:00:00Z'
+        make_tar(self.tar, self.files, meta)
+        result = self.run_helper('inspect')
+        report = json.loads(result.stdout)['peer_plan']
+        self.assertEqual(report['exported_at'], meta['exported_at'])
+        self.assertGreater(report['archive_age_seconds'], 7 * 86400)
+        self.assertIn(b'WARNING: Archive is older than 7 days', result.stderr)
+        self.assertTrue(report['warnings'])
+        self.assertEqual(report['counts'], {'migrate': 1, 'drop': 0})
+
+    def test_inspect_peer_decisions_include_names_expiry_and_counts(self):
+        past = base64.b64encode(b'D' * 32).decode()
+        for label, public, address in (('tablet', past, 3),):
+            self.files['vpn/server.conf'] += (f'\n### Client {label}\n[Peer]\nPublicKey = {public}\n'
+                                              f'AllowedIPs = 10.66.66.{address}/32\n').encode()
+        # An absent peer uses its DB display name; foreign control sequences are
+        # not emitted as terminal escapes or extra log lines.
+        pending = base64.b64encode(b'E' * 32).decode()
+        self.add_policy([(PEER, 0, 0, 0, '2999-01-01T00:00:00Z', None),
+                         (past, 0, 0, 0, '2000-01-01T01:00:00+01:00', None),
+                         (pending, 0, 0, 1, None, 'removing\n\x1b[31m')])
+        result = self.run_helper('inspect')
+        view = json.loads(result.stdout)
+        report = view['peer_plan']
+        self.assertEqual(report['exported_at'], view['exported_at'])
+        self.assertEqual(report['counts'], {'migrate': 1, 'drop': 2})
+        peers = {peer['name']: peer for peer in report['peers']}
+        self.assertEqual(peers['phone']['decision'], 'migrate')
+        self.assertEqual(peers['phone']['reason'], 'future_expiry')
+        self.assertEqual(peers['phone']['expires_at'], '2999-01-01T00:00:00Z')
+        self.assertEqual(peers['tablet']['decision'], 'drop')
+        self.assertEqual(peers['tablet']['reason'], 'expired')
+        self.assertEqual(peers['tablet']['expires_at'], '2000-01-01T00:00:00Z')
+        self.assertEqual(peers['removing[31m']['reason'], 'removal_pending')
+        for secret in (KEY, PUB, PEER):
+            self.assertNotIn(secret.encode(), result.stdout + result.stderr)
+        self.assertNotIn(b'\x1b', result.stdout)
+        destination = self.root / 'dest'
+        self.run_helper('unpack', self.tar, destination)
+        prepared = json.loads(self.run_helper('prepare', destination).stdout)
+        self.assertEqual(prepared['counts'], report['counts'])
+        self.assertIn(PEER, (destination / 'peers.conf').read_text())
+        self.assertNotIn(past, (destination / 'peers.conf').read_text())
+
+    def test_expiry_passing_between_import_and_activation_is_dropped(self):
+        clock = self.root / 'clock'
+        clock.write_text('2001-01-01T00:00:10Z')
+        shim = """
+class TestDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls.fromisoformat(Path(CLOCK_PATH).read_text().replace('Z', '+00:00')).astimezone(tz)
+datetime = TestDatetime
+""".replace('CLOCK_PATH', repr(str(clock)))
+        self.helper.write_text(CODE.replace('try:\n    main()', shim + '\ntry:\n    main()'))
+        self.add_policy([(PEER, 0, 0, 0, '2001-01-01T00:00:20Z', None)])
+        meta = manifest(self.files)
+        meta['exported_at'] = '2001-01-01T00:00:00Z'
+        make_tar(self.tar, self.files, meta)
+        destination = self.root / 'dest'
+        self.run_helper('unpack', self.tar, destination)
+        imported = json.loads(self.run_helper('prepare', destination).stdout)
+        self.assertEqual(imported['counts'], {'migrate': 1, 'drop': 0})
+        self.assertTrue(any('ongoing expiry enforcement' in warning for warning in imported['warnings']))
+        local = self.root / 'current.conf'
+        local.write_bytes((destination / 'interface.conf').read_bytes() + (destination / 'peers.conf').read_bytes())
+        self.assertIn(PEER, local.read_text())
+        # No real sleep and no production time override. Equality is expired.
+        clock.write_text('2001-01-01T00:00:20Z')
+        candidate = self.root / 'activate.conf'
+        activated = json.loads(self.run_helper('reconcile', local, destination, candidate).stdout)
+        self.assertEqual(activated['counts'], {'migrate': 0, 'drop': 1})
+        self.assertEqual(activated['exported_at'], imported['exported_at'])
+        self.assertEqual(activated['peers'][0]['reason'], 'expired')
+        self.assertEqual(activated['peers'][0]['name'], 'phone')
+        self.assertEqual(activated['peers'][0]['expires_at'], '2001-01-01T00:00:20Z')
+        self.assertNotIn(PEER, candidate.read_text())
+
     def test_roundtrip_exact_files(self):
         stage = self.root / 'stage'
         for name, data in self.files.items():
@@ -114,6 +221,9 @@ class ArchiveTests(unittest.TestCase):
         view = self.run_helper('inspect').stdout
         self.assertNotIn(KEY.encode(), view)
         self.assertEqual(json.loads(view)['schema_version'], 1)
+        stamp = json.loads(view)['exported_at']
+        self.assertRegex(stamp, r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+        self.assertLessEqual(datetime.fromisoformat(stamp.replace('Z', '+00:00')), datetime.now(timezone.utc))
 
     def test_params_literal_allowlist(self):
         path = self.root / 'params'
@@ -198,7 +308,7 @@ class ArchiveTests(unittest.TestCase):
     def test_disabled_archived_expired_and_invalid_expiry_removed(self):
         for disabled, archived, expiry, removed in ((1, 0, None, True), (0, 1, None, True),
                 (0, 0, '2000-01-01T00:00:00Z', True), (0, 0, 'invalid', True),
-                (0, 0, '2999-01-01T00:00:00Z', True), (0, 0, None, False)):
+                (0, 0, '2999-01-01T00:00:00Z', False), (0, 0, None, False)):
             with self.subTest(disabled=disabled, archived=archived, expiry=expiry):
                 dest = self.root / f'dest-{disabled}-{archived}-{expiry}'
                 self.run_helper('unpack', self.tar, dest)
@@ -389,6 +499,11 @@ awgStateExport "$ROOT/export-test.tar.gz" "$ROOT/work"
 
     def test_import_plan_quarantine_idempotency_and_rollback(self):
         """Drive CLI orchestration, using host-command mocks confined to a temp root."""
+        past = base64.b64encode(b'D' * 32).decode()
+        self.files['vpn/server.conf'] += (f'\n### Client expired\n[Peer]\nPublicKey = {past}\n'
+                                          'AllowedIPs = 10.66.66.3/32\n').encode()
+        self.add_policy([(PEER, 0, 0, 0, '2999-01-01T00:00:00Z', None),
+                         (past, 0, 0, 0, '2000-01-01T00:00:00Z', None)])
         shell = r'''
 set -uo pipefail
 source "$1"
@@ -431,7 +546,7 @@ installAmneziaWG() {
     mkdir -p "$AWG_SYSTEMD_UNIT_DIR/awg-quick@awg0.service.d"
     printf 'regenerated unit\n' >"$AWG_SYSTEMD_UNIT_DIR/awg-quick@awg0.service.d/override.conf"
 }
-awgStateCommand --import-state "$ROOT/state.tar.gz" --dry-run || exit 10
+awgStateCommand --import-state "$ROOT/state.tar.gz" --dry-run >"$ROOT/dry-run.out" || exit 10
 [[ ! -e "$AMNEZIAWG_DIR" && ! -e "$AWG_STATE_JOURNAL_DIR" && ! -e "$ROOT/install.log" ]] || exit 11
 [[ "$(<"$AWG_SYSCTL_FILE")" == 'original sysctl' ]] || exit 12
 mkdir -m 755 "$AMNEZIAWG_DIR"
@@ -455,12 +570,21 @@ awgStateCommand --import-state "$ROOT/state.tar.gz"
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
         self.assertNotIn(KEY.encode(), result.stdout + result.stderr)
         self.assertIn('rollback', ''.join(p.read_text() for p in (self.root / 'journals').glob('*/steps')))
+        plan, _ = json.JSONDecoder().raw_decode((self.root / 'dry-run.out').read_text())
+        self.assertEqual(plan['counts'], {'migrate': 1, 'drop': 1})
+        self.assertRegex(plan['exported_at'], r'Z$')
+        decisions = {peer['name']: peer for peer in plan['peers']}
+        self.assertEqual(decisions['phone']['decision'], 'migrate')
+        self.assertEqual(decisions['expired']['decision'], 'drop')
+        self.assertEqual(decisions['expired']['expires_at'], '2000-01-01T00:00:00Z')
+        self.assertIn(PEER, (self.root / 'target/awg0.conf').read_text())
+        self.assertNotIn(past, (self.root / 'target/awg0.conf').read_text())
 
     def test_activation_and_rerun_reconcile_legacy_receipts_without_resurrection(self):
         """A pre-fix receipt may still authorize expiring/removal-pending peers.
 
         Test both a deadline already crossed during quarantine and one still in
-        the future. Neither may reach startup while enforcement is unavailable.
+        the future. Future-expiry peers must migrate; expired ones must not start.
         """
         pending = base64.b64encode(b'D' * 32).decode()
         permanent = base64.b64encode(b'E' * 32).decode()
@@ -468,6 +592,7 @@ awgStateCommand --import-state "$ROOT/state.tar.gz"
         for name, mode, expiry in (
                 ('activation-expired', '--activate-state', '2000-01-01T00:00:00Z'),
                 ('activation-future', '--activate-state', '2999-01-01T00:00:00Z'),
+                ('activation-crossed', '--activate-state', '2001-01-01T00:00:20Z'),
                 ('reimport-future', '--import-state', '2999-01-01T00:00:00Z'),
                 ('dry-run', '--dry-run', '2999-01-01T00:00:00Z'),
                 ('bad-schema', '--activate-state', '2999-01-01T00:00:00Z')):
@@ -488,7 +613,22 @@ awgStateCommand --import-state "$ROOT/state.tar.gz"
                         db.executemany('INSERT INTO peers VALUES(?,0,0,?,?)',
                                        [(PEER, expiry, 0), (pending, None, 1), (permanent, None, 0), (removed, None, 0)])
                 files['web/database.sqlite'] = db_path.read_bytes()
-                make_tar(root / 'state.tar.gz', files)
+                meta = manifest(files)
+                if name == 'activation-crossed':
+                    meta['exported_at'] = '2001-01-01T00:00:00Z'
+                    clock = root / 'clock'
+                    clock.write_text('2001-01-01T00:00:10Z')
+                    # Inject a deterministic clock into TEST source only. There
+                    # is intentionally no production clock/environment override.
+                    shim = """
+class TestDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls.fromisoformat(Path(CLOCK_PATH).read_text().replace('Z', '+00:00')).astimezone(tz)
+datetime = TestDatetime
+""".replace('CLOCK_PATH', repr(str(clock)))
+                    (root / 'helper.py').write_text(CODE.replace('try:\n    main()', shim + '\ntry:\n    main()'))
+                make_tar(root / 'state.tar.gz', files, meta)
                 (root / 'original-params').write_bytes(files['vpn/params'])
                 # This local, receipt-verified config models the old importer,
                 # with generated hooks, and one peer already removed locally.
@@ -501,6 +641,9 @@ set -uo pipefail
 source "$1"
 ROOT="$2"
 MODE="$3"
+if [[ -f "$ROOT/clock" ]]; then
+    awgStateArchive() { python3 "$ROOT/helper.py" "${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}" "$@"; }
+fi
 AMNEZIAWG_DIR="$ROOT/target"
 AWG_STATE_JOURNAL_DIR="$ROOT/journals"
 AWG_SYSCTL_FILE="$ROOT/sysctl.conf"
@@ -526,7 +669,11 @@ releaseClientLifecycleLock() { return 0; }
 age() { cp -- "$4" "$3"; }
 installAmneziaWG() { echo 'must not reinstall' >&2; return 99; }
 ensureAwgBackendReady() { [[ "$1" == 0 ]]; }
-validateStagedAwgConfigs() { printf 'validate\n' >>"$ROOT/events"; }
+validateStagedAwgConfigs() {
+    printf 'validate\n' >>"$ROOT/events"
+    # Expiry passes AFTER the initial activation check, during validation.
+    [[ ! -f "$ROOT/clock" ]] || printf '2001-01-01T00:00:30Z' >"$ROOT/clock"
+}
 sysctl() { printf 'sysctl\n' >>"$ROOT/events"; }
 systemctl() {
     case "$1" in
@@ -558,12 +705,17 @@ sha256sum -c --status "$JOURNAL/receipt" || exit 14
                     self.assertFalse((root / 'events').exists())
                     continue
                 clean = (root / 'target/awg0.conf').read_text()
-                self.assertNotIn(PEER, clean)
+                self.assertEqual(PEER in clean, expiry.startswith('2999'))
                 self.assertNotIn(pending, clean)
                 self.assertNotIn(removed, clean)  # Never rebuild peers from the snapshot.
                 self.assertIn(permanent, clean)
                 self.assertIn('PostUp = echo local-generated-hook', clean)
-                self.assertIn('ALL expiry-bearing peers', result.stdout.decode())
+                self.assertIn('future-expiry peers migrate', result.stdout.decode())
+                if name == 'activation-crossed':
+                    self.assertIn(b'"reason": "future_expiry"', result.stdout)
+                    self.assertIn(b'"reason": "expired"', result.stdout)
+                    self.assertIn(b'"name": "phone"', result.stdout)
+                    self.assertIn(b'"expires_at": "2001-01-01T00:00:20Z"', result.stdout)
                 if mode == '--activate-state':
                     self.assertEqual((root / 'at-start.conf').read_text(), clean)
                     self.assertEqual((root / 'events').read_text(), 'validate\nsysctl\nstart\n')

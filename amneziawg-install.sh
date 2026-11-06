@@ -3349,6 +3349,8 @@ function awgStateArchive() {
 	python3 - "${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}" "$@" <<'AWG_STATE_PY'
 # Standard-library only. This code is embedded so a downloaded installer stays standalone.
 from contextlib import closing
+from datetime import datetime, timezone
+from tempfile import TemporaryDirectory
 import base64
 import hashlib
 import io
@@ -3538,6 +3540,8 @@ def unique_json(pairs):
 
 
 def validate_manifest(manifest, files):
+    require(type(manifest) is dict, 'invalid manifest')
+    export_time(manifest, utc_now())
     require(type(manifest.get('schema_version')) is int and manifest['schema_version'] == 1,
             'unsupported schema')
     require(type(manifest.get('files')) is dict and set(manifest['files']) == set(files),
@@ -3578,12 +3582,57 @@ class StatePolicyError(ValueError):
     """Only fixed diagnostics or allowlisted column names, never foreign values."""
 
 
-def blocked_peers(root):
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def utc_text(value):
+    return value.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def parse_expiry(value):
+    # Panel expiration_from_days writes RFC3339. Never guess a timezone for a
+    # malformed/naive value; such a peer is dropped with an invalid-expiry reason.
+    if not isinstance(value, str) or not re.fullmatch(
+            r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})', value):
+        raise ValueError('invalid expiry')
+    return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(timezone.utc)
+
+
+def export_time(manifest, now):
+    value = manifest.get('exported_at')
+    if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', value):
+        raise StatePolicyError('manifest exported_at must be UTC ISO 8601 (YYYY-MM-DDTHH:MM:SSZ); re-export timestamp-less prototype backups')
+    try:
+        exported = parse_expiry(value)
+    except ValueError:
+        raise StatePolicyError('manifest exported_at is not a valid UTC timestamp') from None
+    if exported > now:
+        raise StatePolicyError('archive export timestamp is in the future relative to this host; check both clocks before importing')
+    return exported
+
+
+def config_peer_names(data):
+    peers, pending, current, in_peer = {}, None, None, False
+    for line in data.decode('utf-8').splitlines():
+        stripped = line.strip()
+        marker = re.fullmatch(r'### Client ([A-Za-z0-9_-]{1,15})', stripped)
+        if marker:
+            pending = marker[1]
+        if stripped in ('[Interface]', '[Peer]'):
+            in_peer = stripped == '[Peer]'
+            current, pending = pending, None
+        if in_peer and re.match(r'^PublicKey\s*=', stripped):
+            public = stripped.partition('=')[2].strip()
+            require(key(public), 'invalid peer identity')
+            peers[public] = current
+    return peers
+
+
+def peer_policy(root):
     db_path = root / 'web/database.sqlite'
     if not db_path.exists():
-        return set()
-    # No panel is running to enforce future expiry in this MVP: ANY expiry is
-    # excluded, not merely deadlines already in the past. No time-of-check gap.
+        return {}
     with closing(sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True)) as db:
         db.execute('PRAGMA trusted_schema=OFF')
         if db.execute("SELECT type FROM sqlite_master WHERE name='peers'").fetchone() != ('table',):
@@ -3593,12 +3642,75 @@ def blocked_peers(root):
         if not required <= columns:
             raise StatePolicyError('panel peer policy schema missing required columns: ' +
                                    ', '.join(sorted(required - columns)))
-        blocked = {row[0] for row in db.execute(
-            "SELECT public_key FROM peers WHERE disabled IS NOT 0 OR archived IS NOT 0 "
-            "OR removal_pending IS NOT 0 OR expires_at IS NOT NULL")}
-        if any(not isinstance(public, str) or not key(public) for public in blocked):
-            raise StatePolicyError('panel peer policy contains an invalid public key')
-        return blocked
+        optional = [name for name in ('managed_client_name', 'friendly_name', 'display_name') if name in columns]
+        names = ['public_key', 'disabled', 'archived', 'removal_pending', 'expires_at'] + optional
+        result = {}
+        # Identifiers come only from the hardcoded lists above, never foreign SQL.
+        for row in db.execute('SELECT ' + ','.join(names) + ' FROM peers'):
+            item = dict(zip(names, row))
+            public = item['public_key']
+            if not isinstance(public, str) or not key(public) or public in result:
+                raise StatePolicyError('panel peer policy contains an invalid/duplicate public key')
+            result[public] = item
+        return result
+
+
+def migration_plan(manifest, files, data, policy, phase):
+    now = utc_now()
+    exported = export_time(manifest, now)
+    active = config_peer_names(data)
+    archived = config_peer_names(files['vpn/server.conf'])
+    blocked, decisions = set(), []
+    for public in sorted(set(active) | set(archived) | set(policy)):
+        item = policy.get(public, {})
+        label = (active.get(public) or archived.get(public) or item.get('managed_client_name') or
+                 item.get('friendly_name') or item.get('display_name') or 'peer-' + hashlib.sha256(public.encode()).hexdigest()[:12])
+        # Names are data, not terminal control sequences; JSON escapes the output.
+        label = ''.join(c for c in str(label)[:128] if c.isprintable())
+        expiry, expiry_text, invalid = item.get('expires_at'), None, False
+        if expiry is not None:
+            try:
+                expiry = parse_expiry(expiry)
+                expiry_text = utc_text(expiry)
+            except (ValueError, TypeError):
+                invalid, expiry_text = True, 'invalid'
+        reason = None
+        for flag in ('disabled', 'archived', 'removal_pending'):
+            if item and item.get(flag) != 0:  # NULL/unknown flags fail closed too.
+                reason = flag
+                break
+        if reason is None and invalid:
+            reason = 'invalid_expiry'
+        if reason is None and expiry is not None and expiry <= now:
+            reason = 'expired'
+        if reason is None and public not in active:
+            reason = 'not_present'  # Reconciliation NEVER resurrects a removed peer.
+        decision = 'drop' if reason else 'migrate'
+        if reason:
+            blocked.add(public)
+        decisions.append(dict(name=label, peer_id=hashlib.sha256(public.encode()).hexdigest()[:12],
+                              expires_at=expiry_text, decision=decision,
+                              reason=reason or ('future_expiry' if expiry is not None else 'no_expiry')))
+    age = int((now - exported).total_seconds())
+    warnings = ['Archive is older than 7 days; policy and user inventory may be stale.'] if age > 7 * 86400 else []
+    if any(item['reason'] == 'future_expiry' and item['decision'] == 'migrate' for item in decisions):
+        warnings.append('Future-expiry peers migrate. After activation, ongoing expiry enforcement requires the restored panel or operator.')
+    report = dict(exported_at=manifest['exported_at'], evaluated_at_utc=utc_text(now),
+                  archive_age_seconds=age, phase=phase, warnings=warnings, peers=decisions,
+                  counts={name: sum(item['decision'] == name for item in decisions) for name in ('migrate', 'drop')})
+    return blocked, report
+
+
+def emit_plan(report):
+    for warning in report['warnings']:
+        print('WARNING: ' + warning, file=sys.stderr)
+    print(json.dumps(report, sort_keys=True, indent=2))
+
+
+def staged_plan(root, data, phase):
+    manifest = json.loads((root / 'manifest.json').read_bytes(), object_pairs_hook=unique_json)
+    files = {'vpn/server.conf': (root / 'vpn/server.conf').read_bytes()}
+    return migration_plan(manifest, files, data, peer_policy(root), phase)
 
 
 def main():
@@ -3619,7 +3731,7 @@ def main():
                 files[name] = file.read_bytes()
                 require(sum(map(len, files.values())) <= MAX_TOTAL, 'oversized staging tree')
         state = params(files['vpn/params'])
-        manifest = dict(schema_version=1, backend=state['AWG_BACKEND'],
+        manifest = dict(schema_version=1, exported_at=utc_text(utc_now().replace(microsecond=0)), backend=state['AWG_BACKEND'],
                         protocol=state['AWG_PROTOCOL_VERSION'], interface=state['SERVER_AWG_NIC'],
                         versions={'installer_format': 'state-v1', 'installer_sha256': args[2] if len(args) > 2 else 'unknown', 'awg_tools': args[1],
                                   'panel': 'not-probed'},
@@ -3635,32 +3747,42 @@ def main():
                 archive.addfile(member, io.BytesIO(data))
     elif mode in ('verify', 'unpack', 'inspect'):
         manifest, files, state = read_archive(path)
-        if mode == 'inspect':
-            print(json.dumps(manifest, sort_keys=True, indent=2))
-        if mode == 'unpack':
-            # All names/types/sizes/checksums are validated BEFORE the first write.
-            root = Path(args[0])
-            root.mkdir(mode=0o700)
-            for name, data in files.items():
-                dest = root / name
-                dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                with dest.open('xb') as handle:
-                    handle.write(data)
-                dest.chmod(0o600)
-            (root / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
+        if mode in ('unpack', 'inspect'):
+            with TemporaryDirectory(prefix='awg-state-inspect-') as scratch:
+                # All names/types/sizes/checksums are validated BEFORE the first write.
+                root = Path(args[0]) if args else Path(scratch) / 'inspect'
+                root.mkdir(mode=0o700)
+                for name, data in files.items():
+                    dest = root / name
+                    dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    with dest.open('xb') as handle:
+                        handle.write(data)
+                    dest.chmod(0o600)
+                (root / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
+                (root / 'manifest.json').chmod(0o600)
+                if mode == 'inspect':
+                    _, report = staged_plan(root, files['vpn/server.conf'], 'inspect')
+                    for warning in report['warnings']:
+                        print('WARNING: ' + warning, file=sys.stderr)
+                    print(json.dumps(dict(manifest, peer_plan=report), sort_keys=True, indent=2))
     elif mode == 'reconcile':
-        # The Bash caller verifies the receipt before providing this local file.
+        # Bash provides only freshly generated transaction state or a local file
+        # whose receipt it verified before reconciliation.
         # Filter ONLY the current config, never rebuild peers from an old snapshot.
         root = Path(args[0])
         state = params((root / 'vpn/params').read_bytes())
-        clean = config(Path(path).read_bytes(), state, blocked_peers(root), preserve_hooks=True)
+        data = Path(path).read_bytes()
+        blocked, report = staged_plan(root, data, 'reconcile')
+        clean = config(data, state, blocked, preserve_hooks=True)
+        emit_plan(report)
         with Path(args[1]).open('xb') as handle:
             handle.write(clean)
     elif mode == 'prepare':
         root = Path(path)
         state = params((root / 'vpn/params').read_bytes())
-        blocked = blocked_peers(root)
         data = (root / 'vpn/server.conf').read_bytes()
+        blocked, report = staged_plan(root, data, 'import')
+        emit_plan(report)
         # Hooks must remain in Interface, not be appended below the last Peer.
         clean = config(data, state, blocked).decode()
         match = re.search(r'(?m)^\s*\[Peer\]\s*$', clean)
@@ -3957,6 +4079,9 @@ function awgStateImportTransaction() (
 	ensureAwgBackendReady 0
 	mkdir -p "${STAGE}/validate"
 	validateStagedAwgConfigs "${STAGE}/validate" --label imported-server "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	# Installation can take minutes; refresh expiration at import completion too.
+	awgStateArchive reconcile "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" "${STAGE}" "${STAGE}/post-install.conf"
+	replaceFileExactly "${STAGE}/post-install.conf" "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" 600
 	printf '%s\n' restore-complete-quarantined >>"${JOURNAL}/steps"
 	# Preserve recovery-only panel/proxy files privately. Never source env.conf,
 	# start the panel, replay the mail queue or expose a proxy listener.
@@ -4002,7 +4127,7 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <dry-run>
 		return 1
 	fi
 	awgStateArchive reconcile "${SERVER_AWG_CONF}" "${STAGE}" "${WORK}/reconciled.conf" || return 1
-	echo 'Policy: exclude disabled, archived, removal-pending and ALL expiry-bearing peers (including future expiry); no live panel enforcement exists yet.'
+	echo 'Policy: future-expiry peers migrate; expired/disabled/archived/removal-pending peers are excluded. Ongoing expiry enforcement needs the restored panel or operator.'
 	if [[ "${DRY}" == --dry-run ]]; then
 		echo 'Plan: re-reconcile the unchanged import without reinstalling or activating.'
 		return 0
@@ -4013,6 +4138,12 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <dry-run>
 		ensureAwgBackendReady 0 || return 1
 		mkdir -p "${WORK}/validate" || return 1
 		validateStagedAwgConfigs "${WORK}/validate" --label activation-server "${WORK}/reconciled.conf" || return 1
+		awgStateTrustedPath "${AWG_SYSCTL_FILE}" || return 1
+		sysctl -p "${AWG_SYSCTL_FILE}" || return 1
+		# Backend validation may take time: evaluate expiry again immediately
+		# before publishing the final candidate and starting the interface.
+		awgStateArchive reconcile "${SERVER_AWG_CONF}" "${STAGE}" "${WORK}/at-start.conf" || return 1
+		mv -- "${WORK}/at-start.conf" "${WORK}/reconciled.conf" || return 1
 	fi
 	if ! cmp -s -- "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}"; then
 		replaceFileExactly "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}" 600 || return 1
@@ -4020,8 +4151,6 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <dry-run>
 	awgStateWriteReceipt "${JOURNAL}" "${WORK}/receipt" || return 1
 	printf '%s\n' reconciled >>"${JOURNAL}/steps" || return 1
 	if [[ "${MODE}" == --activate-state ]]; then
-		awgStateTrustedPath "${AWG_SYSCTL_FILE}" || return 1
-		sysctl -p "${AWG_SYSCTL_FILE}" || return 1
 		if ! systemctl start "awg-quick@${SERVER_AWG_NIC}"; then
 			systemctl stop "awg-quick@${SERVER_AWG_NIC}" || true
 			printf '%s\n' activation-failed >>"${JOURNAL}/steps"
@@ -4060,7 +4189,7 @@ function awgStateCommand() (
 	# Bound decrypted staging even before inspecting the tar headers.
 	(ulimit -f 614400; age --decrypt --output "${WORK}/state.tar.gz" "${ARCHIVE}") || exit 1
 	if [[ "${MODE}" == --inspect-state ]]; then
-		awgStateArchive inspect "${WORK}/state.tar.gz"
+		awgStateArchive inspect "${WORK}/state.tar.gz" "${WORK}/inspect"
 		exit $?
 	fi
 	awgStateArchive unpack "${WORK}/state.tar.gz" "${WORK}/stage" || exit 1
@@ -4088,7 +4217,7 @@ function awgStateCommand() (
 	awgStateArchive prepare "${WORK}/stage" || exit 1
 	SERVER_PUB_NIC="${NIC}"
 	printf 'Plan: install %s backend, AWG %s, interface %s, UDP %s, uplink %s.\n' "${AWG_BACKEND}" "${AWG_PROTOCOL_VERSION}" "${SERVER_AWG_NIC}" "${SERVER_PORT}" "${NIC}"
-	echo 'Restore original keys/profiles; replace host hooks; exclude disabled/archived/removal-pending and ALL expiry-bearing peers (including future expiry).'
+	echo 'Restore original keys/profiles; replace host hooks; migrate future-expiry peers and exclude already-expired/disabled/archived/removal-pending peers.'
 	echo 'Leave VPN stopped/disabled. Panel/mail/proxy files are recovery-only (automatic restore TODO).'
 	[[ "${DRY}" != --dry-run ]] || exit 0
 	acquireClientLifecycleLock || exit 1
