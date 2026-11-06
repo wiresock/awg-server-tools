@@ -172,8 +172,12 @@ restoring a usable panel.
    local VPN without an archive, passphrase or migration-script invocation.
    Normal `systemctl` management and panel/operator configuration changes are
    supported after finalization. Subsequent archive import/activation calls
-   are no-ops for that finalized journal: they do not replay stale peer policy,
-   validate old receipts, reinstall, or reject an active/enabled unit.
+   are no-ops **only when the trusted local params/server config still exist
+   and match the interface and server keys in the manifest-verified archived
+   params**. Missing files after uninstall, malformed params or a different
+   identity fail explicitly, without replaying policy or restoring anything.
+   An intact finalized installation may be active/enabled and have ordinary
+   port/address/peer edits; old receipts/policy are not replayed.
    Ongoing expiry enforcement remains the panel/operator's responsibility.
    Without the flag, activation is temporary testing only and leaves boot
    disabled. Stop/disable the test VPN, then repeat activation with
@@ -217,6 +221,47 @@ after purge. Repeated purge is safe. Forced purge of an unfinalized journal
 removes it entirely and abandons that import's recovery/reconciliation path;
 it does not stop the VPN or remove the installed configuration.
 
+### Restoring the same archive after uninstall (explicit reset)
+
+Uninstall **retains** migration journals and finalized tombstones and prints a
+reminder. Automatically deleting them would silently reopen old policy replay
+and erase recovery/forensic data. A tombstone alone is not evidence of a live
+installation: a later import/activation checks local params, interface name,
+server public/private identity and the server config's `[Interface]` private key.
+Missing/unsafe files or different identity return non-zero with a recovery hint.
+The guard does not compare mutable peer lists, ports or old receipt hashes, so
+ordinary post-finalization management still works without stale policy replay.
+
+For intentional recovery after **fully uninstalling/removing any conflicting
+installation**, first preserve the encrypted archive and review its age/policy:
+
+```sh
+# Replace MANIFEST_SHA256 with the digest from the retained journal path.
+bash amneziawg-install.sh --reset-state-journal MANIFEST_SHA256 --confirm-policy-replay
+SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --import-state /root/server.awgx --dry-run
+SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --import-state /root/server.awgx
+# Fence the old server, review the fresh import, then finalize again:
+SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --activate-state /root/server.awgx --enable-at-boot
+```
+
+Reset is distinct from purge: it **removes that archive's finalized tombstone
+and journal**, deliberately permitting a fresh import. It requires explicit
+`--confirm-policy-replay`, a valid finalized journal/digest, no local params or
+server `.conf` files, and a queryable inactive/failed, non-enabled VPN unit.
+Unknown service state, remaining installation files, unsafe paths or unexpected
+journal entries fail closed. It never uninstalls/stops a service or overwrites a
+live installation; normal fresh-import preflight still applies afterward.
+No archive/passphrase or age/python/sqlite dependency is needed for reset.
+
+**Warning:** this is explicit old-snapshot replay, not a continuation of the
+finalized installation. Expiry is evaluated against the **current host clock**;
+expired, disabled, removal-pending and absent-from-panel peers are excluded.
+Local bans/removals or deadline changes made after export are not in the backup
+and may be lost; previously locally removed peers can return if its policy
+still permits them. Inspect/dry-run and review those decisions before importing.
+The new import starts quarantined and must be finalized anew. Purge alone never
+removes a finalized tombstone; there is no automatic reset on uninstall.
+
 ### Temporary staging and streaming encryption
 
 Export streams gzip tar bytes **directly into age through a pipe**; no plaintext
@@ -251,7 +296,10 @@ dry-run, quarantine, rollback modes and idempotency using isolated host mocks.
 It also covers authoritative panel membership, finalization/enable failure and
 a simulated enabled-unit reboot (not a real host reboot), post-finalization
 operator edits/purge, real-clock expiry crossing without mocking the comparison,
-RAM staging, streaming export, and producer/consumer failure cleanup.
+RAM staging, streaming export, and producer/consumer failure cleanup. Finalized
+identity tests cover missing params/config after simulated uninstall, different
+public/private keys or interface, normal mutable edits, reset safety and a fresh
+quarantined import after explicit reset.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.
 CI installs age and runs this suite.

@@ -3717,12 +3717,41 @@ def staged_plan(root, data, phase):
     return migration_plan(manifest, files, data, peer_policy(root), phase)
 
 
+def local_identity_matches(expected_path, params_path, config_path):
+    # No source/eval and no backend tool needed after uninstall. Compare identity
+    # only: normal post-finalization port/address/peer/hook edits remain allowed.
+    try:
+        expected = params(Path(expected_path).read_bytes())
+        local = params(Path(params_path).read_bytes())
+        for name in ('SERVER_AWG_NIC', 'SERVER_PUB_KEY', 'SERVER_PRIV_KEY'):
+            require(local[name] == expected[name], 'identity mismatch')
+        text = Path(config_path).read_text(encoding='utf-8')
+        require('\x00' not in text and '\r' not in text, 'invalid config encoding')
+        section, interfaces, keys = None, 0, []
+        for line in text.splitlines():
+            line = line.split('#', 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith('['):
+                section = line
+                interfaces += line == '[Interface]'
+            elif section == '[Interface]':
+                name, sep, value = line.partition('=')
+                if sep and name.strip() == 'PrivateKey':
+                    keys.append(value.strip())
+        require(interfaces == 1 and keys == [expected['SERVER_PRIV_KEY']], 'config identity mismatch')
+    except (ValueError, OSError, UnicodeError, KeyError, TypeError):
+        raise StatePolicyError('finalized local params/server config are invalid or belong to a different server identity; refusing stale archive replay') from None
+
+
 def main():
     mode, path, *args = sys.argv[2:]
     if mode == 'params':
         state = params(Path(path).read_bytes())
         for name, value in state.items():
             sys.stdout.buffer.write(name.encode() + b'\0' + value.encode() + b'\0')
+    elif mode == 'local-identity':
+        local_identity_matches(path, args[0], args[1])
     elif mode == 'pack':
         root = Path(path)
         files = {}
@@ -4142,10 +4171,10 @@ function awgStateWorkDir() {
 	mktemp -d /tmp/awg-state.XXXXXXXX
 }
 
-function awgStatePurgeJournal() ( # <manifest-sha256> [--force]
+function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized]
 	set +x
 	umask 077
-	local DIGEST="$1" FORCE="${2:-}" JOURNAL ENTRY FINALIZED=0
+	local DIGEST="$1" OPTION="${2:-}" JOURNAL ENTRY FINALIZED=0 INTERFACE ACTIVE UNIT_STATE
 	isRoot || exit 1
 	[[ "${DIGEST}" =~ ^[0-9a-f]{64}$ ]] || exit 1
 	JOURNAL="${AWG_STATE_JOURNAL_DIR}/${DIGEST}"
@@ -4155,9 +4184,32 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force]
 	if [[ -f "${JOURNAL}/finalized" && ! -L "${JOURNAL}/finalized" ]] &&
 		awgStateTrustedPath "${JOURNAL}/finalized" && [[ -s "${JOURNAL}/finalized" ]]; then
 		FINALIZED=1
-	elif [[ "${FORCE}" != --force ]]; then
+	elif [[ "${OPTION}" != --force ]]; then
 		echo 'ERROR: journal is not finalized; --force explicitly abandons quarantine/rollback recovery.' >&2
 		exit 1
+	fi
+	if [[ "${OPTION}" == --reset-finalized ]]; then
+		INTERFACE="$(<"${JOURNAL}/finalized")"
+		[[ "${INTERFACE}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}$ ]] || { echo 'ERROR: invalid finalized interface marker.' >&2; exit 1; }
+		if [[ -e "${AMNEZIAWG_DIR}/params" || -L "${AMNEZIAWG_DIR}/params" ]]; then
+			echo 'ERROR: finish uninstalling the local installation before resetting its finalized journal.' >&2
+			exit 1
+		fi
+		for ENTRY in "${AMNEZIAWG_DIR}/"*.conf; do
+			if [[ -e "${ENTRY}" || -L "${ENTRY}" ]]; then
+				echo 'ERROR: local server configuration remains; reset never removes or overwrites an installation.' >&2
+				exit 1
+			fi
+		done
+		# Unknown service state is NOT proof that an old interface is stopped.
+		if ! ACTIVE="$(systemctl show --property=ActiveState --value "awg-quick@${INTERFACE}.service")" ||
+			! UNIT_STATE="$(systemctl show --property=UnitFileState --value "awg-quick@${INTERFACE}.service")"; then
+			echo 'ERROR: cannot establish VPN service state; refusing journal reset.' >&2
+			exit 1
+		fi
+		case "${ACTIVE}" in inactive|failed) ;; *) echo 'ERROR: stop the VPN before journal reset.' >&2; exit 1 ;; esac
+		case "${UNIT_STATE}" in ''|disabled|not-found|masked|masked-runtime) ;; *) echo 'ERROR: disable the VPN before journal reset.' >&2; exit 1 ;; esac
+		echo 'WARNING: resetting finalization explicitly permits fresh archive import. Expired/disabled/removal-pending policy will be re-evaluated against the current host clock; this can differ from the original import. Post-export local bans/removals may be lost.' >&2
 	fi
 	# Fail closed on unexpected top-level entries. rm never follows symlinks;
 	# --one-file-system also prevents descending into a nested mounted filesystem.
@@ -4171,11 +4223,15 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force]
 	for ENTRY in before recovery receipt nic steps; do
 		rm -rf --one-file-system -- "${JOURNAL:?}/${ENTRY:?}" || exit 1
 	done
-	if (( FINALIZED )); then
+	if (( FINALIZED )) && [[ "${OPTION}" != --reset-finalized ]]; then
 		echo 'Purged plaintext recovery/rollback material; retained only the non-secret finalized tombstone.'
 	else
 		rm -f -- "${JOURNAL}/finalized" && rmdir -- "${JOURNAL}" || exit 1
-		echo 'Purged unfinalized journal by explicit force; this archive can no longer reconcile/activate that import.'
+		if [[ "${OPTION}" == --reset-finalized ]]; then
+			echo 'Finalized journal reset after uninstall. Fresh import may proceed through normal preflight and current-clock policy checks.'
+		else
+			echo 'Purged unfinalized journal by explicit force; this archive can no longer reconcile/activate that import.'
+		fi
 	fi
 	echo 'Deletion is not secure erasure; old disk/swap/backup copies may remain.'
 )
@@ -4184,6 +4240,17 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 	local STAGE="$1" JOURNAL="$2" WORK="$3" MODE="$4" OPTION="$5" NIC="$6"
 	[[ "${OPTION}" == --dry-run ]] || acquireClientLifecycleLock || return 1
 	if awgStateIsFinalized "${JOURNAL}" "${SERVER_AWG_NIC}"; then
+		if [[ ! -f "${AMNEZIAWG_DIR}/params" || -L "${AMNEZIAWG_DIR}/params" ||
+			! -f "${SERVER_AWG_CONF}" || -L "${SERVER_AWG_CONF}" ]] ||
+			! awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || ! awgStateTrustedPath "${SERVER_AWG_CONF}"; then
+			echo 'ERROR: finalized migration local params/server config are missing or unsafe; nothing was restored.' >&2
+			echo "After completing uninstall, explicitly reset with --reset-state-journal ${JOURNAL##*/} --confirm-policy-replay, then import again." >&2
+			return 1
+		fi
+		if ! awgStateArchive local-identity "${STAGE}/vpn/params" "${AMNEZIAWG_DIR}/params" "${SERVER_AWG_CONF}"; then
+			echo "No files changed. After uninstalling the conflicting installation, use --reset-state-journal ${JOURNAL##*/} --confirm-policy-replay for deliberate fresh recovery." >&2
+			return 1
+		fi
 		echo 'Migration already finalized; archived policy is not replayed. Manage the VPN with systemctl normally.'
 		return 0
 	fi
@@ -12074,6 +12141,10 @@ function uninstallAmneziaWG() {
 			exit 1
 		else
 			echo "AmneziaWG uninstalled successfully."
+			# Keep recovery data and no-replay tombstones unless explicitly reset.
+			if [[ -d "${AWG_STATE_JOURNAL_DIR}" ]]; then
+				echo "Migration journals retained in ${AWG_STATE_JOURNAL_DIR}; purge secrets explicitly, or use --reset-state-journal <manifest-sha256> --confirm-policy-replay before restoring the same finalized archive."
+			fi
 			exit 0
 		fi
 	else
@@ -15116,6 +15187,14 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 				exit 1
 			fi
 			awgStateCommand "$@"
+			exit $?
+			;;
+		--reset-state-journal)
+			if [[ $# -ne 3 || "${3:-}" != --confirm-policy-replay || ! "${2:-}" =~ ^[0-9a-f]{64}$ ]]; then
+				echo 'Usage: amneziawg-install.sh --reset-state-journal <manifest-sha256> --confirm-policy-replay' >&2
+				exit 1
+			fi
+			awgStatePurgeJournal "$2" --reset-finalized
 			exit $?
 			;;
 		--purge-state-journal)

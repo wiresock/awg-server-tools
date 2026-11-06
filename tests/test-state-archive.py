@@ -704,6 +704,7 @@ awgStateCommand --import-state "$ROOT/state.tar.gz"
                 ('activation-expired', '--activate-state', '2000-01-01T00:00:00Z'),
                 ('activation-future', '--activate-state', '2999-01-01T00:00:00Z'),
                 ('finalize', '--activate-state', '2999-01-01T00:00:00Z'),
+                ('recover-after-uninstall', '--activate-state', '2999-01-01T00:00:00Z'),
                 ('enable-failure', '--activate-state', '2999-01-01T00:00:00Z'),
                 ('activation-crossed', '--activate-state', '2001-01-01T00:00:20Z'),
                 ('activation-real-clock', '--activate-state', ''),
@@ -713,6 +714,8 @@ awgStateCommand --import-state "$ROOT/state.tar.gz"
             with self.subTest(name=name):
                 root = self.root / name
                 root.mkdir()
+                if name == 'recover-after-uninstall':
+                    (root / 'test-recovery').touch()
                 if name == 'enable-failure':
                     (root / 'fail-enable').touch()
                 if name == 'activation-real-clock':
@@ -841,9 +844,74 @@ if [[ "$OPTION" == --enable-at-boot ]]; then
     [[ ! -e "$JOURNAL/receipt" && -f "$JOURNAL/finalized" ]] || exit 20
     awgStateCommand --activate-state "$ROOT/state.tar.gz" --enable-at-boot || exit 21
     cmp "$SERVER_AWG_CONF" "$ROOT/finalized.conf" || exit 22
+    if [[ -f "$ROOT/test-recovery" ]]; then
+        # Reset cannot silently undo finalization on an existing installation.
+        if awgStatePurgeJournal "${JOURNAL##*/}" --reset-finalized; then exit 24; fi
+        cp "$AMNEZIAWG_DIR/params" "$ROOT/saved-params"
+        cp "$SERVER_AWG_CONF" "$ROOT/saved-server"
+        python3 - "$AMNEZIAWG_DIR/params" <<'OTHER_IDENTITY'
+from pathlib import Path
+import base64, re, sys
+path = Path(sys.argv[1])
+text = path.read_text()
+path.write_text(re.sub(r"(?m)^SERVER_PUB_KEY=.*$", "SERVER_PUB_KEY='" + base64.b64encode(b'Z' * 32).decode() + "'", text))
+OTHER_IDENTITY
+        if awgStateCommand --import-state "$ROOT/state.tar.gz"; then exit 37; fi
+        cp "$ROOT/saved-params" "$AMNEZIAWG_DIR/params"
+        rm "$AMNEZIAWG_DIR/params"
+        if awgStateCommand --import-state "$ROOT/state.tar.gz"; then exit 25; fi
+        if awgStatePurgeJournal "${JOURNAL##*/}" --reset-finalized; then exit 38; fi
+        cp "$ROOT/saved-params" "$AMNEZIAWG_DIR/params"
+        rm "$SERVER_AWG_CONF"
+        if awgStateCommand --import-state "$ROOT/state.tar.gz"; then exit 26; fi
+        cp "$ROOT/saved-server" "$SERVER_AWG_CONF"
+        # Simulate uninstall: service stopped/disabled and local files removed;
+        # retain the finalized tombstone exactly as the real uninstaller does.
+        systemctl stop awg-quick@awg0
+        systemctl disable awg-quick@awg0
+        rm -rf -- "$AMNEZIAWG_DIR"
+        if awgStateCommand --import-state "$ROOT/state.tar.gz"; then exit 27; fi
+        [[ -f "$JOURNAL/finalized" ]] || exit 28
+        systemctl() {
+            case "$1" in
+                show)
+                    [[ ! -e "$ROOT/unreadable-service" ]] || return 1
+                    case "$2" in
+                        --property=ActiveState) [[ ! -e "$ROOT/active" ]] && printf 'inactive\n' || printf 'active\n' ;;
+                        --property=UnitFileState) [[ ! -e "$ROOT/enabled" ]] && printf 'disabled\n' || printf 'enabled\n' ;;
+                    esac ;;
+                is-active|is-enabled) return 1 ;;
+                daemon-reload) return 0 ;;
+                *) return 90 ;;
+            esac
+        }
+        touch "$ROOT/unreadable-service"
+        if awgStatePurgeJournal "${JOURNAL##*/}" --reset-finalized; then exit 29; fi
+        rm "$ROOT/unreadable-service"
+        touch "$ROOT/active"
+        if awgStatePurgeJournal "${JOURNAL##*/}" --reset-finalized; then exit 30; fi
+        rm "$ROOT/active"
+        touch "$ROOT/enabled"
+        if awgStatePurgeJournal "${JOURNAL##*/}" --reset-finalized; then exit 31; fi
+        rm "$ROOT/enabled"
+        awgStatePurgeJournal "${JOURNAL##*/}" --reset-finalized || exit 32
+        [[ ! -e "$JOURNAL" ]] || exit 33
+        AWG_SYSTEMD_UNIT_DIR="$ROOT/units"
+        AWG_MODULES_LOAD_FILE="$ROOT/modules/awg.conf"
+        AWG_BT_MODPROBE_OVERRIDE="$ROOT/modprobe/awg.conf"
+        mkdir -p "$AWG_SYSTEMD_UNIT_DIR" "$ROOT/modules" "$ROOT/modprobe"
+        ip() { [[ "$*" == 'link show dev ens99' ]]; }
+        ss() { return 0; }
+        awg() { [[ "$1" == pubkey ]] && printf '%s\n' "$SERVER_PUB_KEY"; }
+        writeFirewallRules() { printf 'PostUp = echo regenerated-uplink-%s\n' "$SERVER_PUB_NIC"; }
+        installAmneziaWG() { writeAwgServerInstallState; }
+        awgStateCommand --import-state "$ROOT/state.tar.gz" || exit 34
+        [[ -f "$AMNEZIAWG_DIR/params" && -f "$SERVER_AWG_CONF" && -f "$JOURNAL/receipt" && ! -e "$JOURNAL/finalized" ]] || exit 35
+        sha256sum -c --status "$JOURNAL/receipt" || exit 36
+    fi
 fi
 '''
-                result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(root), mode, '--enable-at-boot' if name in ('finalize', 'enable-failure') else ''], capture_output=True)
+                result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(root), mode, '--enable-at-boot' if name in ('finalize', 'enable-failure', 'recover-after-uninstall') else ''], capture_output=True)
                 if name == 'enable-failure':
                     self.assertNotEqual(result.returncode, 0)
                     self.assertFalse((root / 'enabled').exists())
@@ -862,6 +930,19 @@ fi
                 if mode == '--dry-run':
                     self.assertEqual((root / 'target/awg0.conf').read_bytes(), local_conf)
                     self.assertFalse((root / 'events').exists())
+                    continue
+                if name == 'recover-after-uninstall':
+                    self.assertIn(b'finalized migration local params/server config are missing', result.stderr)
+                    self.assertIn(b'--reset-state-journal', result.stderr)
+                    self.assertIn(b'different server identity', result.stderr)
+                    self.assertIn(b're-evaluated against the current host clock', result.stderr)
+                    self.assertIn(b'Fresh import may proceed', result.stdout)
+                    clean = (root / 'target/awg0.conf').read_text()
+                    self.assertIn(PEER, clean)
+                    self.assertIn(permanent, clean)
+                    self.assertIn(removed, clean)  # Only explicit reset permits full snapshot replay.
+                    self.assertNotIn(pending, clean)
+                    self.assertFalse(list((root / 'journals').glob('*/finalized')))
                     continue
                 clean = (root / 'target/awg0.conf').read_text()
                 self.assertEqual(PEER in clean, expiry.startswith('2999'))
@@ -889,12 +970,47 @@ fi
                     self.assertFalse((root / 'events').exists())
                 self.assertIn('reconciled', (root / 'finalized-steps').read_text() if name == 'finalize' else next((root / 'journals').glob('*/steps')).read_text())
 
+    def test_finalized_identity_checks_params_interface_and_config_without_replaying_policy(self):
+        expected = self.root / 'expected-params'
+        local = self.root / 'local-params'
+        conf = self.root / 'local.conf'
+        expected.write_bytes(self.files['vpn/params'])
+        local.write_bytes(self.files['vpn/params'])
+        conf.write_bytes(self.files['vpn/server.conf'])
+        self.run_helper('local-identity', expected, local, conf)
+        # Identity-only guard deliberately permits ordinary post-finalization edits.
+        local.write_bytes(self.files['vpn/params'].replace(b"SERVER_PORT='51820'", b"SERVER_PORT='51821'"))
+        conf.write_bytes(self.files['vpn/server.conf'].replace(b'ListenPort = 51820', b'ListenPort = 51821'))
+        self.run_helper('local-identity', expected, local, conf)
+        conf.write_bytes(self.files['vpn/server.conf'].replace(b'[Interface]', b'[Interface] # local formatting').replace(
+            b'PrivateKey = ' + KEY.encode(), b'PrivateKey = ' + KEY.encode() + b' # same identity'))
+        self.run_helper('local-identity', expected, local, conf)
+        other = base64.b64encode(b'Z' * 32).decode().encode()
+        for field, old, new in ((b'SERVER_PUB_KEY', PUB.encode(), other),
+                                 (b'SERVER_PRIV_KEY', KEY.encode(), other),
+                                 (b'SERVER_AWG_NIC', b'awg0', b'awg1')):
+            with self.subTest(field=field):
+                local.write_bytes(self.files['vpn/params'].replace(field + b"='" + old + b"'", field + b"='" + new + b"'"))
+                result = self.run_helper('local-identity', expected, local, conf, ok=False)
+                self.assertIn(b'different server identity', result.stderr)
+                self.assertNotIn(other, result.stderr)
+        local.write_bytes(self.files['vpn/params'])
+        for data in (self.files['vpn/server.conf'].replace(KEY.encode(), other),
+                     self.files['vpn/server.conf'] + b'\n[Interface]\n',
+                     self.files['vpn/server.conf'].replace(b'PrivateKey = ' + KEY.encode(), b'# PrivateKey removed')):
+            conf.write_bytes(data)
+            self.assertIn(b'different server identity', self.run_helper('local-identity', expected, local, conf, ok=False).stderr)
+        conf.unlink()
+        self.assertIn(b'finalized local', self.run_helper('local-identity', expected, local, conf, ok=False).stderr)
+
     def test_invalid_arguments_never_enter_interactive_install(self):
         for args in (['--export-state'], ['--inspect-state', 'x', '--dry-run'],
                      ['--import-state', 'x', '--unknown'], ['--import-state', '--dry-run'],
                      ['--activate-state'], ['--activate-state', 'x', '--dry-run'],
                      ['--import-state', 'x', '--enable-at-boot'], ['--purge-state-journal'],
-                     ['--purge-state-journal', '../x', '--force'], ['--purge-state-journal', 'a'*64, '--unknown']):
+                     ['--purge-state-journal', '../x', '--force'], ['--purge-state-journal', 'a'*64, '--unknown'],
+                     ['--reset-state-journal', 'a'*64], ['--reset-state-journal', '../x', '--confirm-policy-replay'],
+                     ['--reset-state-journal', 'a'*64, '--force']):
             result = subprocess.run(['bash', str(SCRIPT), *args], capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b'Usage:', result.stderr)
