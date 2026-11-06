@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock)
 # SPDX-License-Identifier: MIT
 """Untrusted archive tests; no root, VPN, package manager or network required."""
+from contextlib import closing
 import base64
 import copy
 import hashlib
@@ -197,14 +198,14 @@ class ArchiveTests(unittest.TestCase):
     def test_disabled_archived_expired_and_invalid_expiry_removed(self):
         for disabled, archived, expiry, removed in ((1, 0, None, True), (0, 1, None, True),
                 (0, 0, '2000-01-01T00:00:00Z', True), (0, 0, 'invalid', True),
-                (0, 0, '2999-01-01T00:00:00Z', False), (0, 0, None, False)):
+                (0, 0, '2999-01-01T00:00:00Z', True), (0, 0, None, False)):
             with self.subTest(disabled=disabled, archived=archived, expiry=expiry):
                 dest = self.root / f'dest-{disabled}-{archived}-{expiry}'
                 self.run_helper('unpack', self.tar, dest)
                 (dest / 'web').mkdir()
-                with sqlite3.connect(dest / 'web/database.sqlite') as db:
-                    db.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, expires_at TEXT)')
-                    db.execute('INSERT INTO peers VALUES(?,?,?,?)', (PEER, disabled, archived, expiry))
+                with closing(sqlite3.connect(dest / 'web/database.sqlite')) as db, db:
+                    db.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, expires_at TEXT, removal_pending INTEGER NOT NULL DEFAULT 0)')
+                    db.execute('INSERT INTO peers(public_key,disabled,archived,expires_at) VALUES(?,?,?,?)', (PEER, disabled, archived, expiry))
                 self.run_helper('prepare', dest)
                 self.assertEqual(PEER not in (dest / 'peers.conf').read_text(), removed)
 
@@ -216,15 +217,103 @@ class ArchiveTests(unittest.TestCase):
         dest = self.root / 'dest'
         self.run_helper('unpack', self.tar, dest)
         (dest / 'web').mkdir()
-        with sqlite3.connect(dest / 'web/database.sqlite') as db:
-            db.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, expires_at TEXT)')
-            db.execute('INSERT INTO peers VALUES(?,1,0,NULL)', (PEER,))
+        with closing(sqlite3.connect(dest / 'web/database.sqlite')) as db, db:
+            db.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, expires_at TEXT, removal_pending INTEGER NOT NULL DEFAULT 0)')
+            db.execute('INSERT INTO peers(public_key,disabled,archived,expires_at) VALUES(?,1,0,NULL)', (PEER,))
         self.run_helper('prepare', dest)
         clean = (dest / 'interface.conf').read_text() + (dest / 'peers.conf').read_text()
         self.assertNotIn('### Client phone', clean)
         self.assertIn('### Client tablet', clean)
         self.assertIn(other, clean)
         self.assertNotIn(PEER, clean)
+
+    def test_failed_manual_removal_is_not_restored(self):
+        dest = self.root / 'dest'
+        self.run_helper('unpack', self.tar, dest)
+        (dest / 'web').mkdir()
+        with closing(sqlite3.connect(dest / 'web/database.sqlite')) as db, db:
+            db.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, expires_at TEXT, removal_pending INTEGER)')
+            db.execute('INSERT INTO peers VALUES(?,0,0,NULL,1)', (PEER,))
+        self.run_helper('prepare', dest)
+        self.assertNotIn(PEER, (dest / 'peers.conf').read_text())
+
+    def test_policy_schema_missing_columns_fails_closed_with_clear_error(self):
+        required = ('public_key', 'disabled', 'archived', 'removal_pending', 'expires_at')
+        for missing in required:
+            with self.subTest(missing=missing):
+                dest = self.root / missing
+                self.run_helper('unpack', self.tar, dest)
+                (dest / 'web').mkdir()
+                columns = [f'{name} TEXT' for name in required if name != missing]
+                with closing(sqlite3.connect(dest / 'web/database.sqlite')) as db, db:
+                    db.execute('CREATE TABLE peers(' + ','.join(columns) + ')')
+                result = self.run_helper('prepare', dest, ok=False)
+                self.assertIn(b'policy schema missing required columns: ' + missing.encode(), result.stderr)
+                self.assertFalse((dest / 'interface.conf').exists())
+                self.assertFalse((dest / 'peers.conf').exists())
+
+    def test_panel_snapshot_database_cli_env_and_default_precedence(self):
+        # Actual unit/env option parsing, with only PID 1 and SQLite CLI transport
+        # mocked. Each source DB has a distinct marker, verified in the snapshot.
+        for name, env, cli, expected in (
+                ('both', 'env.db', '--database-url cli.db', 'cli.db'),
+                ('cli', '', '--database-url=cli.db', 'cli.db'),
+                ('env', 'env.db', '', 'env.db'),
+                ('default', '', '', 'awg-web.db'),
+                ('invalid-cli', 'env.db', '--database-url', None)):
+            with self.subTest(name=name):
+                root = self.root / name
+                root.mkdir()
+                for file in ('env.db', 'cli.db', 'awg-web.db'):
+                    with closing(sqlite3.connect(root / file)) as db, db:
+                        db.execute('CREATE TABLE marker(value TEXT)')
+                        db.execute('INSERT INTO marker VALUES(?)', (file,))
+                (root / 'env.conf').write_text(f'AWG_WEB_DB={env}\n' if env else '')
+                (root / 'panel.service').write_text(
+                    f'[Service]\nWorkingDirectory={root}\nEnvironmentFile={root}/env.conf\n'
+                    f'ExecStart=/usr/local/bin/amneziawg-web {cli}\n')
+                shell = r'''
+set -euo pipefail
+source "$1"
+ROOT="$2"
+WEB_PANEL_SYSTEMD_UNIT="$ROOT/panel.service"
+WEB_PANEL_ENV_FILE="$ROOT/env.conf"
+readWebPanelEffectiveProperty() { return 1; }
+sqlite3() {
+    printf '%s' "$2" >"$ROOT/chosen"
+    python3 - "$2" "$ROOT/stage/web/database.sqlite" <<'SQLITE'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as dest:
+    source.backup(dest)
+SQLITE
+}
+awgStateSnapshotPanel "$ROOT/stage"
+'''
+                result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(root)], capture_output=True)
+                if expected is None:
+                    self.assertEqual(result.returncode, 2, result.stderr.decode())
+                    self.assertFalse((root / 'chosen').exists())
+                    self.assertFalse((root / 'stage').exists())
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                self.assertEqual((root / 'chosen').read_text(), str(root / expected))
+                with closing(sqlite3.connect(root / 'stage/web/database.sqlite')) as db, db:
+                    self.assertEqual(db.execute('SELECT value FROM marker').fetchone()[0], expected)
+
+    def test_panel_snapshot_cli_resolver_error_never_falls_back_to_env(self):
+        (self.root / 'env.db').write_bytes(b'exists')
+        shell = r'''
+source "$1"
+ROOT="$2"
+isWebPanelInstalled() { return 0; }
+readWebPanelExecStartSetting() { [[ "$1" == --database-url ]] || exit 95; return 2; }
+readWebPanelSetting() { printf 'must-not-read-env\n' >>"$ROOT/env-read"; printf '%s/env.db\n' "$ROOT"; }
+awgStateSnapshotPanel "$ROOT/stage"
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse((self.root / 'env-read').exists())
+        self.assertFalse((self.root / 'stage').exists())
 
     def test_shell_read_params_no_source_and_new_nic_install_hook(self):
         params = self.root / 'params'
@@ -345,10 +434,11 @@ installAmneziaWG() {
 awgStateCommand --import-state "$ROOT/state.tar.gz" --dry-run || exit 10
 [[ ! -e "$AMNEZIAWG_DIR" && ! -e "$AWG_STATE_JOURNAL_DIR" && ! -e "$ROOT/install.log" ]] || exit 11
 [[ "$(<"$AWG_SYSCTL_FILE")" == 'original sysctl' ]] || exit 12
+mkdir -m 755 "$AMNEZIAWG_DIR"
 FAIL_INSTALL=1
 awgStateCommand --import-state "$ROOT/state.tar.gz"
 [[ $? -ne 0 ]] || exit 13
-[[ ! -e "$AMNEZIAWG_DIR" && ! -e "$AWG_SYSTEMD_UNIT_DIR/awg-quick@awg0.service.d" ]] || exit 14
+[[ -d "$AMNEZIAWG_DIR" && ! -e "$AMNEZIAWG_DIR/params" && "$(stat -c %a "$AMNEZIAWG_DIR")" == 700 && ! -e "$AWG_SYSTEMD_UNIT_DIR/awg-quick@awg0.service.d" ]] || exit 14
 [[ "$(<"$AWG_SYSCTL_FILE")" == 'original sysctl' ]] || exit 15
 FAIL_INSTALL=0
 awgStateCommand --import-state "$ROOT/state.tar.gz" || exit 16
@@ -366,9 +456,125 @@ awgStateCommand --import-state "$ROOT/state.tar.gz"
         self.assertNotIn(KEY.encode(), result.stdout + result.stderr)
         self.assertIn('rollback', ''.join(p.read_text() for p in (self.root / 'journals').glob('*/steps')))
 
+    def test_activation_and_rerun_reconcile_legacy_receipts_without_resurrection(self):
+        """A pre-fix receipt may still authorize expiring/removal-pending peers.
+
+        Test both a deadline already crossed during quarantine and one still in
+        the future. Neither may reach startup while enforcement is unavailable.
+        """
+        pending = base64.b64encode(b'D' * 32).decode()
+        permanent = base64.b64encode(b'E' * 32).decode()
+        removed = base64.b64encode(b'F' * 32).decode()
+        for name, mode, expiry in (
+                ('activation-expired', '--activate-state', '2000-01-01T00:00:00Z'),
+                ('activation-future', '--activate-state', '2999-01-01T00:00:00Z'),
+                ('reimport-future', '--import-state', '2999-01-01T00:00:00Z'),
+                ('dry-run', '--dry-run', '2999-01-01T00:00:00Z'),
+                ('bad-schema', '--activate-state', '2999-01-01T00:00:00Z')):
+            with self.subTest(name=name):
+                root = self.root / name
+                root.mkdir()
+                files = dict(self.files)
+                for label, public, address in (('pending', pending, 3), ('permanent', permanent, 4),
+                                                ('removed', removed, 5)):
+                    files['vpn/server.conf'] += (f'\n### Client {label}\n[Peer]\nPublicKey = {public}\n'
+                                                f'AllowedIPs = 10.66.66.{address}/32\n').encode()
+                db_path = root / 'policy.sqlite'
+                with closing(sqlite3.connect(db_path)) as db, db:
+                    if name == 'bad-schema':
+                        db.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, expires_at TEXT)')
+                    else:
+                        db.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, expires_at TEXT, removal_pending INTEGER)')
+                        db.executemany('INSERT INTO peers VALUES(?,0,0,?,?)',
+                                       [(PEER, expiry, 0), (pending, None, 1), (permanent, None, 0), (removed, None, 0)])
+                files['web/database.sqlite'] = db_path.read_bytes()
+                make_tar(root / 'state.tar.gz', files)
+                (root / 'original-params').write_bytes(files['vpn/params'])
+                # This local, receipt-verified config models the old importer,
+                # with generated hooks, and one peer already removed locally.
+                local_conf = files['vpn/server.conf'].split(b'\n### Client removed')[0]
+                local_conf = local_conf.replace(b'PostUp = touch /this-must-never-execute',
+                                                b'PostUp = echo local-generated-hook')
+                (root / 'local.conf').write_bytes(local_conf)
+                shell = r'''
+set -uo pipefail
+source "$1"
+ROOT="$2"
+MODE="$3"
+AMNEZIAWG_DIR="$ROOT/target"
+AWG_STATE_JOURNAL_DIR="$ROOT/journals"
+AWG_SYSCTL_FILE="$ROOT/sysctl.conf"
+mkdir -p "$AMNEZIAWG_DIR/clients"
+awgStateReadParams "$ROOT/original-params" "$ROOT/records" || exit 10
+SERVER_PUB_NIC=ens99
+SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"
+serializeParams "$AMNEZIAWG_DIR/params" || exit 11
+cp "$ROOT/local.conf" "$SERVER_AWG_CONF"
+printf 'net.ipv4.ip_forward = 1\n' >"$AWG_SYSCTL_FILE"
+awgStateArchive unpack "$ROOT/state.tar.gz" "$ROOT/reference" || exit 12
+ID="$(sha256sum "$ROOT/reference/manifest.json")"; ID="${ID%% *}"
+JOURNAL="$AWG_STATE_JOURNAL_DIR/$ID"
+mkdir -p "$JOURNAL"
+printf '%s\n' ens99 >"$JOURNAL/nic"
+awgStateWriteReceipt "$JOURNAL" "$ROOT/receipt" || exit 13
+isRoot() { return 0; }
+checkOS() { OS=debian; ID=debian; }
+awgStateDependencies() { return 0; }
+awgStateTrustedPath() { return 0; }
+acquireClientLifecycleLock() { return 0; }
+releaseClientLifecycleLock() { return 0; }
+age() { cp -- "$4" "$3"; }
+installAmneziaWG() { echo 'must not reinstall' >&2; return 99; }
+ensureAwgBackendReady() { [[ "$1" == 0 ]]; }
+validateStagedAwgConfigs() { printf 'validate\n' >>"$ROOT/events"; }
+sysctl() { printf 'sysctl\n' >>"$ROOT/events"; }
+systemctl() {
+    case "$1" in
+        is-active|is-enabled) return 1 ;;
+        start) cp "$SERVER_AWG_CONF" "$ROOT/at-start.conf"; printf 'start\n' >>"$ROOT/events" ;;
+        *) echo 'unexpected systemctl command' >&2; return 90 ;;
+    esac
+}
+if [[ "$MODE" == --dry-run ]]; then
+    awgStateCommand --import-state "$ROOT/state.tar.gz" --dry-run
+else
+    awgStateCommand "$MODE" "$ROOT/state.tar.gz"
+fi
+STATUS=$?
+[[ $STATUS -eq 0 ]] || exit "$STATUS"
+sha256sum -c --status "$JOURNAL/receipt" || exit 14
+'''
+                result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(root), mode], capture_output=True)
+                if name == 'bad-schema':
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(b'policy schema missing required columns: removal_pending', result.stderr)
+                    self.assertFalse((root / 'events').exists())
+                    self.assertEqual((root / 'target/awg0.conf').read_bytes(), local_conf)
+                    continue
+                self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+                self.assertNotIn(KEY.encode(), result.stdout + result.stderr)
+                if mode == '--dry-run':
+                    self.assertEqual((root / 'target/awg0.conf').read_bytes(), local_conf)
+                    self.assertFalse((root / 'events').exists())
+                    continue
+                clean = (root / 'target/awg0.conf').read_text()
+                self.assertNotIn(PEER, clean)
+                self.assertNotIn(pending, clean)
+                self.assertNotIn(removed, clean)  # Never rebuild peers from the snapshot.
+                self.assertIn(permanent, clean)
+                self.assertIn('PostUp = echo local-generated-hook', clean)
+                self.assertIn('ALL expiry-bearing peers', result.stdout.decode())
+                if mode == '--activate-state':
+                    self.assertEqual((root / 'at-start.conf').read_text(), clean)
+                    self.assertEqual((root / 'events').read_text(), 'validate\nsysctl\nstart\n')
+                else:
+                    self.assertFalse((root / 'events').exists())
+                self.assertIn('reconciled', next((root / 'journals').glob('*/steps')).read_text())
+
     def test_invalid_arguments_never_enter_interactive_install(self):
         for args in (['--export-state'], ['--inspect-state', 'x', '--dry-run'],
-                     ['--import-state', 'x', '--unknown'], ['--import-state', '--dry-run']):
+                     ['--import-state', 'x', '--unknown'], ['--import-state', '--dry-run'],
+                     ['--activate-state'], ['--activate-state', 'x', '--dry-run']):
             result = subprocess.run(['bash', str(SCRIPT), *args], capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b'Usage:', result.stderr)

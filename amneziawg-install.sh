@@ -3348,6 +3348,7 @@ AWG_STATE_PROXY_CONFIG="/etc/amneziawg-proxy/proxy.toml"
 function awgStateArchive() {
 	python3 - "${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}" "$@" <<'AWG_STATE_PY'
 # Standard-library only. This code is embedded so a downloaded installer stays standalone.
+from contextlib import closing
 import base64
 import hashlib
 import io
@@ -3430,7 +3431,7 @@ PEER = set('PublicKey PresharedKey AllowedIPs Endpoint PersistentKeepalive'.spli
 HOOKS = set('PreUp PostUp PreDown PostDown'.split())
 
 
-def config(data, state=None, blocked=frozenset()):
+def config(data, state=None, blocked=frozenset(), preserve_hooks=False):
     text = data.decode('utf-8')
     require('\x00' not in text and '\r' not in text, 'invalid config encoding')
     # Carry leading peer-name comments with THAT peer when reconciling policy.
@@ -3465,6 +3466,8 @@ def config(data, state=None, blocked=frozenset()):
             require(kind and sep, 'invalid config line')
             if name in HOOKS:
                 require(kind == 'Interface' and state is not None, 'client/peer hooks unsupported')
+                if preserve_hooks:
+                    lines.append(line)  # Only receipt-verified local generated hooks.
                 continue  # NEVER execute commands supplied by an archive.
             require(name in (INTERFACE if kind == 'Interface' else PEER), 'unknown config field')
             require(name not in values, 'duplicate config field')
@@ -3571,6 +3574,33 @@ def read_archive(path):
     return manifest, files, state
 
 
+class StatePolicyError(ValueError):
+    """Only fixed diagnostics or allowlisted column names, never foreign values."""
+
+
+def blocked_peers(root):
+    db_path = root / 'web/database.sqlite'
+    if not db_path.exists():
+        return set()
+    # No panel is running to enforce future expiry in this MVP: ANY expiry is
+    # excluded, not merely deadlines already in the past. No time-of-check gap.
+    with closing(sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True)) as db:
+        db.execute('PRAGMA trusted_schema=OFF')
+        if db.execute("SELECT type FROM sqlite_master WHERE name='peers'").fetchone() != ('table',):
+            raise StatePolicyError('panel peer policy requires a real peers table')
+        required = {'public_key', 'disabled', 'archived', 'removal_pending', 'expires_at'}
+        columns = {row[1] for row in db.execute('PRAGMA table_info(peers)')}
+        if not required <= columns:
+            raise StatePolicyError('panel peer policy schema missing required columns: ' +
+                                   ', '.join(sorted(required - columns)))
+        blocked = {row[0] for row in db.execute(
+            "SELECT public_key FROM peers WHERE disabled IS NOT 0 OR archived IS NOT 0 "
+            "OR removal_pending IS NOT 0 OR expires_at IS NOT NULL")}
+        if any(not isinstance(public, str) or not key(public) for public in blocked):
+            raise StatePolicyError('panel peer policy contains an invalid public key')
+        return blocked
+
+
 def main():
     mode, path, *args = sys.argv[2:]
     if mode == 'params':
@@ -3618,21 +3648,18 @@ def main():
                     handle.write(data)
                 dest.chmod(0o600)
             (root / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
+    elif mode == 'reconcile':
+        # The Bash caller verifies the receipt before providing this local file.
+        # Filter ONLY the current config, never rebuild peers from an old snapshot.
+        root = Path(args[0])
+        state = params((root / 'vpn/params').read_bytes())
+        clean = config(Path(path).read_bytes(), state, blocked_peers(root), preserve_hooks=True)
+        with Path(args[1]).open('xb') as handle:
+            handle.write(clean)
     elif mode == 'prepare':
         root = Path(path)
         state = params((root / 'vpn/params').read_bytes())
-        blocked = set()
-        db_path = root / 'web/database.sqlite'
-        if db_path.exists():
-            # Read-only DB; never restore a foreign queue or run panel migrations here.
-            with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
-                db.execute('PRAGMA trusted_schema=OFF')
-                require(db.execute("SELECT type FROM sqlite_master WHERE name='peers'").fetchone() == ('table',),
-                        'peer policy must be a real table')
-                blocked = {row[0] for row in db.execute(
-                    "SELECT public_key FROM peers WHERE disabled != 0 OR archived != 0 "
-                    "OR (expires_at IS NOT NULL AND (julianday(expires_at) IS NULL "
-                    "OR julianday(expires_at) <= julianday('now')))")}
+        blocked = blocked_peers(root)
         data = (root / 'vpn/server.conf').read_bytes()
         # Hooks must remain in Interface, not be appended below the last Peer.
         clean = config(data, state, blocked).decode()
@@ -3650,6 +3677,9 @@ def main():
 
 try:
     main()
+except StatePolicyError as error:
+    print('ERROR: ' + str(error), file=sys.stderr)
+    sys.exit(1)
 except (ValueError, KeyError, OSError, UnicodeError, tarfile.TarError, sqlite3.Error, EOFError, TypeError, OverflowError, zlib.error):
     # Do not echo foreign config, SQL, passphrases or private values in diagnostics.
     print('ERROR: invalid or unsupported state archive/data', file=sys.stderr)
@@ -3726,11 +3756,18 @@ function awgStateWriteInstallState() {
 # Export expects the normal service locations. A custom DB/env is resolved from
 # the effective unit using existing read-only resolvers, not by sourcing env.conf.
 function awgStateSnapshotPanel() {
-	local STAGE="$1" DB ENV_FILE WORKDIR
+	local STAGE="$1" DB ENV_FILE WORKDIR SETTING_RC
 	isWebPanelInstalled || return 0
-	DB="$(readWebPanelSetting AWG_WEB_DB)" || return 1
-	[[ -n "${DB}" ]] || DB="$(readWebPanelExecStartSetting --db)" || return 1
-	[[ -n "${DB}" ]] || DB=awg-web.db
+	if DB="$(readWebPanelExecStartSetting --database-url)"; then
+		[[ -n "${DB}" ]] || { echo 'ERROR: empty panel --database-url.' >&2; return 1; }
+	else
+		SETTING_RC=$?
+		[[ "${SETTING_RC}" -eq 1 ]] || return "${SETTING_RC}"
+		DB="$(readWebPanelSetting AWG_WEB_DB)" || return 1
+		# Clap's database_url default in amneziawg-web/src/main.rs, relative to
+		# the effective service WorkingDirectory (not the installer's cwd).
+		[[ -n "${DB}" ]] || DB=awg-web.db
+	fi
 	if [[ "${DB}" != /* ]]; then
 		WORKDIR="$(resolveWebPanelWorkingDirectory)" || return 1
 		DB="${WORKDIR}/${DB}"
@@ -3891,7 +3928,9 @@ function awgStateImportTransaction() (
 			# The clean install hook returns before systemctl enable/start.
 			rm -rf -- "${AMNEZIAWG_DIR}" "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service.d"
 			rm -f -- "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service"
-			((CONFIG_EXISTED)) && mkdir -m 700 -p "${AMNEZIAWG_DIR}"
+			if ((CONFIG_EXISTED)); then
+				mkdir -p "${AMNEZIAWG_DIR}" && chmod 700 "${AMNEZIAWG_DIR}"
+			fi
 			for FILE in "${TRACKED[@]}"; do
 				if [[ -f "${JOURNAL}/before/${INDEX}" ]]; then
 					cp -p -- "${JOURNAL}/before/${INDEX}" "${FILE}" || true
@@ -3935,6 +3974,66 @@ function awgStateImportTransaction() (
 	COMMITTED=1
 )
 
+# Receipts are local root-owned state, never supplied by an archive. Publish a
+# complete new receipt atomically after a monotonic (removals-only) reconcile.
+function awgStateWriteReceipt() { # <journal> <private temporary output>
+	local JOURNAL="$1" OUTPUT="$2" FILE
+	sha256sum "${AMNEZIAWG_DIR}/params" "${SERVER_AWG_CONF}" >"${OUTPUT}" || return 1
+	for FILE in "${AMNEZIAWG_DIR}/clients/"*.conf; do
+		[[ ! -f "${FILE}" ]] || sha256sum "${FILE}" >>"${OUTPUT}" || return 1
+	done
+	replaceFileExactly "${OUTPUT}" "${JOURNAL}/receipt" 600
+}
+
+function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <dry-run> <nic>
+	local STAGE="$1" JOURNAL="$2" WORK="$3" MODE="$4" DRY="$5" NIC="$6"
+	[[ "${DRY}" == --dry-run ]] || acquireClientLifecycleLock || return 1
+	awgStateTrustedPath "${JOURNAL}/receipt" && awgStateTrustedPath "${SERVER_AWG_CONF}" &&
+		awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || return 1
+	if [[ ! -f "${JOURNAL}/nic" || "$(<"${JOURNAL}/nic")" != "${NIC}" ]] ||
+		! sha256sum -c --status "${JOURNAL}/receipt"; then
+		echo 'ERROR: previous import differs from current target state; refusing to overwrite.' >&2
+		return 1
+	fi
+	# This is a quarantine/activation workflow, not a live configuration editor.
+	# Never rewrite a running interface or leave an enabled unit racing a check.
+	if systemctl is-active --quiet "awg-quick@${SERVER_AWG_NIC}" || systemctl is-enabled --quiet "awg-quick@${SERVER_AWG_NIC}"; then
+		echo 'ERROR: stop and disable the imported VPN before reconciliation/activation.' >&2
+		return 1
+	fi
+	awgStateArchive reconcile "${SERVER_AWG_CONF}" "${STAGE}" "${WORK}/reconciled.conf" || return 1
+	echo 'Policy: exclude disabled, archived, removal-pending and ALL expiry-bearing peers (including future expiry); no live panel enforcement exists yet.'
+	if [[ "${DRY}" == --dry-run ]]; then
+		echo 'Plan: re-reconcile the unchanged import without reinstalling or activating.'
+		return 0
+	fi
+	# Activation validates the candidate with the installed backend before making
+	# it live. Reimport also reconciles: an unchanged receipt is NOT a policy bypass.
+	if [[ "${MODE}" == --activate-state ]]; then
+		ensureAwgBackendReady 0 || return 1
+		mkdir -p "${WORK}/validate" || return 1
+		validateStagedAwgConfigs "${WORK}/validate" --label activation-server "${WORK}/reconciled.conf" || return 1
+	fi
+	if ! cmp -s -- "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}"; then
+		replaceFileExactly "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}" 600 || return 1
+	fi
+	awgStateWriteReceipt "${JOURNAL}" "${WORK}/receipt" || return 1
+	printf '%s\n' reconciled >>"${JOURNAL}/steps" || return 1
+	if [[ "${MODE}" == --activate-state ]]; then
+		awgStateTrustedPath "${AWG_SYSCTL_FILE}" || return 1
+		sysctl -p "${AWG_SYSCTL_FILE}" || return 1
+		if ! systemctl start "awg-quick@${SERVER_AWG_NIC}"; then
+			systemctl stop "awg-quick@${SERVER_AWG_NIC}" || true
+			printf '%s\n' activation-failed >>"${JOURNAL}/steps"
+			return 1
+		fi
+		printf '%s\n' activated >>"${JOURNAL}/steps" || return 1
+		echo 'Activated after reconciliation. Unit remains disabled at boot; verify a real handshake before DNS cutover.'
+	else
+		echo 'Existing import re-reconciled without reinstalling; VPN remains stopped/disabled.'
+	fi
+}
+
 function awgStateCommand() (
 	# xtrace must not echo imported private keys during printf -v/serialization.
 	set +x
@@ -3947,7 +4046,7 @@ function awgStateCommand() (
 		exit 1
 	}
 	local ALLOW_INSTALL=1
-	[[ "${MODE}" == --inspect-state || "${DRY}" == --dry-run ]] && ALLOW_INSTALL=0
+	[[ "${MODE}" == --inspect-state || "${MODE}" == --activate-state || "${DRY}" == --dry-run ]] && ALLOW_INSTALL=0
 	awgStateDependencies "${ALLOW_INSTALL}" || exit 1
 	WORK="$(mktemp -d /tmp/awg-state.XXXXXXXX)" || exit 1
 	trap 'rm -rf -- "${WORK}"; releaseClientLifecycleLock' EXIT
@@ -3978,18 +4077,18 @@ function awgStateCommand() (
 	JOURNAL="${AWG_STATE_JOURNAL_DIR}/${ID}"
 	awgStateTrustedPath "${JOURNAL}" || { echo 'ERROR: unsafe journal path.' >&2; exit 1; }
 	if [[ -f "${JOURNAL}/receipt" ]]; then
-		if [[ "$(<"${JOURNAL}/nic")" == "${NIC}" ]] && sha256sum -c --status "${JOURNAL}/receipt"; then
-			echo 'This archive is already imported; target files are unchanged. No changes made.'
-			exit 0
-		fi
-		echo 'ERROR: previous import differs from current target state; refusing to overwrite.' >&2
+		awgStateReconcileImport "${WORK}/stage" "${JOURNAL}" "${WORK}" "${MODE}" "${DRY}" "${NIC}"
+		exit $?
+	fi
+	if [[ "${MODE}" == --activate-state ]]; then
+		echo 'ERROR: this archive has no completed local import; import it into quarantine first.' >&2
 		exit 1
 	fi
 	awgStateImportPreflight "${NIC}" "${WORK}" || exit 1
 	awgStateArchive prepare "${WORK}/stage" || exit 1
 	SERVER_PUB_NIC="${NIC}"
 	printf 'Plan: install %s backend, AWG %s, interface %s, UDP %s, uplink %s.\n' "${AWG_BACKEND}" "${AWG_PROTOCOL_VERSION}" "${SERVER_AWG_NIC}" "${SERVER_PORT}" "${NIC}"
-	echo 'Restore original keys/profiles; replace host hooks; remove disabled/archived/expired peers.'
+	echo 'Restore original keys/profiles; replace host hooks; exclude disabled/archived/removal-pending and ALL expiry-bearing peers (including future expiry).'
 	echo 'Leave VPN stopped/disabled. Panel/mail/proxy files are recovery-only (automatic restore TODO).'
 	[[ "${DRY}" != --dry-run ]] || exit 0
 	acquireClientLifecycleLock || exit 1
@@ -4004,7 +4103,8 @@ function awgStateCommand() (
 	[[ ${STATUS} -eq 0 ]] || exit "${STATUS}"
 	echo "Imported in quarantine. Journal/recovery: ${JOURNAL}"
 	echo 'Before DNS cutover: fence the old server, inspect firewall hooks, and test a client handshake.'
-	echo "Then explicitly enable/start awg-quick@${SERVER_AWG_NIC}; import does not activate traffic."
+	echo "After fencing the old server, use: bash amneziawg-install.sh --activate-state <same-archive>"
+	echo 'Do not start/enable the unit manually: activation must re-reconcile peer policy.'
 	echo 'Clients using literal IP endpoints still need updated profiles; DNS re-resolution depends on the client.'
 )
 
@@ -14785,9 +14885,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	#
 	# Requires AmneziaWG to be already installed (params file must exist).
 	case "${1:-}" in
-		--export-state|--inspect-state|--import-state)
+		--export-state|--inspect-state|--import-state|--activate-state)
 			if [[ $# -ne 2 && ! ( "$1" == --import-state && $# -eq 3 && "$3" == --dry-run ) ]] || [[ -z "${2:-}" || "${2:-}" == -* ]]; then
-				echo 'Usage: amneziawg-install.sh --export-state <file> | --inspect-state <file> | --import-state <file> [--dry-run]' >&2
+				echo 'Usage: amneziawg-install.sh --export-state <file> | --inspect-state <file> | --import-state <file> [--dry-run] | --activate-state <file>' >&2
 				exit 1
 			fi
 			awgStateCommand "$@"

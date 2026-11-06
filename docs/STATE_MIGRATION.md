@@ -18,6 +18,8 @@ bash amneziawg-install.sh --export-state /root/server.awgx
 bash amneziawg-install.sh --inspect-state /root/server.awgx
 SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --import-state /root/server.awgx --dry-run
 SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --import-state /root/server.awgx
+# After reviewing configuration and fencing/stopping the old server:
+SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --activate-state /root/server.awgx
 ```
 
 `ens3` is an example: use the **new host's public network interface**, not its
@@ -31,8 +33,9 @@ or plaintext export mode. Use a real interactive terminal. Store the passphrase
 separately from the archive. An archive grants full access to the VPN and can
 also contain panel passwords and SMTP credentials.
 
-Export/import install missing `age`, `python3`, and `sqlite3` with apt. Inspect
-and dry-run require them to be installed already and never install packages.
+Export/import install missing `age`, `python3`, and `sqlite3` with apt. Inspect,
+dry-run and activation require them to be installed already and never install
+packages.
 The existing installer's distribution/version and signed AWG package handling
 is reused. age availability is required; there is no unverified binary download
 fallback.
@@ -54,8 +57,9 @@ The encrypted payload is a gzip tar containing only regular files:
   Conflicting copies with the same basename and custom client shell hooks fail export. Copies are restored
   into the managed clients directory, not arbitrary archived home paths.
 - `web/database.sqlite`: if the panel is installed, a consistent online
-  `sqlite3 .backup` of the effective `AWG_WEB_DB`/`--db` location (relative paths
-  use the service working directory; absent settings use `awg-web.db`).
+  `sqlite3 .backup` of the effective database location: `--database-url` takes
+  precedence over `AWG_WEB_DB`; absent settings use `awg-web.db`. Relative paths
+  use the service working directory.
   Unsupported SQLite URL/query formats fail export rather than silently omit
   the DB. `web/env.conf` is copied from the existing env-file resolver.
 - `proxy/proxy.toml`: the default `/etc/amneziawg-proxy/proxy.toml`, if present.
@@ -64,7 +68,12 @@ The encrypted payload is a gzip tar containing only regular files:
 
 The panel installer defines `/etc/amneziawg-web/env.conf` and
 `/var/lib/amneziawg-web/awg-web.db`; `src/main.rs` supports `AWG_WEB_DB` and
-`--db`. The existing unit/env/working-directory resolvers are used for export.
+`--database-url`. The actual Clap default is `awg-web.db`, relative to the
+process/service working directory (not an unconditional `/var/lib` path).
+The effective ExecStart `--database-url` overrides the environment; a resolver
+error fails export rather than falling back to a different database. Only an
+absent CLI setting falls back to `AWG_WEB_DB`, then the default. The existing
+unit/env/working-directory resolvers are used for export.
 Saved SMTP settings (including credentials) are in the panel DB's
 `email_panel_settings` table (`src/delivery/settings.rs`). Environment-based
 mail defaults may live in env.conf or unit settings; this prototype does not
@@ -95,10 +104,19 @@ restoring a usable panel.
 2. Preflight validates target paths, free UDP port, existing interface/unit and
    installation conflicts. The archive selects its original protocol/backend;
    this is not an in-place replacement or a backend/protocol conversion tool.
-3. Exclude disabled, archived, expired and invalid-expiry peers using the panel
-   DB snapshot. Unknown/incompatible peer schemas fail closed. Commented peers
-   stay commented. Original profile files remain available but do not authorize
-   traffic on their own. Policies are only as recent as the snapshot.
+3. Exclude disabled, archived, **removal-pending** peers and **every peer with
+   any expiry**, including future deadlines, using the panel DB snapshot.
+   A failed manual removal must not resurrect its peer. The required columns
+   `public_key`, `disabled`, `archived`, `removal_pending`, `expires_at` must exist;
+   incompatible schemas fail closed with a missing-column diagnostic. NULL
+   policy flags are excluded conservatively too. Commented peers stay commented.
+   Original profiles remain available but do not authorize traffic on their own.
+   **Future-expiring peers are deliberately not authorized by this CLI MVP:**
+   without a restored, running panel there is no live expiry enforcement. This
+   prevents expiry during quarantine or after activation from leaving traffic
+   authorized. These peers need a separately restored enforcement-capable panel
+   before they can be re-enabled; this prototype does not do that restoration.
+   Policy is only as recent as the snapshot (later bans are not magically known).
 4. Reuse package/backend installation via an internal hook, preserving keys and
    protocol parameters. On BoringTun, reinstall and verify the pinned release.
    No initial client is generated. Temporary capability-probe keys are unrelated
@@ -111,19 +129,33 @@ restoring a usable panel.
    installed tools using the existing scratch-interface validator (no peers).
    This is **not** a real client handshake test.
 7. Leave the actual VPN stopped and disabled. This prototype's quarantine is an
-   inactive service, not a live test-client firewall. Fence the old server,
-   review the regenerated configuration and arrange a controlled client test
-   before enabling the unit and switching DNS. Apply the generated forwarding
-   sysctls as part of that controlled activation. Do not run both servers as
-   active authorities for the same identity.
+   inactive service, not a live test-client firewall. Fence the old server and
+   review the regenerated configuration. **Activate only with
+   `--activate-state <same-archive>`**, not a manual `systemctl start/enable`.
+   Activation decrypts/verifies the archive again, holds the lifecycle lock,
+   verifies unchanged local receipts and **re-runs peer-policy reconciliation
+   immediately before startup**. It filters the current local config (removals
+   only), never rebuilds peers from the old snapshot, and preserves receipt-
+   verified generated host hooks. It then validates the backend/protocol,
+   applies the forwarding sysctls and starts the service. Only after that,
+   verify a real client handshake before DNS cutover. Do not run both servers
+   as active authorities for the same identity.
+8. Activation does **not** enable the unit at boot. Use the same activation
+   command after reboot until the full panel/enforcement workflow is restored.
+   Reconciliation/activation refuses a running or enabled VPN: stop and disable
+   it first. This is not a live config editor. Root can bypass the supported
+   workflow with manual systemd commands; that is explicitly unsupported.
 
 The journal is `/var/lib/amneziawg-install/state-imports/<manifest-digest>/`.
 On ordinary failure/INT/TERM, newly created VPN config/instance units are removed
 and previous sysctl/module-load/modprobe files restored. Packages, apt sources,
 verified binaries/helpers, module load side effects and empty directories may
 remain; this is **not full host rollback**. Power loss/SIGKILL needs operator
-inspection. A successful rerun verifies its receipt and unchanged local config
-hashes and does nothing; a changed local installation is never overwritten.
+inspection. A successful reimport verifies its receipt and unchanged local config
+hashes, then re-runs policy reconciliation even when those hashes are unchanged;
+it does not reinstall or activate. A dry-run checks the reconciliation plan
+without changing the config/receipt. Receipts are refreshed after safe,
+removals-only reconciliation; a changed local installation is never overwritten.
 
 Temporary decrypted files use mode 0600 within a 0700 directory and are removed
 on ordinary exit. They are not securely erased; use encrypted storage. A hard
@@ -139,8 +171,10 @@ are done automatically.
 
 `python3 tests/test-state-archive.py` checks literal parsing/injection, malicious
 members/links, checksums/schema/protocol/backend mismatch, exact file roundtrip,
-hook removal, peer-policy fixtures, dry-run, quarantine, rollback and idempotent
-rerun using isolated host-command mocks. With `age` installed it additionally
+hook removal, snapshot CLI/env/default precedence, missing policy columns,
+failed manual removal, expired/future-expiry activation, no-resurrection reruns,
+dry-run, quarantine, rollback modes and idempotency using isolated host mocks.
+With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.
 CI installs age and runs this suite.
 
