@@ -3514,7 +3514,7 @@ def config(data, state=None, blocked=frozenset(), preserve_hooks=False):
         for suffix in ('JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'):
             field = {'JC': 'Jc', 'JMIN': 'Jmin', 'JMAX': 'Jmax'}.get(suffix, suffix)
             require(fields.get(field) == state.get('SERVER_AWG_' + suffix), 'obfuscation mismatch')
-            protocol_fields = dict(HeaderProtectionKey='AWG_HEADER_PROTECTION_KEY',
+        protocol_fields = dict(HeaderProtectionKey='AWG_HEADER_PROTECTION_KEY',
             ContentPaddingAddition='AWG_CONTENT_PADDING_ADDITION', RekeyAfterTime='AWG_REKEY_AFTER_TIME',
             RekeyTimeout='AWG_REKEY_TIMEOUT', RejectAfterTime='AWG_REJECT_AFTER_TIME',
             KeepaliveTimeout='AWG_KEEPALIVE_TIMEOUT', RandomTrailers='AWG_RANDOM_TRAILERS',
@@ -3632,7 +3632,7 @@ def config_peer_names(data):
 def peer_policy(root):
     db_path = root / 'web/database.sqlite'
     if not db_path.exists():
-        return {}
+        return None
     with closing(sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True)) as db:
         db.execute('PRAGMA trusted_schema=OFF')
         if db.execute("SELECT type FROM sqlite_master WHERE name='peers'").fetchone() != ('table',):
@@ -3658,6 +3658,8 @@ def peer_policy(root):
 def migration_plan(manifest, files, data, policy, phase):
     now = utc_now()
     exported = export_time(manifest, now)
+    has_panel = policy is not None
+    policy = policy or {}
     active = config_peer_names(data)
     archived = config_peer_names(files['vpn/server.conf'])
     blocked, decisions = set(), []
@@ -3683,6 +3685,8 @@ def migration_plan(manifest, files, data, policy, phase):
             reason = 'invalid_expiry'
         if reason is None and expiry is not None and expiry <= now:
             reason = 'expired'
+        if reason is None and has_panel and public not in policy:
+            reason = 'not_in_panel'
         if reason is None and public not in active:
             reason = 'not_present'  # Reconciliation NEVER resurrects a removed peer.
         decision = 'drop' if reason else 'migrate'
@@ -3740,7 +3744,9 @@ def main():
                                      'No TLS keys, binaries, systemd units, sessions or firewall dumps.'])
         validate_manifest(manifest, files)
         files['manifest.json'] = json.dumps(manifest, sort_keys=True, indent=2).encode()
-        with tarfile.open(args[0], 'w:gz', format=tarfile.USTAR_FORMAT) as archive:
+        stream = args[0] == '-'
+        with tarfile.open(name=None if stream else args[0], fileobj=sys.stdout.buffer if stream else None,
+                          mode='w|gz' if stream else 'w:gz', format=tarfile.USTAR_FORMAT) as archive:
             for name, data in sorted(files.items()):
                 member = tarfile.TarInfo(name)
                 member.size, member.mode = len(data), 0o600
@@ -3952,10 +3958,13 @@ function awgStateExport() { # <destination> <private work directory>
 		echo 'NOTE: default proxy config included for recovery only; custom proxy paths/TLS are TODO.' >&2
 	fi
 	VERSION="$(awg --version 2>/dev/null || printf unknown)"
-	awgStateArchive pack "${WORK}/stage" "${WORK}/state.tar.gz" "${VERSION}" "$(sha256sum "${BASH_SOURCE[0]}" | cut -d ' ' -f1)" || return 1
-	# age reads and confirms its passphrase on /dev/tty. No secret shell variable,
-	# command argument, environment value or log entry ever contains it.
-	age --passphrase --output "${WORK}/encrypted" "${WORK}/state.tar.gz" || return 1
+	# Stream plaintext tar directly into age. Its passphrase still comes only
+	# from /dev/tty, never argv/environment/logs. Check BOTH sides of the pipe.
+	if ! (set -o pipefail; awgStateArchive pack "${WORK}/stage" - "${VERSION}" "$(sha256sum "${BASH_SOURCE[0]}" | cut -d ' ' -f1)" |
+		age --passphrase --output "${WORK}/encrypted"); then
+		rm -f -- "${WORK}/encrypted"
+		return 1
+	fi
 	# Link publishes atomically without overwriting a concurrent destination.
 	local PUBLISH
 	PUBLISH="$(mktemp "$(dirname -- "${DEST}")/.awg-state.XXXXXXXX")" || return 1
@@ -4110,9 +4119,75 @@ function awgStateWriteReceipt() { # <journal> <private temporary output>
 	replaceFileExactly "${OUTPUT}" "${JOURNAL}/receipt" 600
 }
 
-function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <dry-run> <nic>
-	local STAGE="$1" JOURNAL="$2" WORK="$3" MODE="$4" DRY="$5" NIC="$6"
-	[[ "${DRY}" == --dry-run ]] || acquireClientLifecycleLock || return 1
+# Root-private persistent tombstone; no archived policy may be replayed after
+# finalization. It survives purging all secret/recovery material from the journal.
+function awgStateIsFinalized() { # <journal> <interface>
+	local MARKER="$1/finalized" INTERFACE="$2"
+	[[ -f "${MARKER}" && ! -L "${MARKER}" ]] && awgStateTrustedPath "${MARKER}" &&
+		[[ "$(<"${MARKER}")" == "${INTERFACE}" ]]
+}
+
+function awgStateWorkDir() {
+	local BASE TYPE WORK
+	for BASE in /dev/shm /run; do
+		[[ -d "${BASE}" && ! -L "${BASE}" ]] || continue
+		TYPE="$(stat -f -c %T -- "${BASE}")" || continue
+		[[ "${TYPE}" == tmpfs || "${TYPE}" == ramfs ]] || continue
+		if WORK="$(mktemp -d "${BASE}/awg-state.XXXXXXXX")"; then
+			printf '%s\n' "${WORK}"
+			return 0
+		fi
+	done
+	echo 'WARNING: RAM-backed staging unavailable; using private /tmp staging. Use encrypted storage.' >&2
+	mktemp -d /tmp/awg-state.XXXXXXXX
+}
+
+function awgStatePurgeJournal() ( # <manifest-sha256> [--force]
+	set +x
+	umask 077
+	local DIGEST="$1" FORCE="${2:-}" JOURNAL ENTRY FINALIZED=0
+	isRoot || exit 1
+	[[ "${DIGEST}" =~ ^[0-9a-f]{64}$ ]] || exit 1
+	JOURNAL="${AWG_STATE_JOURNAL_DIR}/${DIGEST}"
+	awgStateTrustedPath "${JOURNAL}" && [[ -d "${JOURNAL}" && ! -L "${JOURNAL}" ]] || exit 1
+	acquireClientLifecycleLock || exit 1
+	trap releaseClientLifecycleLock EXIT
+	if [[ -f "${JOURNAL}/finalized" && ! -L "${JOURNAL}/finalized" ]] &&
+		awgStateTrustedPath "${JOURNAL}/finalized" && [[ -s "${JOURNAL}/finalized" ]]; then
+		FINALIZED=1
+	elif [[ "${FORCE}" != --force ]]; then
+		echo 'ERROR: journal is not finalized; --force explicitly abandons quarantine/rollback recovery.' >&2
+		exit 1
+	fi
+	# Fail closed on unexpected top-level entries. rm never follows symlinks;
+	# --one-file-system also prevents descending into a nested mounted filesystem.
+	shopt -s nullglob dotglob
+	for ENTRY in "${JOURNAL}/"*; do
+		case "${ENTRY##*/}" in
+			before|recovery|receipt|nic|steps|finalized) ;;
+			*) echo 'ERROR: unexpected journal entry; refusing purge.' >&2; exit 1 ;;
+		esac
+	done
+	for ENTRY in before recovery receipt nic steps; do
+		rm -rf --one-file-system -- "${JOURNAL}/${ENTRY}" || exit 1
+	done
+	if (( FINALIZED )); then
+		echo 'Purged plaintext recovery/rollback material; retained only the non-secret finalized tombstone.'
+	else
+		rm -f -- "${JOURNAL}/finalized" && rmdir -- "${JOURNAL}" || exit 1
+		echo 'Purged unfinalized journal by explicit force; this archive can no longer reconcile/activate that import.'
+	fi
+	echo 'Deletion is not secure erasure; old disk/swap/backup copies may remain.'
+)
+
+function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> <nic>
+	local STAGE="$1" JOURNAL="$2" WORK="$3" MODE="$4" OPTION="$5" NIC="$6"
+	[[ "${OPTION}" == --dry-run ]] || acquireClientLifecycleLock || return 1
+	if awgStateIsFinalized "${JOURNAL}" "${SERVER_AWG_NIC}"; then
+		echo 'Migration already finalized; archived policy is not replayed. Manage the VPN with systemctl normally.'
+		return 0
+	fi
+	[[ ! -e "${JOURNAL}/finalized" && ! -L "${JOURNAL}/finalized" ]] || { echo 'ERROR: invalid finalized journal marker.' >&2; return 1; }
 	awgStateTrustedPath "${JOURNAL}/receipt" && awgStateTrustedPath "${SERVER_AWG_CONF}" &&
 		awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || return 1
 	if [[ ! -f "${JOURNAL}/nic" || "$(<"${JOURNAL}/nic")" != "${NIC}" ]] ||
@@ -4128,7 +4203,7 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <dry-run>
 	fi
 	awgStateArchive reconcile "${SERVER_AWG_CONF}" "${STAGE}" "${WORK}/reconciled.conf" || return 1
 	echo 'Policy: future-expiry peers migrate; expired/disabled/archived/removal-pending peers are excluded. Ongoing expiry enforcement needs the restored panel or operator.'
-	if [[ "${DRY}" == --dry-run ]]; then
+	if [[ "${OPTION}" == --dry-run ]]; then
 		echo 'Plan: re-reconcile the unchanged import without reinstalling or activating.'
 		return 0
 	fi
@@ -4157,7 +4232,28 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <dry-run>
 			return 1
 		fi
 		printf '%s\n' activated >>"${JOURNAL}/steps" || return 1
-		echo 'Activated after reconciliation. Unit remains disabled at boot; verify a real handshake before DNS cutover.'
+		if [[ "${OPTION}" == --enable-at-boot ]]; then
+			if ! printf '%s\n' "${SERVER_AWG_NIC}" >"${WORK}/finalized"; then
+				systemctl stop "awg-quick@${SERVER_AWG_NIC}" || true
+				return 1
+			fi
+			if ! systemctl enable "awg-quick@${SERVER_AWG_NIC}"; then
+				systemctl disable "awg-quick@${SERVER_AWG_NIC}" || true
+				systemctl stop "awg-quick@${SERVER_AWG_NIC}" || true
+				return 1
+			fi
+			if ! replaceFileExactly "${WORK}/finalized" "${JOURNAL}/finalized" 600 ||
+				! awgStateIsFinalized "${JOURNAL}" "${SERVER_AWG_NIC}"; then
+				systemctl disable "awg-quick@${SERVER_AWG_NIC}" || true
+				systemctl stop "awg-quick@${SERVER_AWG_NIC}" || true
+				return 1
+			fi
+			printf '%s\n' finalized >>"${JOURNAL}/steps" || echo 'WARNING: finalized marker saved but journal step append failed.' >&2
+			echo 'Finalized: VPN enabled at boot. Normal systemctl management no longer requires the archive/passphrase.'
+			echo "REMINDER: plaintext secrets remain in ${JOURNAL}; after reviewing recovery needs, purge with --purge-state-journal ${JOURNAL##*/}."
+		else
+			echo 'Activated for testing only; still disabled at boot. Stop/disable it, then activate with --enable-at-boot to finalize.'
+		fi
 	else
 		echo 'Existing import re-reconciled without reinstalling; VPN remains stopped/disabled.'
 	fi
@@ -4167,7 +4263,7 @@ function awgStateCommand() (
 	# xtrace must not echo imported private keys during printf -v/serialization.
 	set +x
 	umask 077
-	local MODE="$1" ARCHIVE="$2" DRY="${3:-}" WORK NIC="${SERVER_PUB_NIC:-}" ID JOURNAL
+	local MODE="$1" ARCHIVE="$2" OPTION="${3:-}" WORK NIC="${SERVER_PUB_NIC:-}" STATE_ID JOURNAL
 	isRoot || exit 1
 	checkOS
 	[[ "${ID:-}" == debian || "${ID:-}" == ubuntu ]] || {
@@ -4175,9 +4271,9 @@ function awgStateCommand() (
 		exit 1
 	}
 	local ALLOW_INSTALL=1
-	[[ "${MODE}" == --inspect-state || "${MODE}" == --activate-state || "${DRY}" == --dry-run ]] && ALLOW_INSTALL=0
+	[[ "${MODE}" == --inspect-state || "${MODE}" == --activate-state || "${OPTION}" == --dry-run ]] && ALLOW_INSTALL=0
 	awgStateDependencies "${ALLOW_INSTALL}" || exit 1
-	WORK="$(mktemp -d /tmp/awg-state.XXXXXXXX)" || exit 1
+	WORK="$(awgStateWorkDir)" || exit 1
 	trap 'rm -rf -- "${WORK}"; releaseClientLifecycleLock' EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
@@ -4202,11 +4298,11 @@ function awgStateCommand() (
 		NIC="$(ip -4 route show default | awk '{for(i=1;i<NF;i++) if($i=="dev") {print $(i+1); exit}}')"
 		[[ -n "${NIC}" ]] || NIC="$(ip -6 route show default | awk '{for(i=1;i<NF;i++) if($i=="dev") {print $(i+1); exit}}')"
 	fi
-	ID="$(sha256sum "${WORK}/stage/manifest.json")"; ID="${ID%% *}"
-	JOURNAL="${AWG_STATE_JOURNAL_DIR}/${ID}"
+	STATE_ID="$(sha256sum "${WORK}/stage/manifest.json")"; STATE_ID="${STATE_ID%% *}"
+	JOURNAL="${AWG_STATE_JOURNAL_DIR}/${STATE_ID}"
 	awgStateTrustedPath "${JOURNAL}" || { echo 'ERROR: unsafe journal path.' >&2; exit 1; }
-	if [[ -f "${JOURNAL}/receipt" ]]; then
-		awgStateReconcileImport "${WORK}/stage" "${JOURNAL}" "${WORK}" "${MODE}" "${DRY}" "${NIC}"
+	if [[ -f "${JOURNAL}/receipt" || -e "${JOURNAL}/finalized" || -L "${JOURNAL}/finalized" ]]; then
+		awgStateReconcileImport "${WORK}/stage" "${JOURNAL}" "${WORK}" "${MODE}" "${OPTION}" "${NIC}"
 		exit $?
 	fi
 	if [[ "${MODE}" == --activate-state ]]; then
@@ -4219,7 +4315,7 @@ function awgStateCommand() (
 	printf 'Plan: install %s backend, AWG %s, interface %s, UDP %s, uplink %s.\n' "${AWG_BACKEND}" "${AWG_PROTOCOL_VERSION}" "${SERVER_AWG_NIC}" "${SERVER_PORT}" "${NIC}"
 	echo 'Restore original keys/profiles; replace host hooks; migrate future-expiry peers and exclude already-expired/disabled/archived/removal-pending peers.'
 	echo 'Leave VPN stopped/disabled. Panel/mail/proxy files are recovery-only (automatic restore TODO).'
-	[[ "${DRY}" != --dry-run ]] || exit 0
+	[[ "${OPTION}" != --dry-run ]] || exit 0
 	acquireClientLifecycleLock || exit 1
 	# Repeat under lock to close the preflight/installation race.
 	awgStateImportPreflight "${NIC}" "${WORK}" || exit 1
@@ -4232,8 +4328,8 @@ function awgStateCommand() (
 	[[ ${STATUS} -eq 0 ]] || exit "${STATUS}"
 	echo "Imported in quarantine. Journal/recovery: ${JOURNAL}"
 	echo 'Before DNS cutover: fence the old server, inspect firewall hooks, and test a client handshake.'
-	echo "After fencing the old server, use: bash amneziawg-install.sh --activate-state <same-archive>"
-	echo 'Do not start/enable the unit manually: activation must re-reconcile peer policy.'
+	echo "After fencing the old server, use: bash amneziawg-install.sh --activate-state <same-archive> --enable-at-boot"
+	echo 'Before finalization, do not start/enable the unit manually: activation must re-reconcile peer policy.'
 	echo 'Clients using literal IP endpoints still need updated profiles; DNS re-resolution depends on the client.'
 )
 
@@ -15015,11 +15111,19 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	# Requires AmneziaWG to be already installed (params file must exist).
 	case "${1:-}" in
 		--export-state|--inspect-state|--import-state|--activate-state)
-			if [[ $# -ne 2 && ! ( "$1" == --import-state && $# -eq 3 && "$3" == --dry-run ) ]] || [[ -z "${2:-}" || "${2:-}" == -* ]]; then
-				echo 'Usage: amneziawg-install.sh --export-state <file> | --inspect-state <file> | --import-state <file> [--dry-run] | --activate-state <file>' >&2
+			if [[ $# -ne 2 && ! ( "$1" == --import-state && $# -eq 3 && "$3" == --dry-run ) && ! ( "$1" == --activate-state && $# -eq 3 && "$3" == --enable-at-boot ) ]] || [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+				echo 'Usage: amneziawg-install.sh --export-state <file> | --inspect-state <file> | --import-state <file> [--dry-run] | --activate-state <file> [--enable-at-boot]' >&2
 				exit 1
 			fi
 			awgStateCommand "$@"
+			exit $?
+			;;
+		--purge-state-journal)
+			if [[ $# -ne 2 && ! ( $# -eq 3 && "$3" == --force ) ]] || [[ ! "${2:-}" =~ ^[0-9a-f]{64}$ ]]; then
+				echo 'Usage: amneziawg-install.sh --purge-state-journal <manifest-sha256> [--force]' >&2
+				exit 1
+			fi
+			awgStatePurgeJournal "$2" "${3:-}"
 			exit $?
 			;;
 		--upgrade-boringtun|--rollback-boringtun)

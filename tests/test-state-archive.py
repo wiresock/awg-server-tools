@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 """Untrusted archive tests; no root, VPN, package manager or network required."""
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import base64
 import copy
 import hashlib
@@ -330,6 +330,7 @@ datetime = TestDatetime
         with closing(sqlite3.connect(dest / 'web/database.sqlite')) as db, db:
             db.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, expires_at TEXT, removal_pending INTEGER NOT NULL DEFAULT 0)')
             db.execute('INSERT INTO peers(public_key,disabled,archived,expires_at) VALUES(?,1,0,NULL)', (PEER,))
+            db.execute('INSERT INTO peers(public_key,disabled,archived,expires_at) VALUES(?,0,0,NULL)', (other,))
         self.run_helper('prepare', dest)
         clean = (dest / 'interface.conf').read_text() + (dest / 'peers.conf').read_text()
         self.assertNotIn('### Client phone', clean)
@@ -475,16 +476,126 @@ collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=("$ROOT/source
 awg() { [[ "$1" == --version ]] && printf 'fixture-tools\n'; }
 # Only transport orchestration is mocked here. Encryption itself has a separate
 # real-age controlling-TTY test below; this is NOT an encryption assertion.
-age() { [[ "$1" == --passphrase && "$2" == --output ]] || return 1; cp -- "$4" "$3"; }
+age() { [[ "$1" == --passphrase && "$2" == --output && $# -eq 3 ]] || return 1; [[ ! -e "$ROOT/work/state.tar.gz" ]] || return 91; python3 -c 'import sys;sys.stdout.buffer.write(sys.stdin.buffer.read())' >"$3"; }
 awgStateExport "$ROOT/export-test.tar.gz" "$ROOT/work" || exit 10
 [[ "$(stat -c %a "$ROOT/export-test.tar.gz")" == 600 ]] || exit 11
 awgStateExport "$ROOT/export-test.tar.gz" "$ROOT/work"
 [[ $? -ne 0 ]] || exit 12
+[[ ! -e "$ROOT/work/state.tar.gz" ]] || exit 13
+# A failing producer followed by a successful consumer must still fail.
+awgStateArchive() {
+    if [[ "$1" == pack ]]; then printf 'partial-plaintext'; return 23; fi
+    python3 "$ROOT/helper.py" "${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}" "$@"
+}
+awgStateExport "$ROOT/producer-failure" "$ROOT/work"
+[[ $? -ne 0 && ! -e "$ROOT/producer-failure" && ! -e "$ROOT/work/encrypted" ]] || exit 14
+# A failing consumer must remove even an already-created partial ciphertext.
+awgStateArchive() {
+    if [[ "$1" == pack ]]; then printf 'partial-plaintext'; return 0; fi
+    python3 "$ROOT/helper.py" "${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}" "$@"
+}
+age() { printf partial >"$3"; return 24; }
+awgStateExport "$ROOT/consumer-failure" "$ROOT/work"
+[[ $? -ne 0 && ! -e "$ROOT/consumer-failure" && ! -e "$ROOT/work/encrypted" ]] || exit 15
 '''
         result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
         self.assertNotIn(KEY.encode(), result.stdout + result.stderr)
         self.run_helper('verify', self.root / 'export-test.tar.gz')
+
+    def test_panel_membership_is_authoritative_only_when_database_exists(self):
+        destination = self.root / 'no-panel'
+        self.run_helper('unpack', self.tar, destination)
+        self.assertEqual(json.loads(self.run_helper('prepare', destination).stdout)['counts']['migrate'], 1)
+        self.add_policy([])
+        report = json.loads(self.run_helper('inspect').stdout)['peer_plan']
+        self.assertEqual(report['counts'], {'migrate': 0, 'drop': 1})
+        self.assertEqual(report['peers'][0]['reason'], 'not_in_panel')
+        self.assertEqual(report['peers'][0]['name'], 'phone')
+        destination = self.root / 'panel'
+        self.run_helper('unpack', self.tar, destination)
+        plan = json.loads(self.run_helper('prepare', destination).stdout)
+        self.assertEqual(plan['peers'][0]['reason'], 'not_in_panel')
+        self.assertNotIn(PEER, (destination / 'peers.conf').read_text())
+
+    def test_real_clock_expiry_passes_between_import_and_activation_policy(self):
+        # Exercise the unmodified production datetime.now comparison. This is a
+        # short-lived isolated fixture, not a mocked clock or a live VPN test.
+        deadline = (datetime.now(timezone.utc) + timedelta(seconds=5)).replace(microsecond=0)
+        expiry = deadline.strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.add_policy([(PEER, 0, 0, 0, expiry, None)])
+        destination = self.root / 'real-clock'
+        self.run_helper('unpack', self.tar, destination)
+        imported = json.loads(self.run_helper('prepare', destination).stdout)
+        self.assertEqual(imported['peers'][0]['decision'], 'migrate')
+        local = self.root / 'current.conf'
+        local.write_bytes((destination / 'interface.conf').read_bytes() + (destination / 'peers.conf').read_bytes())
+        remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+        if remaining > 0:
+            time.sleep(remaining + 0.02)
+        candidate = self.root / 'at-activation.conf'
+        activated = json.loads(self.run_helper('reconcile', local, destination, candidate).stdout)
+        self.assertEqual(activated['peers'][0]['reason'], 'expired')
+        self.assertEqual(activated['peers'][0]['expires_at'], expiry)
+        self.assertNotIn(PEER, candidate.read_text())
+
+    def test_journal_purge_refusal_force_finalized_tombstone_and_symlinks(self):
+        shell = r'''
+set -euo pipefail
+source "$1"
+ROOT="$2"
+AWG_STATE_JOURNAL_DIR="$ROOT/journals"
+DIGEST="$(printf 'a%.0s' {1..64})"
+JOURNAL="$AWG_STATE_JOURNAL_DIR/$DIGEST"
+isRoot() { return 0; }
+awgStateTrustedPath() { return 0; }
+acquireClientLifecycleLock() { return 0; }
+releaseClientLifecycleLock() { return 0; }
+mkdir -p "$JOURNAL/recovery" "$JOURNAL/before" "$ROOT/outside"
+printf secret >"$JOURNAL/recovery/secret"
+printf outside >"$ROOT/outside/sentinel"
+if awgStatePurgeJournal "$DIGEST"; then exit 10; fi
+[[ -f "$JOURNAL/recovery/secret" ]]
+if awgStatePurgeJournal ../outside --force; then exit 11; fi
+awgStatePurgeJournal "$DIGEST" --force
+[[ ! -e "$JOURNAL" && -f "$ROOT/outside/sentinel" ]]
+mkdir -p "$JOURNAL/before"
+printf 'awg0\n' >"$JOURNAL/finalized"
+printf secret >"$JOURNAL/receipt"
+ln -s "$ROOT/outside" "$JOURNAL/recovery"
+printf unrecognized >"$JOURNAL/unexpected"
+if awgStatePurgeJournal "$DIGEST" --force; then exit 12; fi
+[[ -f "$JOURNAL/receipt" ]]
+rm "$JOURNAL/unexpected"
+awgStatePurgeJournal "$DIGEST"
+[[ -f "$ROOT/outside/sentinel" && ! -e "$JOURNAL/recovery" && ! -e "$JOURNAL/receipt" && ! -e "$JOURNAL/before" ]]
+awgStateIsFinalized "$JOURNAL" awg0
+awgStatePurgeJournal "$DIGEST" # idempotent, retaining only non-secret tombstone
+rm "$JOURNAL/finalized"
+ln -s "$ROOT/outside/sentinel" "$JOURNAL/finalized"
+if awgStatePurgeJournal "$DIGEST"; then exit 13; fi
+[[ -f "$ROOT/outside/sentinel" ]]
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertNotIn(b'secret', result.stdout.replace(b'non-secret', b''))
+
+    def test_staging_prefers_private_ram_backed_directory_with_safe_fallback(self):
+        shell = r'''
+set -euo pipefail
+source "$1"
+WORK="$(awgStateWorkDir)"
+trap 'rm -rf -- "$WORK"' EXIT
+[[ -d "$WORK" && "$(stat -c %a "$WORK")" == 700 ]]
+if [[ -d /dev/shm && "$(stat -f -c %T /dev/shm)" == tmpfs ]]; then [[ "$WORK" == /dev/shm/awg-state.* ]]; fi
+rm -rf -- "$WORK"
+stat() { return 1; }
+WORK="$(awgStateWorkDir)"
+[[ "$WORK" == /tmp/awg-state.* && -d "$WORK" ]]
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT)], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn(b'WARNING: RAM-backed staging unavailable', result.stderr)
 
     def test_truncated_gzip_and_oversized_tar_member(self):
         self.tar.write_bytes(self.tar.read_bytes()[:30])
@@ -592,13 +703,21 @@ awgStateCommand --import-state "$ROOT/state.tar.gz"
         for name, mode, expiry in (
                 ('activation-expired', '--activate-state', '2000-01-01T00:00:00Z'),
                 ('activation-future', '--activate-state', '2999-01-01T00:00:00Z'),
+                ('finalize', '--activate-state', '2999-01-01T00:00:00Z'),
+                ('enable-failure', '--activate-state', '2999-01-01T00:00:00Z'),
                 ('activation-crossed', '--activate-state', '2001-01-01T00:00:20Z'),
+                ('activation-real-clock', '--activate-state', ''),
                 ('reimport-future', '--import-state', '2999-01-01T00:00:00Z'),
                 ('dry-run', '--dry-run', '2999-01-01T00:00:00Z'),
                 ('bad-schema', '--activate-state', '2999-01-01T00:00:00Z')):
             with self.subTest(name=name):
                 root = self.root / name
                 root.mkdir()
+                if name == 'enable-failure':
+                    (root / 'fail-enable').touch()
+                if name == 'activation-real-clock':
+                    expiry = (datetime.now(timezone.utc) + timedelta(seconds=5)).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    (root / 'real-deadline').write_text(expiry)
                 files = dict(self.files)
                 for label, public, address in (('pending', pending, 3), ('permanent', permanent, 4),
                                                 ('removed', removed, 5)):
@@ -641,6 +760,7 @@ set -uo pipefail
 source "$1"
 ROOT="$2"
 MODE="$3"
+OPTION="${4:-}"
 if [[ -f "$ROOT/clock" ]]; then
     awgStateArchive() { python3 "$ROOT/helper.py" "${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}" "$@"; }
 fi
@@ -677,21 +797,60 @@ validateStagedAwgConfigs() {
 sysctl() { printf 'sysctl\n' >>"$ROOT/events"; }
 systemctl() {
     case "$1" in
-        is-active|is-enabled) return 1 ;;
-        start) cp "$SERVER_AWG_CONF" "$ROOT/at-start.conf"; printf 'start\n' >>"$ROOT/events" ;;
+        is-active) [[ -e "$ROOT/active" ]] ;;
+        is-enabled) [[ -e "$ROOT/enabled" ]] ;;
+        start) touch "$ROOT/active"; cp "$SERVER_AWG_CONF" "$ROOT/at-start.conf"; printf 'start\n' >>"$ROOT/events" ;;
+        enable) printf 'enable\n' >>"$ROOT/events"; [[ ! -e "$ROOT/fail-enable" ]] || return 17; touch "$ROOT/enabled" ;;
+        disable) printf 'disable\n' >>"$ROOT/events"; rm -f "$ROOT/enabled" ;;
+        stop) printf 'stop\n' >>"$ROOT/events"; rm -f "$ROOT/active" ;;
         *) echo 'unexpected systemctl command' >&2; return 90 ;;
     esac
 }
+if [[ -f "$ROOT/real-deadline" ]]; then
+    awgStateArchive prepare "$ROOT/reference" || exit 23
+    python3 - "$ROOT/real-deadline" <<'WAIT_REAL_CLOCK'
+from datetime import datetime, timezone
+from pathlib import Path
+import sys, time
+deadline = datetime.fromisoformat(Path(sys.argv[1]).read_text().replace('Z', '+00:00'))
+remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+if remaining > 0:
+    time.sleep(remaining + 0.02)
+WAIT_REAL_CLOCK
+fi
 if [[ "$MODE" == --dry-run ]]; then
     awgStateCommand --import-state "$ROOT/state.tar.gz" --dry-run
 else
-    awgStateCommand "$MODE" "$ROOT/state.tar.gz"
+    awgStateCommand "$MODE" "$ROOT/state.tar.gz" ${OPTION:+"$OPTION"}
 fi
 STATUS=$?
 [[ $STATUS -eq 0 ]] || exit "$STATUS"
 sha256sum -c --status "$JOURNAL/receipt" || exit 14
+if [[ "$OPTION" == --enable-at-boot ]]; then
+    [[ -f "$ROOT/enabled" && -f "$JOURNAL/finalized" ]] || exit 15
+    # Simulated reboot: an enabled service starts using local state, no archive.
+    systemctl stop "awg-quick@awg0"
+    systemctl start "awg-quick@awg0"
+    printf '\n# operator edit after finalization\n' >>"$SERVER_AWG_CONF"
+    cp "$SERVER_AWG_CONF" "$ROOT/finalized.conf"
+    awgStateCommand --import-state "$ROOT/state.tar.gz" || exit 16
+    awgStateCommand --activate-state "$ROOT/state.tar.gz" --enable-at-boot || exit 17
+    cmp "$SERVER_AWG_CONF" "$ROOT/finalized.conf" || exit 18
+    cp "$JOURNAL/steps" "$ROOT/finalized-steps"
+    awgStatePurgeJournal "${JOURNAL##*/}" || exit 19
+    [[ ! -e "$JOURNAL/receipt" && -f "$JOURNAL/finalized" ]] || exit 20
+    awgStateCommand --activate-state "$ROOT/state.tar.gz" --enable-at-boot || exit 21
+    cmp "$SERVER_AWG_CONF" "$ROOT/finalized.conf" || exit 22
+fi
 '''
-                result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(root), mode], capture_output=True)
+                result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(root), mode, '--enable-at-boot' if name in ('finalize', 'enable-failure') else ''], capture_output=True)
+                if name == 'enable-failure':
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse((root / 'enabled').exists())
+                    self.assertFalse((root / 'active').exists())
+                    self.assertFalse(list((root / 'journals').glob('*/finalized')))
+                    self.assertEqual((root / 'events').read_text(), 'validate\nsysctl\nstart\nenable\ndisable\nstop\n')
+                    continue
                 if name == 'bad-schema':
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(b'policy schema missing required columns: removal_pending', result.stderr)
@@ -711,22 +870,31 @@ sha256sum -c --status "$JOURNAL/receipt" || exit 14
                 self.assertIn(permanent, clean)
                 self.assertIn('PostUp = echo local-generated-hook', clean)
                 self.assertIn('future-expiry peers migrate', result.stdout.decode())
-                if name == 'activation-crossed':
+                if name in ('activation-crossed', 'activation-real-clock'):
                     self.assertIn(b'"reason": "future_expiry"', result.stdout)
                     self.assertIn(b'"reason": "expired"', result.stdout)
                     self.assertIn(b'"name": "phone"', result.stdout)
-                    self.assertIn(b'"expires_at": "2001-01-01T00:00:20Z"', result.stdout)
-                if mode == '--activate-state':
+                    self.assertIn(('"expires_at": "' + expiry + '"').encode(), result.stdout)
+                if name == 'finalize':
+                    self.assertTrue((root / 'enabled').exists())
+                    self.assertEqual(next((root / 'journals').glob('*/finalized')).read_text(), 'awg0\n')
+                    self.assertIn('finalized', (root / 'finalized-steps').read_text())
+                    self.assertIn(b'already finalized; archived policy is not replayed', result.stdout)
+                    self.assertIn(b'--purge-state-journal', result.stdout)
+                    self.assertEqual((root / 'events').read_text(), 'validate\nsysctl\nstart\nenable\nstop\nstart\n')
+                elif mode == '--activate-state':
                     self.assertEqual((root / 'at-start.conf').read_text(), clean)
                     self.assertEqual((root / 'events').read_text(), 'validate\nsysctl\nstart\n')
                 else:
                     self.assertFalse((root / 'events').exists())
-                self.assertIn('reconciled', next((root / 'journals').glob('*/steps')).read_text())
+                self.assertIn('reconciled', (root / 'finalized-steps').read_text() if name == 'finalize' else next((root / 'journals').glob('*/steps')).read_text())
 
     def test_invalid_arguments_never_enter_interactive_install(self):
         for args in (['--export-state'], ['--inspect-state', 'x', '--dry-run'],
                      ['--import-state', 'x', '--unknown'], ['--import-state', '--dry-run'],
-                     ['--activate-state'], ['--activate-state', 'x', '--dry-run']):
+                     ['--activate-state'], ['--activate-state', 'x', '--dry-run'],
+                     ['--import-state', 'x', '--enable-at-boot'], ['--purge-state-journal'],
+                     ['--purge-state-journal', '../x', '--force'], ['--purge-state-journal', 'a'*64, '--unknown']):
             result = subprocess.run(['bash', str(SCRIPT), *args], capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b'Usage:', result.stderr)
@@ -734,13 +902,13 @@ sha256sum -c --status "$JOURNAL/receipt" || exit 14
     @unittest.skipUnless(shutil.which('age'), 'age not installed')
     def test_age_passphrase_roundtrip_and_wrong_passphrase(self):
         """Real age and controlling TTY; the secret is never in argv or env."""
-        def run_age(args, responses):
+        def run_age(args, responses, program='age'):
             pid, fd = pty.fork()
             if pid == 0:
                 settings = termios.tcgetattr(0)
                 settings[3] &= ~termios.ECHO
                 termios.tcsetattr(0, termios.TCSANOW, settings)
-                os.execvp('age', ['age', *args])
+                os.execvp(program, [program, *args])
             output = b''
             deadline = time.monotonic() + 25
             index = 0
@@ -771,7 +939,33 @@ sha256sum -c --status "$JOURNAL/receipt" || exit 14
                 os.close(fd)
         encrypted = self.root / 'backup.awgx'
         secret = 'a-test-only-long-passphrase'
-        rc, log = run_age(['--passphrase', '--output', str(encrypted), str(self.tar)], [secret, secret])
+        source = self.root / 'source'
+        for name, data in self.files.items():
+            if name.startswith('vpn/'):
+                path = source / ('awg0.conf' if name.endswith('server.conf') else 'params')
+            else:
+                path = source / name
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.write_bytes(data)
+        (self.root / 'work').mkdir(mode=0o700)
+        # Run the actual export pipeline with real age and a controlling TTY.
+        # Only host discovery/locking is mocked, never packing or encryption.
+        shell = r'''
+set -euo pipefail
+umask 077
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/source"
+AWG_STATE_PROXY_CONFIG="$ROOT/no-proxy"
+acquireClientLifecycleLock() { return 0; }
+awgStateTrustedPath() { return 0; }
+isWebPanelInstalled() { return 1; }
+collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=("$ROOT/source/clients/awg0-client-phone.conf"); }
+awg() { [[ "$1" == --version ]] && printf 'fixture-tools\n'; }
+awgStateExport "$ROOT/backup.awgx" "$ROOT/work"
+[[ ! -e "$ROOT/work/state.tar.gz" ]]
+'''
+        rc, log = run_age(['-c', shell, 'test', str(SCRIPT), str(self.root)], [secret, secret], program='bash')
         self.assertEqual(rc, 0, log)
         self.assertNotIn(secret.encode(), log)
         decrypted = self.root / 'decrypted.tar.gz'

@@ -19,7 +19,7 @@ bash amneziawg-install.sh --inspect-state /root/server.awgx
 SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --import-state /root/server.awgx --dry-run
 SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --import-state /root/server.awgx
 # After reviewing configuration and fencing/stopping the old server:
-SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --activate-state /root/server.awgx
+SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --activate-state /root/server.awgx --enable-at-boot
 ```
 
 `ens3` is an example: use the **new host's public network interface**, not its
@@ -132,7 +132,9 @@ restoring a usable panel.
    not resurrect its peer. Required columns `public_key`, `disabled`, `archived`,
    `removal_pending`, `expires_at` must exist; incompatible schemas fail closed
    with a missing-column diagnostic. NULL policy flags are excluded too.
-   Commented peers stay commented; profiles alone do not authorize traffic.
+   If a panel DB exists, a config peer absent from its `peers` table is dropped
+   with reason `not_in_panel`; an absent panel DB preserves the config-only
+   behavior. Commented peers stay commented; profiles alone do not authorize traffic.
    **Ongoing expiry enforcement after activation depends on restoring the panel
    (or on the operator).** This prototype does not restore that enforcement or
    install a background expiry timer, but it does not block future-expiry users
@@ -152,7 +154,8 @@ restoring a usable panel.
 7. Leave the actual VPN stopped and disabled. This prototype's quarantine is an
    inactive service, not a live test-client firewall. Fence the old server and
    review the regenerated configuration. **Activate only with
-   `--activate-state <same-archive>`**, not a manual `systemctl start/enable`.
+   `--activate-state <same-archive> --enable-at-boot`**, not a manual
+   `systemctl start/enable` before finalization.
    Activation decrypts/verifies the archive again, holds the lifecycle lock,
    verifies unchanged local receipts and **re-runs peer-policy reconciliation
    at activation and again after backend validation/sysctl application,
@@ -163,11 +166,20 @@ restoring a usable panel.
    package installation before recording its receipt. Only after that,
    verify a real client handshake before DNS cutover. Do not run both servers
    as active authorities for the same identity.
-8. Activation does **not** enable the unit at boot. Use the same activation
-   command after reboot until the full panel/enforcement workflow is restored.
-   Reconciliation/activation refuses a running or enabled VPN: stop and disable
-   it first. This is not a live config editor. Root can bypass the supported
-   workflow with manual systemd commands; that is explicitly unsupported.
+8. With `--enable-at-boot`, successful activation enables the unit and records
+   **finalized** in the journal (including a non-secret persistent marker).
+   This is the normal completed migration: after reboot, systemd starts the
+   local VPN without an archive, passphrase or migration-script invocation.
+   Normal `systemctl` management and panel/operator configuration changes are
+   supported after finalization. Subsequent archive import/activation calls
+   are no-ops for that finalized journal: they do not replay stale peer policy,
+   validate old receipts, reinstall, or reject an active/enabled unit.
+   Ongoing expiry enforcement remains the panel/operator's responsibility.
+   Without the flag, activation is temporary testing only and leaves boot
+   disabled. Stop/disable the test VPN, then repeat activation with
+   `--enable-at-boot` to finalize. An enable/marker-publication failure attempts
+   to stop/disable the unit and leaves the migration unfinalized. A power loss
+   between enabling and recording the marker needs operator inspection.
 
 The journal is `/var/lib/amneziawg-install/state-imports/<manifest-digest>/`.
 On ordinary failure/INT/TERM, newly created VPN config/instance units are removed
@@ -176,15 +188,52 @@ verified binaries/helpers, module load side effects and empty directories may
 remain; this is **not full host rollback**. Power loss/SIGKILL needs operator
 inspection. A successful reimport verifies its receipt and unchanged local config
 hashes, then re-runs policy reconciliation even when those hashes are unchanged;
-it does not reinstall or activate. A dry-run checks the reconciliation plan
+it does not reinstall or activate. This applies **before finalization**; finalized
+imports never replay the old snapshot. A dry-run checks the reconciliation plan
 without changing the config/receipt. Receipts are refreshed after safe,
 removals-only reconciliation; a changed local installation is never overwritten.
 
-Temporary decrypted files use mode 0600 within a 0700 directory and are removed
-on ordinary exit. They are not securely erased; use encrypted storage. A hard
-kill can leave staging behind. Streaming panel export and a no-plaintext-staging
-mode are separate follow-up work. The encrypted destination is published with
-mode 0600 without overwriting an existing path.
+### Purging plaintext journal secrets
+
+The journal's `recovery/` retains exact plaintext server params/keys, the panel
+DB/env (potentially SMTP credentials), and proxy data. `before/` retains rollback
+files. These are root-private but **remain until explicitly purged**; finalizing
+prints a reminder and the exact manifest digest to use:
+
+```sh
+# Replace MANIFEST_SHA256 with the 64-character digest from the journal path:
+bash amneziawg-install.sh --purge-state-journal MANIFEST_SHA256
+# Only to abandon an unfinalized/failed import and its rollback/activation path:
+bash amneziawg-install.sh --purge-state-journal MANIFEST_SHA256 --force
+```
+
+No archive/passphrase or age/sqlite dependency is needed for purge. It refuses
+unfinalized journals without `--force`, validates the digest and trusted journal
+path, takes the lifecycle lock, and rejects unexpected top-level entries. It
+removes recovery/rollback files and receipts without following symlinks or
+crossing filesystem boundaries. A finalized journal retains **only the non-secret
+`finalized` interface-name tombstone**, so old archives cannot resurrect policy
+after purge. Repeated purge is safe. Forced purge of an unfinalized journal
+removes it entirely and abandons that import's recovery/reconciliation path;
+it does not stop the VPN or remove the installed configuration.
+
+### Temporary staging and streaming encryption
+
+Export streams gzip tar bytes **directly into age through a pipe**; no plaintext
+`state.tar.gz` is written. Both pipeline statuses are checked (`pipefail`), and a
+failed producer or encryption removes partial ciphertext rather than publishing
+it. Individual-file snapshots (including SQLite `.backup`) still need staging.
+All CLI modes prefer a private 0700 directory on `/dev/shm`, then `/run`, only
+when that location is tmpfs/ramfs; if neither can create a staging directory,
+there is a warned private `/tmp` fallback. Insufficient RAM/staging space aborts
+rather than silently spilling an in-progress snapshot to disk. Import/inspect
+still decrypt a bounded tarball inside their private staging directory.
+
+Temporary plaintext files are mode 0600 and removed on ordinary exit. tmpfs may
+be swapped: use encrypted swap/storage. Deletion/purge is **not secure erasure**;
+a hard kill can leave staging, and prior disk, swap or backup copies may survive.
+A fully no-plaintext-staging SQLite workflow remains follow-up work. The encrypted
+destination is published with mode 0600 without overwriting an existing path.
 
 Clients using a hostname still depend on client DNS re-resolution behavior.
 Literal-IP endpoints need a profile update. No DNS changes or endpoint rewrites
@@ -199,6 +248,10 @@ failed manual removal, UTC manifest timestamp/clock sanity and old-archive warni
 per-peer inspection/dry-run counts, expired/future-expiry activation (including
 deadlines passing in quarantine or backend validation), no-resurrection reruns,
 dry-run, quarantine, rollback modes and idempotency using isolated host mocks.
+It also covers authoritative panel membership, finalization/enable failure and
+a simulated enabled-unit reboot (not a real host reboot), post-finalization
+operator edits/purge, real-clock expiry crossing without mocking the comparison,
+RAM staging, streaming export, and producer/consumer failure cleanup.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.
 CI installs age and runs this suite.
