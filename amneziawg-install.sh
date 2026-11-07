@@ -4214,8 +4214,10 @@ function awgStateIdentityDir() {
 }
 
 function awgStateCheckIdentityTombstone() { # <stage>
-	local IDENTITY EXPORTED MARKER LINE OLD_EXPORTED OLD_DIGEST
-	read -r IDENTITY EXPORTED < <(awgStateArchive identity "${1}") || return 1
+	local IDENTITY EXPORTED MARKER LINE OLD_EXPORTED OLD_DIGEST OUTPUT
+	# Separate command: a failing verifier must fail here, not yield empty input.
+	OUTPUT="$(awgStateArchive identity "${1}")" || return 1
+	read -r IDENTITY EXPORTED <<<"${OUTPUT}"
 	[[ "${IDENTITY}" =~ ^[0-9a-f]{64}$ && "${EXPORTED}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
 	MARKER="$(awgStateIdentityDir)/${IDENTITY}"
 	[[ -e "${MARKER}" || -L "${MARKER}" ]] || return 0
@@ -4237,16 +4239,31 @@ function awgStateCheckIdentityTombstone() { # <stage>
 	fi
 }
 
+# Idempotent: keeps an entry that is already as new or newer, so a rerun of
+# --activate-state on a finalized journal retries a previously failed write.
 function awgStateRecordIdentityTombstone() { # <stage> <digest> <work>
-	local IDENTITY EXPORTED DIR
-	read -r IDENTITY EXPORTED < <(awgStateArchive identity "${1}") || return 1
-	[[ "${IDENTITY}" =~ ^[0-9a-f]{64}$ && "${2}" =~ ^[0-9a-f]{64}$ ]] || return 1
+	local IDENTITY EXPORTED DIR OUTPUT LINE OLD_EXPORTED OLD_DIGEST
+	OUTPUT="$(awgStateArchive identity "${1}")" || return 1
+	read -r IDENTITY EXPORTED <<<"${OUTPUT}"
+	[[ "${IDENTITY}" =~ ^[0-9a-f]{64}$ && "${EXPORTED}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ && "${2}" =~ ^[0-9a-f]{64}$ ]] || return 1
 	DIR="$(awgStateIdentityDir)"
+	if [[ -f "${DIR}/${IDENTITY}" && ! -L "${DIR}/${IDENTITY}" ]]; then
+		LINE="$(<"${DIR}/${IDENTITY}")"
+		read -r OLD_EXPORTED OLD_DIGEST <<<"${LINE}"
+		if [[ "${OLD_EXPORTED}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ && "${OLD_DIGEST}" =~ ^[0-9a-f]{64}$ ]] &&
+			[[ ! "${EXPORTED}" > "${OLD_EXPORTED}" ]]; then
+			return 0
+		fi
+	fi
 	[[ ! -L "${DIR}" ]] || return 1
 	[[ -d "${DIR}" ]] || mkdir -m 700 -- "${DIR}" || return 1
 	awgStateTrustedPath "${DIR}" || return 1
 	printf '%s %s\n' "${EXPORTED}" "${2}" >"${3}/identity" || return 1
 	replaceFileExactly "${3}/identity" "${DIR}/${IDENTITY}" 600
+}
+
+function awgStateWarnIdentityTombstone() {
+	echo "WARNING: could not write the server-identity tombstone in $(awgStateIdentityDir)/. The migration IS finalized, but older archives of this server are NOT blocked from a later import. Fix the cause and rerun --activate-state <same-archive> to retry the write." >&2
 }
 
 function awgStateDropIdentityTombstones() { # <digest>
@@ -4381,6 +4398,10 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 			echo "No files changed. After uninstalling the conflicting installation, use --reset-state-journal ${JOURNAL##*/} --confirm-policy-replay for deliberate fresh recovery." >&2
 			return 1
 		fi
+		# Retry a server-identity tombstone write that failed at finalization.
+		if [[ "${OPTION}" != --dry-run ]]; then
+			awgStateRecordIdentityTombstone "${STAGE}" "${JOURNAL##*/}" "${WORK}" || awgStateWarnIdentityTombstone
+		fi
 		echo 'Migration already finalized; archived policy is not replayed. Manage the VPN with systemctl normally.'
 		return 0
 	fi
@@ -4448,7 +4469,7 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 			printf '%s\n' finalized >>"${JOURNAL}/steps" || echo 'WARNING: finalized marker saved but journal step append failed.' >&2
 			echo 'Finalized: VPN enabled at boot. Normal systemctl management no longer requires the archive/passphrase.'
 			awgStateRecordIdentityTombstone "${STAGE}" "${JOURNAL##*/}" "${WORK}" ||
-				echo 'WARNING: could not record the server-identity tombstone; older archives of this server are not blocked.' >&2
+				awgStateWarnIdentityTombstone
 			echo "Journal ${JOURNAL} holds no keys (the encrypted archive is the recovery copy). Optional cleanup: --purge-state-journal ${JOURNAL##*/}."
 		else
 			echo 'Activated for testing only; still disabled at boot. Stop/disable it, then activate with --enable-at-boot to finalize.'
@@ -4517,6 +4538,7 @@ function awgStateCommand() (
 			echo 'ERROR: SERVER_PUB_IP must be a hostname or IP address.' >&2
 			exit 1
 		}
+		# shellcheck disable=SC2030 # consumed only inside this awgStateCommand subshell (install hook, serializeParams)
 		SERVER_PUB_IP="${PUB_IP}"
 	fi
 	if endpointIsIPv4 "${SERVER_PUB_IP}" || [[ "${SERVER_PUB_IP}" == *:* ]]; then
@@ -9554,6 +9576,7 @@ function generateS3AndS4() { # [maximum S4, default128]
 
 function readS3AndS4() { # [maximum S4, default140]
 	local S4_MAX
+	# shellcheck disable=SC2031 # set in the same shell or, for import, in the same awgStateCommand subshell
 	S4_MAX="${1:-$(s4MaxForEndpoint "${SERVER_PUB_IP:-}")}"
 	SERVER_AWG_S3=0
 	SERVER_AWG_S4=0
@@ -10093,6 +10116,7 @@ function installQuestions() {
 		# Only auto-detect if the operator did not provide an explicit override.
 		# An explicit SERVER_PUB_IP (even if private, e.g. for an internal-only
 		# deployment) is honoured as-is.
+		# shellcheck disable=SC2031 # set in the same shell or, for import, in the same awgStateCommand subshell
 		if [[ -z "${SERVER_PUB_IP:-}" ]]; then
 			SERVER_PUB_IP=$(detectPublicIPv4)
 			# If auto-detection only yielded a non-routable IPv4 (external
@@ -15075,7 +15099,13 @@ function acquireClientLifecycleLock() {
 		# exclusion with panel and CLI operations is preserved.
 		if panel_dir="$(resolveClientLifecycleLockDir)" &&
 			[[ "${panel_dir}" != "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]]; then
-			echo "WARNING: cannot create '${INSTALLER_LIFECYCLE_LOCK_DIR}' (read-only view); using the web panel lifecycle lock only. Rerun the panel upgrade to create it." >&2
+			# The panel helper calls this on every protocol action: keep the
+			# non-interactive form to one short, greppable line.
+			if [[ -t 2 ]]; then
+				echo "WARNING: cannot create '${INSTALLER_LIFECYCLE_LOCK_DIR}' (read-only view); using the web panel lifecycle lock only. Rerun the panel upgrade to create it." >&2
+			else
+				echo "NOTICE: lifecycle-lock-fallback=panel (missing ${INSTALLER_LIFECYCLE_LOCK_DIR}; upgrade the panel)" >&2
+			fi
 			acquireClientLifecycleDirectoryLock "${panel_dir}" CLIENT_PANEL_LIFECYCLE_LOCK_FD 0 || return 1
 			return 0
 		fi
