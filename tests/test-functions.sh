@@ -11,6 +11,8 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Source the install script to load function definitions
 # The main execution block is guarded by BASH_SOURCE check, so only functions are loaded
 source "${PROJECT_ROOT}/amneziawg-install.sh"
+TEST_LIFECYCLE_ROOT="$(mktemp -d)"
+INSTALLER_LIFECYCLE_LOCK_DIR="${TEST_LIFECYCLE_ROOT}/lifecycle"
 
 TESTS_RUN=0
 TESTS_PASSED=0
@@ -1903,9 +1905,10 @@ echo "[Interface]"
 EOF
 chmod +x "${NIAC_BIN}/awg" "${NIAC_BIN}/awg-quick"
 
-# Without an installed panel, the CLI uses the client directory as its lock so a
-# same-name recreate cannot land between server removal and config cleanup.
+# Without a panel the CLI uses its independent persistent lifecycle inode,
+# never a client directory. Panel operations additionally share the DB inode.
 NIAC_LOCK_DIR="$(mktemp -d)"
+INSTALLER_LIFECYCLE_LOCK_DIR="${NIAC_LOCK_DIR}"
 NIAC_ORIGINAL_WEB_PANEL_CONFIG_DIR="${WEB_PANEL_CONFIG_DIR}"
 NIAC_ORIGINAL_WEB_PANEL_ENV_FILE="${WEB_PANEL_ENV_FILE}"
 NIAC_ORIGINAL_WEB_PANEL_SYSTEMD_UNIT="${WEB_PANEL_SYSTEMD_UNIT}"
@@ -1929,7 +1932,9 @@ fi
 NIAC_LOCK_LINK="${NIAC_LOCK_DIR}-link"
 ln -s "${NIAC_LOCK_DIR}" "${NIAC_LOCK_LINK}"
 WEB_PANEL_CONFIG_DIR="${NIAC_LOCK_LINK}"
+INSTALLER_LIFECYCLE_LOCK_DIR="${NIAC_LOCK_LINK}"
 assert_rc 1 acquireClientLifecycleLock
+INSTALLER_LIFECYCLE_LOCK_DIR="${NIAC_LOCK_DIR}"
 rm -f "${NIAC_LOCK_LINK}"
 
 # Custom web installer paths must resolve through the service unit and env file.
@@ -2064,6 +2069,8 @@ unset -f systemctl
 WEB_PANEL_CONFIG_DIR="${NIAC_ORIGINAL_WEB_PANEL_CONFIG_DIR}"
 WEB_PANEL_ENV_FILE="${NIAC_ORIGINAL_WEB_PANEL_ENV_FILE}"
 WEB_PANEL_SYSTEMD_UNIT="${NIAC_ORIGINAL_WEB_PANEL_SYSTEMD_UNIT}"
+# Keep subsequent real CLI fixture operations isolated too.
+INSTALLER_LIFECYCLE_LOCK_DIR="${TEST_LIFECYCLE_ROOT}/lifecycle"
 rm -rf "${NIAC_LOCK_DIR}"
 rm -rf "${NIAC_WEB_ROOT}"
 unset NIAC_LOCK_DIR NIAC_LOCK_LINK NIAC_CUSTOM_CONFIG_DIR NIAC_CUSTOM_STATE_DIR NIAC_WEB_ROOT
@@ -3705,6 +3712,7 @@ echo "=========================================="
 echo "Results: ${TESTS_PASSED}/${TESTS_RUN} passed, ${TESTS_FAILED} failed"
 echo "=========================================="
 
+rm -rf "${TEST_LIFECYCLE_ROOT}"
 if (( TESTS_FAILED > 0 )); then
 	exit 1
 fi

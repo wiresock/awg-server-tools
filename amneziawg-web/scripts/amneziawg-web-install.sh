@@ -994,6 +994,28 @@ _apply_acl_to_symlink_target() {
     fi
 }
 
+# amneziawg-install.sh serializes lifecycle operations on a root-private
+# directory lock. The panel's privileged helper runs that script inside the
+# service's ProtectSystem=strict view, where /var/lib is read-only, so create
+# the directory here (as root, outside the sandbox). Never replace a symlink.
+# Keep in sync with ensure_installer_lifecycle_lock_dir in amneziawg-web-upgrade.sh and with
+# INSTALLER_LIFECYCLE_LOCK_DIR in amneziawg-install.sh (tests/test-state-archive.py
+# asserts the copies are identical).
+readonly INSTALLER_LIFECYCLE_LOCK_DIR="/var/lib/amneziawg-install/lifecycle"
+ensure_installer_lifecycle_lock_dir() {
+    local parent="${INSTALLER_LIFECYCLE_LOCK_DIR%/*}"
+    if [[ -L "${parent}" || -L "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]]; then
+        warn "Refusing symlinked installer lifecycle directory ${INSTALLER_LIFECYCLE_LOCK_DIR}; panel protocol actions fall back to the panel lock."
+        return 0
+    fi
+    [[ -d "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]] && return 0
+    if ( umask 077 && mkdir -p -- "${INSTALLER_LIFECYCLE_LOCK_DIR}" ); then
+        info "Created installer lifecycle lock directory: ${INSTALLER_LIFECYCLE_LOCK_DIR}"
+    else
+        warn "Could not create ${INSTALLER_LIFECYCLE_LOCK_DIR}; panel protocol actions fall back to the panel lock."
+    fi
+}
+
 setup_filesystem() {
     step "Filesystem setup"
 
@@ -2276,6 +2298,7 @@ main() {
     fi
 
     setup_filesystem
+    ensure_installer_lifecycle_lock_dir
     stage_binary
     stage_privileged_helper
     stage_sudoers

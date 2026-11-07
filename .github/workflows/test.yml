@@ -27,6 +27,12 @@ jobs:
           git show FETCH_HEAD:amneziawg-install.sh >"$RUNNER_TEMP/base-installer.sh"
           echo "AWG_TEST_BASE_INSTALLER=$RUNNER_TEMP/base-installer.sh" >>"$GITHUB_ENV"
 
+      - name: Install state archive test dependencies
+        run: sudo apt-get update && sudo apt-get install -y age sqlite3
+
+      - name: State archive security and CLI regressions
+        run: python3 tests/test-state-archive.py
+
       - name: Run unit tests
         run: |
           bash tests/test-functions.sh

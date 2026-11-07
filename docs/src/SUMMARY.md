@@ -12,6 +12,7 @@
 - [Overview](installer/README.md)
   - [Non-interactive install](installer/non-interactive.md)
   - [Managing clients](installer/clients.md)
+  - [State archives (prototype)](installer/state-migration.md)
   - [AWG 3.0 / 3.1 mode](installer/awg3.md)
   - [Ubuntu 26.04 PPA](installer/ubuntu-26.04-ppa.md)
 
