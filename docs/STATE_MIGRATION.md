@@ -5,7 +5,8 @@
 
 This is the first CLI slice of [#185](https://github.com/wiresock/awg-server-tools/issues/185),
 **not yet the complete panel-to-new-VPS migration workflow**. Do a restore drill
-before relying on an archive. Debian/Ubuntu only, one server interface, same
+before relying on an archive. Debian/Ubuntu only (including the derivatives the
+installer already maps to them: Raspbian and Linux Mint), one server interface, same
 AWG protocol and backend, installer-standard /24 IPv4 and optional /64 IPv6
 subnets. Custom subnet prefixes fail closed. Import refuses to overwrite an existing installation.
 
@@ -26,6 +27,14 @@ SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --activate-state /root/server.awgx
 VPN interface. If omitted, the installer uses the default-route interface. The
 VPN interface name is retained from the archive. Neither server nor client keys
 are regenerated. Client profiles and Endpoint values remain unchanged.
+
+`SERVER_PUB_IP=<hostname>` may be set at import, like `SERVER_PUB_NIC`, to change
+the endpoint recorded in the new params (used for profiles generated after
+cutover; restored profiles keep their own `Endpoint` lines). Import warns when
+the effective value is an IP literal, because such profiles do not follow a DNS
+switch. Import also warns when the restored client MTU or the server
+`[Interface] MTU` exceeds the new host's outer MTU budget (uplink route/NIC MTU,
+capped at 1500) with the archived S4; values are not rewritten automatically.
 
 `age` prompts for the archive passphrase on the controlling terminal, confirming
 it on export. There is no password flag, environment variable, stdin protocol,
@@ -50,11 +59,14 @@ receipt reruns and activation log the same policy decisions. Inspection and
 planning do not authorize traffic; activation always checks the clock again.
 
 Archives older than **7 days** produce a warning, not a rejection. Export time
-in the future relative to the destination clock fails closed: synchronize/check
-both hosts' clocks before retrying. Missing, malformed or non-UTC export times
+more than **5 minutes** in the future relative to the destination clock fails
+closed (smaller skew is tolerated for NTP drift): synchronize/check both hosts'
+clocks before retrying. Missing, malformed or non-UTC export times
 are rejected before extraction; timestamp-less archives from the earlier,
 unreleased prototype must be **re-exported**, not assigned an invented time.
 Peer expiry timestamps accept timezone-aware RFC3339 and are displayed in UTC.
+Fractional seconds (1–9 digits) are normalized to microseconds, so Python 3.9/3.10
+and 3.11+ make the same decision.
 No deadline is extended by the age of the archive or time spent quarantined.
 
 ## What is carried
@@ -64,7 +76,9 @@ The encrypted payload is a gzip tar containing only regular files:
 - `manifest.json`: schema version 1, protocol, backend, interface, installer
   SHA-256, AWG tools version, per-file SHA-256 inventory, and mandatory
   `exported_at` (UTC ISO 8601, `YYYY-MM-DDTHH:MM:SSZ`, at snapshot packaging). The panel version is
-  currently recorded as `not-probed`, not guessed.
+  currently recorded as `not-probed`, not guessed. `installer_sha256` is
+  `unknown` when the installer does not run from a regular file (for example
+  `bash <(curl ...)`), rather than a hash of consumed pipe input.
 - `vpn/params` and `vpn/server.conf`: exact source bytes, including server keys,
   PSKs, obfuscation and protocol fields. Imported params are parsed as literals
   against an allowlist, **never sourced**. Only validated values are serialized
@@ -72,7 +86,10 @@ The encrypted payload is a gzip tar containing only regular files:
 - `clients/*.conf`: discovered installer-managed profiles, byte for byte.
   Discovery reuses `collectAwgClientConfigCandidates`: managed clients directory,
   panel config directory, `/root`, `/home/*`, and managed users' resolved homes.
-  Conflicting copies with the same basename and custom client shell hooks fail export. Copies are restored
+  The first copy found (managed clients directory first) is exported; a later
+  conflicting copy with the same basename (for example an edited copy in a
+  user's home) is skipped with a warning naming it, instead of aborting export
+  or replacing the root-owned copy. Custom client shell hooks fail export. Copies are restored
   into the managed clients directory, not arbitrary archived home paths.
 - `web/database.sqlite`: if the panel is installed, a consistent online
   `sqlite3 .backup` of the effective database location: `--database-url` takes
@@ -82,6 +99,14 @@ The encrypted payload is a gzip tar containing only regular files:
   the DB. Per-peer `expires_at` values remain in this snapshot; no remaining
   lifetime is reset on the destination. `web/env.conf` is copied from the existing env-file resolver.
 - `proxy/proxy.toml`: the default `/etc/amneziawg-proxy/proxy.toml`, if present.
+
+Before the passphrase prompt, export validates the staged panel snapshot against
+the schema import requires (`peers` table with `public_key`, `disabled`,
+`archived`, `removal_pending`, `expires_at`) and parses the server config, so an
+unimportable archive is refused at export time. The lifecycle locks are held
+only while the private staging snapshot is taken and released before `age`
+prompts, so panel and CLI operations are not blocked by a waiting prompt; the
+staged copy is the consistent snapshot that gets encrypted.
 
 ### Companion path inventory and deliberate gaps
 
@@ -104,8 +129,9 @@ custom `--config-file` paths. Custom proxy paths are **not discovered** yet.
 
 **Automatic panel/mail/proxy installation, path rebinding, DB migration, queue
 scrubbing, ownership/ACL restoration and HTTPS setup remain TODO.** Companion
-files are retained privately under the import journal's `recovery/` directory,
-not copied into live service locations. Do not manually activate a recovered DB
+files stay **only inside the encrypted archive**: import does not write
+plaintext copies of keys, the panel DB/env or proxy data to the journal or to
+live service locations. Decrypt the archive (`age --decrypt`) when you need them. Do not manually activate a recovered DB
 without handling stale delivery jobs/grants and reviewing settings first. No
 mail is sent or queued job replayed by the import. TLS keys, binaries, service
 units, firewall dumps, sessions and arbitrary directory contents are excluded.
@@ -136,9 +162,15 @@ restoring a usable panel.
    with reason `not_in_panel`; an absent panel DB preserves the config-only
    behavior. Commented peers stay commented; profiles alone do not authorize traffic.
    **Ongoing expiry enforcement after activation depends on restoring the panel
-   (or on the operator).** This prototype does not restore that enforcement or
-   install a background expiry timer, but it does not block future-expiry users
-   from migrating. Policy is only as recent as the snapshot: later bans or
+   (or on the operator).** This prototype does not restore the panel or install
+   a background expiry timer, but it does not block future-expiry users from
+   migrating. **Without the panel on the new host, nothing removes a migrated
+   peer when its future `expires_at` passes after cutover.** Until panel restore
+   lands, operators should: install/restore the panel on the new host before
+   the earliest migrated deadline; or use the `expires_at` values printed by
+   `--inspect-state`/`--dry-run` to remove those clients on time (for example
+   `--remove-client NAME` from a dated reminder or timer). Re-running
+   `--activate-state` after finalization is a no-op and does not enforce expiry. Policy is only as recent as the snapshot: later bans or
    deadline changes are not magically known.
 4. Reuse package/backend installation via an internal hook, preserving keys and
    protocol parameters. On BoringTun, reinstall and verify the pinned release.
@@ -197,12 +229,15 @@ imports never replay the old snapshot. A dry-run checks the reconciliation plan
 without changing the config/receipt. Receipts are refreshed after safe,
 removals-only reconciliation; a changed local installation is never overwritten.
 
-### Purging plaintext journal secrets
+### Journal contents and purge
 
-The journal's `recovery/` retains exact plaintext server params/keys, the panel
-DB/env (potentially SMTP credentials), and proxy data. `before/` retains rollback
-files. These are root-private but **remain until explicitly purged**; finalizing
-prints a reminder and the exact manifest digest to use:
+The journal holds **no plaintext keys, panel DB/env or proxy data**: the
+encrypted archive is the recovery copy. It keeps `before/` (previous
+sysctl/module-load/modprobe files for rollback), `receipt` (SHA-256 hashes),
+`nic`, `steps` and, after finalization, the non-secret `finalized` marker.
+Journals created by earlier prototype revisions may still contain a plaintext
+`recovery/` directory; purge removes it. Finalizing prints the exact manifest
+digest to use for optional cleanup:
 
 ```sh
 # Replace MANIFEST_SHA256 with the 64-character digest from the journal path:
@@ -212,12 +247,22 @@ bash amneziawg-install.sh --purge-state-journal MANIFEST_SHA256 --force
 ```
 
 No archive/passphrase or age/sqlite dependency is needed for purge. It refuses
-unfinalized journals without `--force`, validates the digest and trusted journal
+unfinalized journals without `--force` (and `--reset-state-journal` on an
+unfinalized journal points to `--purge-state-journal <digest> --force`), validates the digest and trusted journal
 path, takes the lifecycle lock, and rejects unexpected top-level entries. It
 removes recovery/rollback files and receipts without following symlinks or
 crossing filesystem boundaries. A finalized journal retains **only the non-secret
 `finalized` interface-name tombstone**, so old archives cannot resurrect policy
-after purge. Repeated purge is safe. Forced purge of an unfinalized journal
+after purge. Repeated purge is safe.
+
+Finalization also records a **server-identity tombstone** in
+`/var/lib/amneziawg-install/state-imports/identities/`, keyed by SHA-256 of the
+VPN interface name and server public key, holding the archive's `exported_at`
+and manifest digest. A later import of a *different* archive of the same server
+whose `exported_at` is **not newer** fails with the exact
+`--reset-state-journal <digest> --confirm-policy-replay` command to use; a newer
+archive imports normally. It survives purge and uninstall; reset of that digest
+removes it. Forced purge of an unfinalized journal
 removes it entirely and abandons that import's recovery/reconciliation path;
 it does not stop the VPN or remove the installed configuration.
 
@@ -230,6 +275,15 @@ acquiring a lock for reset or a fresh import does not create `clients/` or make
 fresh-target preflight reject its own side effects. Rollback, uninstall and
 journal reset/purge retain this inode. Do not delete/recreate it while commands
 may run; stop all older installer commands before upgrading the script.
+
+The panel's privileged helper runs the installer inside the panel service's
+`ProtectSystem=strict` view, where `/var/lib` is read-only. Panel install and
+upgrade therefore create this directory as root (outside the sandbox). On a host
+whose panel has not been upgraded yet, when the directory is missing and cannot
+be created in a read-only view **while a panel is configured**, the installer
+warns and serializes on the panel database-directory lock alone; every root
+caller also takes that lock while a panel exists, so mutual exclusion still
+holds. Without a panel, failure to create the directory fails closed.
 
 When a panel is configured, the installer **also** acquires the existing panel
 SQLite parent-directory inode lock, resolved with the panel's effective
@@ -249,7 +303,7 @@ new interactive-entry wrapper, avoiding recursive acquisition.
 
 ### Restoring the same archive after uninstall (explicit reset)
 
-Uninstall **retains** migration journals and finalized tombstones and prints a
+Uninstall **retains** migration journals, finalized and server-identity tombstones and prints a
 reminder. Automatically deleting them would silently reopen old policy replay
 and erase recovery/forensic data. A tombstone alone is not evidence of a live
 installation: a later import/activation checks the interface name and private
@@ -313,7 +367,9 @@ there is a warned private `/tmp` fallback. Insufficient RAM/staging space aborts
 rather than silently spilling an in-progress snapshot to disk. Import/inspect
 still decrypt a bounded tarball inside their private staging directory.
 
-Temporary plaintext files are mode 0600 and removed on ordinary exit. tmpfs may
+Temporary plaintext files are mode 0600 and removed on ordinary exit. The
+embedded Python verifier runs with `python3 -I`, so modules in the current
+directory or `PYTHON*` variables cannot inject code into the root process. tmpfs may
 be swapped: use encrypted swap/storage. Deletion/purge is **not secure erasure**;
 a hard kill can leave staging, and prior disk, swap or backup copies may survive.
 A fully no-plaintext-staging SQLite workflow remains follow-up work. The encrypted
@@ -346,6 +402,14 @@ acquisition, not mocks. Tests cover ordinary fresh-install/reset contention,
 under-lock params rechecks, retained standalone inodes and the panel database
 lock compatibility/partial-failure release. Reset diagnostics cover multiple
 filenames, spaces, control characters, Unicode bidi controls and symlinks.
+Round-7 additions cover: a planted `tarfile.py` in the working directory not
+being imported, the read-only lifecycle-directory fallback to the panel lock,
+lock release before the prompt and early schema refusal at export, skipped
+conflicting client copies, `installer_sha256` under `bash <(…)`, the
+server-identity tombstone, the reset hint, the MTU warning, fractional-second
+expiries and clock-skew tolerance, the `SERVER_PUB_IP` override/IP-literal
+warning, and that journals hold no plaintext keys or panel DB. The suite passes
+under Python 3.9, 3.10 and 3.13.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.
 CI installs age and runs this suite.
