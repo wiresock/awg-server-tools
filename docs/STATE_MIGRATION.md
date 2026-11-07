@@ -253,6 +253,22 @@ After the panel step (independently of its outcome), when the archive has
    of `--activate-state <archive> --enable-at-boot` retries only the unfinished
    companion steps.
 
+Panel access to proxy status: the panel only reads
+`AWG_PROXY_SESSIONS_FILE` (default `/var/lib/amneziawg-proxy/sessions.json`)
+through its group; its unit has `ProtectSystem=strict` and
+`ReadOnlyPaths=-/var/lib/amneziawg-proxy`, and there is no ACL or sudoers rule
+for it. Both installers set the same state: the web installer makes an
+existing `/var/lib/amneziawg-proxy` `root:awg-web 2750`, and the proxy installer
+makes its data dir `root:awg-web 2750` when the `awg-web` group exists
+(otherwise `root:root 0750`). The proxy unit's `UMask=0027` plus the setgid
+directory give `sessions.json` mode 0640, group `awg-web`. Because the proxy
+step runs after the panel step and always runs the proxy installer (also on a
+retry), the result is the same as a normal install where the proxy was installed
+first. If the panel step failed, the proxy dir stays `root:root 0750` until
+the panel retry, which applies the web installer's own step. A custom proxy
+`--data-dir` is not read by the panel in any install order (the panel's
+default path and unit are fixed).
+
 Clients that connect through the proxy reach the VPN only once it runs, so
 keep the old server serving until the proxy step succeeds.
 

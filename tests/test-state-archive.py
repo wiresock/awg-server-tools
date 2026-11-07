@@ -2446,5 +2446,68 @@ awgStateExport "$ROOT/export.tar.gz" "$ROOT/work"
         self.assertIn('"listen": "0.0.0.0:51820"', out)
         self.assertIn('HTTPS/reverse proxy for the panel is operator-managed', out)
 
+
+PERMS_HARNESS = r"""
+set -euo pipefail
+ROOT="$1" PROXY_SH="$2" WEB_SH="$3"; shift 3
+PROXY_DATA="$ROOT/var/lib/amneziawg-proxy"
+mkdir -p "$ROOT/state"
+step() { :; }; info() { :; }; warn() { echo "WARN $*" >&2; }
+getent() { [[ "$1" == group && -e "$ROOT/group-$2" ]]; }
+chown() { local p; for p in "${@:2}"; do printf '%s\n' "$1" >"$ROOT/state/$(printf %s "$p" | tr / _).owner"; done; }
+chmod() { local p; for p in "${@:2}"; do printf '%s\n' "$1" >"$ROOT/state/$(printf %s "$p" | tr / _).mode"; done; }
+eval "$(sed -n '/^setup_filesystem() {/,/^}/p' "$PROXY_SH")"
+eval "web_proxy_share() { SERVICE_USER=awg-web
+$(sed -n '/# If amneziawg-proxy is already installed/,/^    fi$/p' "$WEB_SH" | sed "s#/var/lib/amneziawg-proxy#$PROXY_DATA#g")
+}"
+grep -q "$PROXY_DATA" <(declare -f web_proxy_share)
+grep -q 'awg-web' <(declare -f setup_filesystem)
+CONFIG_DIR="$ROOT/etc/amneziawg-proxy" DATA_DIR="$PROXY_DATA"
+proxy() { setup_filesystem; }
+panel() { : >"$ROOT/group-awg-web"; web_proxy_share; }
+for action in "$@"; do "$action"; done
+key=$(printf %s "$PROXY_DATA" | tr / _)
+printf '%s %s\n' "$(cat "$ROOT/state/$key.owner")" "$(cat "$ROOT/state/$key.mode")"
+"""
+
+
+class CompanionPermissionTests(unittest.TestCase):
+    """Panel-then-proxy (migration order) must end like a normal install where
+    the proxy existed before the panel: both installers' own steps are run."""
+
+    def perms(self, *actions):
+        with tempfile.TemporaryDirectory(prefix='awg-perm-') as tmp:
+            result = subprocess.run(
+                ['bash', '-c', PERMS_HARNESS, 'perm', tmp,
+                 str(ROOT / 'amneziawg-proxy/scripts/amneziawg-proxy-install.sh'),
+                 str(ROOT / 'amneziawg-web/scripts/amneziawg-web-install.sh'), *actions],
+                text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, '')
+            return result.stdout.strip()
+
+    def test_proxy_data_dir_matches_normal_install_in_every_order(self):
+        normal = self.perms('proxy', 'panel')
+        self.assertEqual(normal, 'root:awg-web 2750')
+        self.assertEqual(self.perms('panel', 'proxy'), normal)
+        # Retry where only the proxy step reruns, and a later panel rerun.
+        self.assertEqual(self.perms('panel', 'proxy', 'proxy'), normal)
+        self.assertEqual(self.perms('panel', 'proxy', 'panel'), normal)
+        # Panel restore failed before creating its user: proxy alone is
+        # root-only, and the panel retry fixes it exactly like a normal install.
+        self.assertEqual(self.perms('proxy'), 'root:root 0750')
+        self.assertEqual(self.perms('proxy', 'proxy', 'panel'), normal)
+
+    def test_restore_order_keeps_proxy_installer_group_step(self):
+        text = SCRIPT.read_text()
+        body = text[text.index('function awgStateRestoreCompanions()'):]
+        body = body[:body.index('\n}\n')]
+        self.assertLess(body.index('awgStateRestorePanel'), body.index('awgStateRestoreProxy'))
+        proxy = text[text.index('function awgStateRestoreProxy()'):]
+        proxy = proxy[:proxy.index('\n}\n')]
+        # The proxy data dir is left to the proxy installer (no chown/chmod here).
+        self.assertNotIn('chown', proxy)
+        self.assertNotIn('chmod', proxy)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
