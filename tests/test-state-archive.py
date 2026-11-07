@@ -972,6 +972,7 @@ datetime = TestDatetime
                 shell = r'''
 set -uo pipefail
 source "$1"
+awgStateRestorePanel() { return 0; } # Panel restore has its own tests.
 ROOT="$2"
 MODE="$3"
 OPTION="${4:-}"
@@ -2071,6 +2072,181 @@ if awgStateImportTransaction "$ROOT/stage" "$ROOT/journal"; then exit 12; fi
         self.assertIn(b'refusing (including --dry-run and --activate-state)', result.stderr)
         self.assertIn(b'New import/activation attempts for this archive are refused', result.stderr)
         self.assertIn(b'--purge-state-journal journal --force', result.stderr)
+
+    def panel_stage(self, root, schema=15, env=None):
+        stage = root / 'stage'
+        (stage / 'web').mkdir(parents=True)
+        with closing(sqlite3.connect(stage / 'web/database.sqlite')) as db, db:
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('CREATE TABLE _sqlx_migrations(version INTEGER PRIMARY KEY, success INTEGER)')
+            db.executemany('INSERT INTO _sqlx_migrations VALUES(?,1)', [(v,) for v in range(1, schema + 1)])
+            db.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, removal_pending INTEGER, expires_at TEXT)')
+            db.execute('INSERT INTO peers VALUES(?,0,0,0,?)', (PEER, '2999-01-01T00:00:00Z'))
+            db.execute('CREATE TABLE email_jobs(id TEXT, state TEXT, invalidated_at INTEGER, invalidation_code TEXT, error_code TEXT)')
+            db.executemany('INSERT INTO email_jobs VALUES(?,?,NULL,NULL,NULL)', [('a', 'queued'), ('b', 'sending'), ('c', 'accepted')])
+        (stage / 'web/env.conf').write_text(env if env is not None else
+            'AUTH_ENABLED=true\nAUTH_USERNAME=admin\nAUTH_PASSWORD_HASH=$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA\n'
+            'AWG_WEB_LISTEN=127.0.0.1:8080\nAWG_WEB_DB=%s/data/awg-web.db\nAWG_CONFIG_DIR=/home/old/clients\n' % root)
+        migrations = root / 'checkout/amneziawg-web/migrations'
+        migrations.mkdir(parents=True)
+        for version in range(1, 16):
+            (migrations / ('%04d_m.sql' % version)).write_text('-- fixture\n')
+        installer = root / 'checkout/amneziawg-web/scripts/amneziawg-web-install.sh'
+        installer.parent.mkdir(parents=True)
+        installer.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >>"$PANEL_ROOT/installer.args"\n'
+                             'echo run >>"$PANEL_ROOT/installer.runs"\n[[ -z "${FAIL_INSTALLER:-}" ]] || exit 1\n'
+                             'mkdir -p "$PANEL_ROOT/data"; touch "$PANEL_ROOT/unit"\n')
+        return stage
+
+    PANEL_HARNESS = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"; export PANEL_ROOT="$ROOT"
+AMNEZIAWG_DIR="$ROOT/vpn"; mkdir -p "$ROOT/journal" "$ROOT/work"
+WEB_PANEL_ENV_FILE="$ROOT/etc/env.conf"; WEB_PANEL_SYSTEMD_UNIT="$ROOT/unit"
+awgStatePanelInstaller() { printf '%s\n' "$ROOT/checkout/amneziawg-web/scripts/amneziawg-web-install.sh"; }
+install() { local a=(); while (($#)); do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; command install "${a[@]}"; }
+systemctl() { printf '%s\n' "$*" >>"$ROOT/systemctl.log"; [[ "$1 ${FAIL_START:-}" != 'start 1' ]]; }
+awgStatePanelHealthy() { [[ -z "${UNHEALTHY:-}" ]]; }
+"""
+
+    def run_panel(self, root, body, **env):
+        result = subprocess.run(['bash', '-c', self.PANEL_HARNESS + body, 'test', str(SCRIPT), str(root)],
+                                capture_output=True, env=dict(os.environ, **env))
+        return result
+
+    def test_panel_restore_installs_db_env_starts_and_is_idempotent(self):
+        root = self.root / 'ok'
+        root.mkdir()
+        self.panel_stage(root)
+        result = self.run_panel(root, r"""
+awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 10
+awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 11
+""")
+        out = (result.stdout + result.stderr).decode()
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn('Panel restored and healthy', out)
+        self.assertIn('Panel already restored', out)
+        self.assertEqual((root / 'installer.runs').read_text(), 'run\n')
+        args = (root / 'installer.args').read_text().splitlines()
+        for flag in ('--non-interactive', '--no-start', '--no-enable', '--password-hash', '--data-dir', '--env-file', '--config-dir'):
+            self.assertIn(flag, args)
+        self.assertEqual(args[args.index('--data-dir') + 1], str(root / 'data'))
+        self.assertEqual(args[args.index('--config-dir') + 1], str(root / 'vpn/clients'))
+        env = (root / 'etc/env.conf').read_text()
+        self.assertIn('AWG_CONFIG_DIR=%s/vpn/clients\n' % root, env)
+        self.assertNotIn('/home/old', env)
+        self.assertEqual(oct((root / 'etc/env.conf').stat().st_mode & 0o777), '0o600')
+        db_path = root / 'data/awg-web.db'
+        self.assertEqual(oct(db_path.stat().st_mode & 0o777), '0o600')
+        self.assertEqual(db_path.read_bytes()[18:20], b'\x01\x01')
+        with closing(sqlite3.connect(db_path)) as db:
+            states = dict(db.execute('SELECT id, state FROM email_jobs'))
+        self.assertEqual(states, {'a': 'cancelled', 'b': 'unknown', 'c': 'accepted'})
+        log = (root / 'systemctl.log').read_text()
+        self.assertIn('start amneziawg-web', log)
+        self.assertIn('enable amneziawg-web', log)
+        self.assertTrue((root / 'journal/panel-restored').exists())
+        self.assertFalse((root / 'journal/panel-installing').exists())
+        self.assertIn('panel-restored', (root / 'journal/steps').read_text())
+
+    def test_panel_restore_failure_is_retryable_and_never_enables(self):
+        root = self.root / 'retry'
+        root.mkdir()
+        self.panel_stage(root)
+        result = self.run_panel(root, r"""
+if UNHEALTHY=1 awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ -e "$ROOT/journal/panel-installing" && ! -e "$ROOT/journal/panel-restored" ]] || exit 11
+grep -q '^stop amneziawg-web' "$ROOT/systemctl.log" || exit 12
+! grep -q '^enable' "$ROOT/systemctl.log" || exit 13
+# The env/unit now exist, but the journal marker identifies our own attempt.
+awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 14
+[[ -e "$ROOT/journal/panel-restored" ]] || exit 15
+""")
+        out = (result.stdout + result.stderr).decode()
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn('finalized VPN is unaffected', out)
+        self.assertIn('did not become healthy', out)
+        self.assertEqual((root / 'installer.runs').read_text(), 'run\nrun\n')
+
+    def test_panel_restore_refusals(self):
+        cases = {
+            'existing-panel': ('mkdir -p "$ROOT/etc"; touch "$WEB_PANEL_ENV_FILE"', {}, 'a panel is already installed'),
+            'newer-schema': ('', {'schema': 16}, 'newer than this panel source'),
+            'no-hash': ('', {'env': 'AUTH_ENABLED=false\n'}, 'Argon2 AUTH_PASSWORD_HASH is required'),
+            'no-installer': ('awgStatePanelInstaller() { return 1; }', {}, 'was not found next to this script'),
+            'installer-fails': ('export FAIL_INSTALLER=1', {}, '--non-interactive failed'),
+        }
+        for name, (setup, kwargs, message) in cases.items():
+            with self.subTest(name=name):
+                root = self.root / name
+                root.mkdir()
+                self.panel_stage(root, **kwargs)
+                result = self.run_panel(root, setup + r"""
+if awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ ! -e "$ROOT/journal/panel-restored" ]] || exit 11
+! grep -q '^enable' "$ROOT/systemctl.log" 2>/dev/null || exit 12
+""")
+                out = (result.stdout + result.stderr).decode()
+                self.assertEqual(result.returncode, 0, out)
+                self.assertIn(message, out)
+                self.assertFalse((root / 'data/awg-web.db').exists())
+
+    def test_panel_plan_in_dry_run_and_inspect(self):
+        root = self.root / 'plan'
+        root.mkdir()
+        stage = self.panel_stage(root)
+        result = self.run_panel(root, 'awgStatePanelPlan "$ROOT/stage"')
+        out = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn('"archive_schema": 15', out)
+        self.assertIn('"panel_schema": 15', out)
+        self.assertIn('"queued_mail_to_cancel": 1', out)
+        self.assertIn('build from source via', out)
+        self.files['web/database.sqlite'] = (stage / 'web/database.sqlite').read_bytes()
+        self.files['web/env.conf'] = (stage / 'web/env.conf').read_bytes()
+        make_tar(self.tar, self.files)
+        plan = json.loads(self.run_helper('inspect', self.tar, self.root / 'inspect-dir',
+                                          root / 'checkout/amneziawg-web/migrations').stdout)['panel_plan']
+        self.assertEqual(plan['archive_schema'], 15)
+        self.assertTrue(plan['password_hash_present'])
+        self.assertFalse(plan['schema_newer_than_panel'])
+        self.assertNotIn('argon2', json.dumps(plan))
+
+    def test_panel_health_probe_uses_listen_and_base_path(self):
+        import http.server, threading
+        hits = []
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                hits.append(self.path)
+                self.send_response(200 if self.path == '/p/api/health' else 404)
+                self.end_headers()
+            def log_message(self, *args):
+                pass
+        server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        env = self.root / 'env.conf'
+        env.write_text('AWG_WEB_LISTEN=0.0.0.0:%d\nAWG_WEB_BASE_PATH="/p/"\n' % server.server_port)
+        result = subprocess.run(['bash', '-c', 'source "$1"; awgStatePanelHealthy "$2"', 'test', str(SCRIPT), str(env)],
+                                capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn('/p/api/health', hits)
+
+    def test_finalized_activation_panel_failure_keeps_vpn_running(self):
+        root = self.root / 'act'
+        root.mkdir()
+        shell = self.activation_harness() + r"""
+SIG=TERM SIG_AT=none
+awgStateRestorePanel() { echo "panel-called lock=${CLIENT_LIFECYCLE_LOCK_FD:-none}"; return 1; }
+awgStateReconcileImport "$ROOT/stage" "$ROOT/journal" "$ROOT/work" --activate-state --enable-at-boot ens3
+echo "rc=$? running=$([[ -e $ROOT/running ]] && echo y) enabled=$([[ -e $ROOT/enabled ]] && echo y) finalized=$([[ -e $ROOT/journal/finalized ]] && echo y)"
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(root)], capture_output=True)
+        out = result.stdout.decode()
+        self.assertIn('panel-called lock=none', out, result.stderr.decode())
+        self.assertIn('rc=1 running=y enabled=y finalized=y', out, result.stderr.decode())
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

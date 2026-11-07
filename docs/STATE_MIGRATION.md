@@ -4,7 +4,7 @@
 # Server state archives (experimental CLI prototype)
 
 This is the first CLI slice of [#185](https://github.com/wiresock/awg-server-tools/issues/185),
-**not yet the complete panel-to-new-VPS migration workflow**. Do a restore drill
+covering the VPN and the amneziawg-web panel (proxy and HTTPS are not restored). Do a restore drill
 before relying on an archive. Debian/Ubuntu only (including the derivatives the
 installer already maps to them: Raspbian and Linux Mint), one server interface, same
 AWG protocol and backend, installer-standard /24 IPv4 and optional /64 IPv6
@@ -59,7 +59,11 @@ fallback.
 
 ## Timestamps and peer decisions
 
-`--inspect-state` emits the manifest as JSON with a `peer_plan` object.
+`--inspect-state` emits the manifest as JSON with a `peer_plan` object and a
+`panel_plan` object (panel DB present, env/hash present — never the hash
+itself —, archive vs. panel-source migration versions, mail jobs that would be
+cancelled). `--dry-run` also prints the panel plan and how the panel would be
+installed.
 `--dry-run` prints a JSON plan before the host-install plan. Both show the
 export timestamp, the destination evaluation time, per-peer **migrate/drop**
 decisions (name, expiry, reason), and migrate/drop counts. Import, unchanged-
@@ -140,16 +144,72 @@ The proxy installer defaults to `/etc/amneziawg-proxy/proxy.toml`, and supports
 custom `--config-file` paths. Custom proxy paths are **not discovered** yet.
 `/var/lib/amneziawg-proxy/sessions.json` is runtime state and is excluded.
 
-**Automatic panel/mail/proxy installation, path rebinding, DB migration, queue
-scrubbing, ownership/ACL restoration and HTTPS setup remain TODO.** Companion
-files stay **only inside the encrypted archive**: import does not write
-plaintext copies of keys, the panel DB/env or proxy data to the journal or to
-live service locations. Decrypt the archive (`age --decrypt`) when you need them. Do not manually activate a recovered DB
-without handling stale delivery jobs/grants and reviewing settings first. No
-mail is sent or queued job replayed by the import. TLS keys, binaries, service
-units, firewall dumps, sessions and arbitrary directory contents are excluded.
-This is why this prototype does not yet meet issue #185's full phase-1 goal of
-restoring a usable panel.
+The panel DB/env are installed to their live locations only by the panel
+restore step below. Proxy config (`proxy/proxy.toml`) stays **only inside the
+encrypted archive**: proxy installation and HTTPS/TLS setup remain **TODO**
+(TLS keys are not archived). Import never writes plaintext keys, panel DB/env
+or proxy data to the journal. TLS keys, binaries, service units, firewall
+dumps, sessions and arbitrary directory contents are excluded.
+
+### Panel restore
+
+Design (from `amneziawg-web/scripts/amneziawg-web-install.sh` and
+`amneziawg-web/src`):
+
+- The panel installer builds `amneziawg-web` from the repository checkout with
+  `cargo` (or takes `--binary-src`), installs it to `/usr/local/bin`, creates
+  the `awg-web` system user, a 0700 `awg-web` data directory (`--data-dir`,
+  default `/var/lib/amneziawg-web`), a root-only 0700 `/etc/amneziawg-web` with
+  a 0600 `env.conf`, the privileged helper
+  `/usr/local/libexec/amneziawg-web-privileged` with its sudoers entry, a copy of
+  `amneziawg-install.sh`, and the `amneziawg-web.service` unit
+  (`WorkingDirectory=<data dir>`, `EnvironmentFile=<env file>`,
+  `ProtectSystem=strict` with `ReadWritePaths=` for the client config dir and
+  data dir). `--non-interactive` needs `--password-hash`; an existing env file
+  is kept unless `--force`. No TLS/reverse proxy is configured by it.
+- The panel runs its embedded sqlx migrations at startup (`db.migrate()` in
+  `src/main.rs`) before serving, and refuses a DB that has applied migrations
+  it does not know. `GET /api/health` is public. Expiry enforcement is the
+  panel's periodic `cleanup_expired_users` (`src/admin/mod.rs`).
+
+Flow: after `--activate-state <archive> --enable-at-boot` has finalized the VPN
+(and released the VPN lifecycle lock), or on a later rerun of
+`--activate-state` on the finalized journal, if the archive has
+`web/database.sqlite`:
+
+1. Refuse if `amneziawg-web/scripts/amneziawg-web-install.sh` is not next to
+   `amneziawg-install.sh` (run from a repository checkout), or if a panel env
+   file or unit already exists and this migration did not start the install
+   (an existing panel is never overwritten).
+2. Prepare in private RAM staging: parse the archived `env.conf` as data (never
+   sourced); require an Argon2 `AUTH_PASSWORD_HASH`; rebind `AWG_CONFIG_DIR` to
+   the restored `${AMNEZIAWG_DIR}/clients` and keep an absolute `AWG_WEB_DB`
+   (otherwise `/var/lib/amneziawg-web/awg-web.db`). Refuse when the archived
+   `_sqlx_migrations` maximum is newer than the checkout's
+   `amneziawg-web/migrations`. Copy the DB with SQLite backup, set
+   `journal_mode=DELETE`, run `integrity_check`, and cancel queued mail jobs
+   (`state='cancelled'`, `invalidation_code='state_migration'`) and mark
+   in-flight `sending` jobs `unknown`, so no mail from the old host is replayed.
+3. Install the env (root 0600), run the panel installer with
+   `--non-interactive --username --password-hash --data-dir --env-file
+   --config-dir --no-start --no-enable` (plus `--binary-src` when
+   `AWG_STATE_PANEL_BINARY` is set; otherwise it builds from source and needs
+   `cargo`), then install the DB as `awg-web` 0600 (stale `-wal/-shm/-journal`
+   removed), start `amneziawg-web`, wait up to 30 s for `/api/health` on
+   `AWG_WEB_LISTEN` (+`AWG_WEB_BASE_PATH`), and only then enable it at boot.
+4. Journal: `panel-installing` while in progress, `panel-restored` when done,
+   and audit steps in `steps`. On failure the panel is stopped (never enabled),
+   the VPN keeps running finalized, the command exits non-zero with the cause,
+   and rerunning `--activate-state <archive> --enable-at-boot` retries only the
+   panel; a completed restore is a no-op.
+
+`AWG_STATE_PANEL_BINARY=/path/to/amneziawg-web` is the only new input (an
+environment variable, like `SERVER_PUB_IP`). The password hash is passed to the
+panel installer on its command line (it is a hash, not the password). Saved
+SMTP settings travel inside the DB. Remaining TODO: proxy/HTTPS restore,
+discovering custom proxy paths, merging multiple env files or systemd
+`Environment=` directives, and restoring a panel without the repository
+checkout.
 
 ## Import safety and activation
 
@@ -175,16 +235,14 @@ restoring a usable panel.
    If a panel DB exists, a config peer absent from its `peers` table is dropped
    with reason `not_in_panel`; an absent panel DB preserves the config-only
    behavior. Commented peers stay commented; profiles alone do not authorize traffic.
-   **Ongoing expiry enforcement after activation depends on restoring the panel
-   (or on the operator).** This prototype does not restore the panel or install
-   a background expiry timer, but it does not block future-expiry users from
-   migrating. **Without the panel on the new host, nothing removes a migrated
-   peer when its future `expires_at` passes after cutover.** Until panel restore
-   lands, operators should: install/restore the panel on the new host before
-   the earliest migrated deadline; or use the `expires_at` values printed by
-   `--inspect-state`/`--dry-run` to remove those clients on time (for example
-   `--remove-client NAME` from a dated reminder or timer). Re-running
-   `--activate-state` after finalization is a no-op and does not enforce expiry. Policy is only as recent as the snapshot: later bans or
+   **Ongoing expiry enforcement after activation is done by the restored panel**
+   (see "Panel restore"): its periodic cleanup removes a peer when `expires_at`
+   passes. If the archive has no panel, or panel restore failed/was refused,
+   nothing removes a migrated peer at its deadline: use the `expires_at` values
+   printed by `--inspect-state`/`--dry-run` to remove those clients on time
+   (for example `--remove-client NAME`), or fix the cause and rerun
+   `--activate-state <archive> --enable-at-boot`, which then retries only the
+   panel restore. Policy is only as recent as the snapshot: later bans or
    deadline changes are not magically known.
 4. Reuse package/backend installation via an internal hook, preserving keys and
    protocol parameters. On BoringTun, reinstall and verify the pinned release.
@@ -224,7 +282,7 @@ restoring a usable panel.
    a different identity fail explicitly, without replaying policy or restoring anything.
    An intact finalized installation may be active/enabled and have ordinary
    port/address/peer edits; old receipts/policy are not replayed.
-   Ongoing expiry enforcement remains the panel/operator's responsibility.
+   Ongoing expiry enforcement is done by the restored panel (or the operator).
    Without the flag, activation is temporary testing only and leaves boot
    disabled. Stop/disable the test VPN, then repeat activation with
    `--enable-at-boot` to finalize. An enable/marker-publication failure attempts
@@ -462,6 +520,7 @@ CI installs age and runs this suite.
 
 Still required: full two-container/VM install roundtrip with distinct uplinks,
 real client datapath/handshake, DNS failover across representative clients,
-BoringTun/kernel install drills, panel/mail/proxy restore and queue migration,
+BoringTun/kernel install drills, a live panel restore (build, start, expiry
+enforcement) — the panel tests here mock the installer/systemd —, proxy restore,
 concurrent panel export stress, and power-loss recovery testing. The mock
 roundtrip must not be described as those live tests.

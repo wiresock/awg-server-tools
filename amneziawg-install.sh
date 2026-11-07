@@ -3705,6 +3705,121 @@ def peer_policy(root):
         return result
 
 
+ENV_LINE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=(.*)')
+
+
+def panel_env(data):
+    # Parse KEY=VALUE lines like systemd EnvironmentFile; never execute them.
+    values = {}
+    for line in data.decode('utf-8').splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(('#', ';')):
+            continue
+        match = ENV_LINE.fullmatch(stripped)
+        require(match is not None, 'unsupported panel env.conf line')
+        value = match.group(2)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+            value = value[1:-1]
+        values[match.group(1)] = value
+    return values
+
+
+def panel_migrations(db):
+    if db.execute("SELECT type FROM sqlite_master WHERE name='_sqlx_migrations'").fetchone() != ('table',):
+        return []
+    return sorted(row[0] for row in db.execute('SELECT version FROM _sqlx_migrations WHERE success=1'))
+
+
+def known_migrations(directory):
+    if not directory:
+        return None
+    path = Path(directory)
+    if not path.is_dir():
+        return None
+    versions = [int(m.group(1)) for m in (re.fullmatch(r'(\d+)_.+\.sql', f.name) for f in path.iterdir()) if m]
+    return sorted(versions) or None
+
+
+def panel_plan(root, migrations_dir=None):
+    db_path = root / 'web/database.sqlite'
+    if not db_path.exists():
+        return dict(present=False)
+    with closing(sqlite3.connect(db_path.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+        db.execute('PRAGMA trusted_schema=OFF')
+        applied = panel_migrations(db)
+        pending = {}
+        if db.execute("SELECT type FROM sqlite_master WHERE name='email_jobs'").fetchone() == ('table',):
+            for state, count in db.execute("SELECT state, COUNT(*) FROM email_jobs WHERE state IN ('queued','sending') GROUP BY state"):
+                pending[state] = count
+    env_path = root / 'web/env.conf'
+    env = panel_env(env_path.read_bytes()) if env_path.exists() else None
+    known = known_migrations(migrations_dir)
+    plan = dict(present=True, env_present=env is not None,
+                password_hash_present=bool(env and env.get('AUTH_PASSWORD_HASH', '').startswith('$argon2')),
+                archive_schema=applied[-1] if applied else None,
+                panel_schema=known[-1] if known else None,
+                queued_mail_to_cancel=pending.get('queued', 0), sending_mail_to_mark_unknown=pending.get('sending', 0))
+    plan['schema_newer_than_panel'] = bool(known and applied and applied[-1] > known[-1])
+    return plan
+
+
+def panel_prepare(root, out, clients_dir, default_db, migrations_dir):
+    # Builds the live-ready panel DB/env in private staging. Bash installs them.
+    plan = panel_plan(root, migrations_dir)
+    require(plan['present'], 'archive has no panel database')
+    if not plan['env_present'] or not plan['password_hash_present']:
+        raise StatePolicyError('archived panel env.conf with an Argon2 AUTH_PASSWORD_HASH is required for non-interactive panel restore')
+    if plan['schema_newer_than_panel']:
+        raise StatePolicyError('archived panel database schema (migration %d) is newer than this panel source (migration %d); '
+                               'use the same or a newer amneziawg-web' % (plan['archive_schema'], plan['panel_schema']))
+    if plan['panel_schema'] is None:
+        print('WARNING: panel migrations not found next to the panel installer; schema compatibility is checked by the panel at startup.', file=sys.stderr)
+    env = panel_env((root / 'web/env.conf').read_bytes())
+    username = env.get('AUTH_USERNAME', 'admin')
+    require(re.fullmatch(r'[A-Za-z0-9._@-]{1,64}', username) is not None, 'unsupported panel AUTH_USERNAME')
+    db_value = env.get('AWG_WEB_DB', '')
+    db_live = db_value if (db_value.startswith('/') and re.fullmatch(r'/[A-Za-z0-9._/-]+', db_value) and '/../' not in db_value + '/'
+                           and not db_value.endswith('/')) else default_db
+    out.mkdir(mode=0o700)
+    lines = []
+    seen = set()
+    for line in (root / 'web/env.conf').read_text().splitlines():
+        match = ENV_LINE.fullmatch(line.strip())
+        name = match.group(1) if match else None
+        if name in ('AWG_CONFIG_DIR', 'AWG_WEB_DB'):
+            if name in seen:
+                continue
+            seen.add(name)
+            line = '%s=%s' % (name, clients_dir if name == 'AWG_CONFIG_DIR' else db_live)
+        lines.append(line)
+    for name, value in (('AWG_CONFIG_DIR', clients_dir), ('AWG_WEB_DB', db_live)):
+        if name not in seen:
+            lines.append('%s=%s' % (name, value))
+    env_out = out / 'env.conf'
+    with env_out.open('x') as handle:
+        handle.write('\n'.join(lines) + '\n')
+    env_out.chmod(0o600)
+    db_out = out / 'database.sqlite'
+    with closing(sqlite3.connect((root / 'web/database.sqlite').as_uri() + '?mode=ro&immutable=1', uri=True)) as source, \
+            closing(sqlite3.connect(str(db_out))) as dest:
+        source.backup(dest)
+        dest.execute('PRAGMA journal_mode=DELETE')
+        require(dest.execute('PRAGMA integrity_check').fetchone() == ('ok',), 'panel database integrity check failed')
+        if dest.execute("SELECT type FROM sqlite_master WHERE name='email_jobs'").fetchone() == ('table',):
+            # Never replay mail from the old host: queued jobs are cancelled and
+            # in-flight ones marked unknown (as after a crash mid-send).
+            now = int(utc_now().timestamp())
+            with dest:
+                dest.execute("UPDATE email_jobs SET state='cancelled', invalidated_at=COALESCE(invalidated_at, ?), "
+                             "invalidation_code=COALESCE(invalidation_code, 'state_migration') WHERE state='queued'", (now,))
+                dest.execute("UPDATE email_jobs SET state='unknown', error_code=COALESCE(error_code, 'state_migration') "
+                             "WHERE state='sending'")
+    db_out.chmod(0o600)
+    for suffix in ('-wal', '-shm', '-journal'):
+        require(not Path(str(db_out) + suffix).exists(), 'unexpected SQLite sidecar after panel prepare')
+    sys.stdout.buffer.write(b'\0'.join(v.encode() for v in (username, env['AUTH_PASSWORD_HASH'], db_live)) + b'\0')
+
+
 def migration_plan(manifest, files, data, policy, phase):
     now = utc_now()
     exported = export_time(manifest, now)
@@ -3841,7 +3956,7 @@ def main():
                         versions={'installer_format': 'state-v1', 'installer_sha256': args[2] if len(args) > 2 and re.fullmatch(r'[0-9a-f]{64}', args[2]) else 'unknown', 'awg_tools': args[1],
                                   'panel': 'not-probed'},
                         files={name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
-                        limitations=['Panel/mail/proxy files are kept only inside this encrypted archive; not activated by import.',
+                        limitations=['Panel DB/env are restored by --activate-state --enable-at-boot when the panel installer is available; mail queue is not replayed; proxy files stay only inside this archive.',
                                      'No TLS keys, binaries, systemd units, sessions or firewall dumps.'])
         validate_manifest(manifest, files)
         files['manifest.json'] = json.dumps(manifest, sort_keys=True, indent=2).encode()
@@ -3871,7 +3986,12 @@ def main():
                     _, report = staged_plan(root, files['vpn/server.conf'], 'inspect')
                     for warning in report['warnings']:
                         print('WARNING: ' + warning, file=sys.stderr)
-                    print(json.dumps(dict(manifest, peer_plan=report), sort_keys=True, indent=2))
+                    print(json.dumps(dict(manifest, peer_plan=report, panel_plan=panel_plan(root, args[1] if len(args) > 1 else None)),
+                                     sort_keys=True, indent=2))
+    elif mode == 'panel-plan':
+        print(json.dumps(panel_plan(Path(path), args[0] if args else None), sort_keys=True))
+    elif mode == 'panel-prepare':
+        panel_prepare(Path(path), Path(args[0]), args[1], args[2], args[3] if len(args) > 3 else None)
     elif mode == 'reconcile':
         # Bash provides only freshly generated transaction state or a local file
         # whose receipt it verified before reconciliation.
@@ -4488,6 +4608,140 @@ function awgStateRefuseIncompleteRollback() { # <journal>
 	return 1
 }
 
+# ── Panel restore (amneziawg-web) ────────────────────────────────────────────
+# Runs only after the VPN migration is finalized. It reuses the panel's own
+# installer non-interactively (repository checkout layout), then installs the
+# archived DB/env and starts the panel; the panel applies its own migrations at
+# startup and enforces peer expiries from then on. A failure never touches the
+# running VPN: the panel is stopped, the journal keeps `panel-installing`, and
+# rerunning `--activate-state <archive> [--enable-at-boot]` retries only this.
+AWG_STATE_PANEL_UNIT="amneziawg-web"
+AWG_STATE_PANEL_DEFAULT_DB="/var/lib/amneziawg-web/awg-web.db"
+
+function awgStatePanelInstaller() {
+	local DIR
+	DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
+	[[ -f "${DIR}/amneziawg-web/scripts/amneziawg-web-install.sh" ]] || return 1
+	printf '%s\n' "${DIR}/amneziawg-web/scripts/amneziawg-web-install.sh"
+}
+
+function awgStatePanelPlan() { # <stage>; human-readable plan for dry-run
+	local STAGE="$1" INSTALLER MIGRATIONS="" PLAN
+	[[ -f "${STAGE}/web/database.sqlite" ]] || { echo 'Panel: none in archive.'; return 0; }
+	if INSTALLER="$(awgStatePanelInstaller)"; then
+		MIGRATIONS="${INSTALLER%/scripts/*}/migrations"
+	fi
+	PLAN="$(awgStateArchive panel-plan "${STAGE}" "${MIGRATIONS}")" || return 1
+	echo "Panel plan (after finalization with --activate-state --enable-at-boot): ${PLAN}"
+	if [[ -z "${INSTALLER}" ]]; then
+		echo 'Panel: installer not found next to this script (run from a repository checkout); panel restore would be refused.'
+	elif [[ -n "${AWG_STATE_PANEL_BINARY:-}" ]]; then
+		echo "Panel: install ${AWG_STATE_PANEL_BINARY} via ${INSTALLER} --non-interactive."
+	else
+		echo "Panel: build from source via ${INSTALLER} --non-interactive (needs cargo, or set AWG_STATE_PANEL_BINARY)."
+	fi
+}
+
+function awgStatePanelHealthy() { # <env file>; waits for GET /api/health
+	python3 -I - "$1" <<'AWG_PANEL_HEALTH'
+import re, sys, time, urllib.request
+values = {}
+for line in open(sys.argv[1], encoding='utf-8'):
+    m = re.fullmatch(r'\s*([A-Za-z_][A-Za-z0-9_]*)=(.*?)\s*', line.rstrip('\n'))
+    if m:
+        v = m.group(2)
+        values[m.group(1)] = v[1:-1] if len(v) >= 2 and v[0] == v[-1] and v[0] in '"\'' else v
+listen = values.get('AWG_WEB_LISTEN', '0.0.0.0:8080')
+host, _, port = listen.rpartition(':')
+host = {'0.0.0.0': '127.0.0.1', '[::]': '[::1]', '': '127.0.0.1'}.get(host, host)
+base = values.get('AWG_WEB_BASE_PATH', '').rstrip('/')
+url = 'http://%s:%s%s/api/health' % (host, port, base)
+for _ in range(30):
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            if response.status == 200:
+                sys.exit(0)
+    except OSError:
+        pass
+    time.sleep(1)
+sys.exit(1)
+AWG_PANEL_HEALTH
+}
+
+function awgStatePanelFail() { # <journal> <message>
+	systemctl stop "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
+	awgStateJournalStep "$1" panel-restore-failed
+	echo "ERROR: panel restore failed: $2" >&2
+	echo 'The finalized VPN is unaffected and keeps running. Fix the cause, then rerun --activate-state <same-archive> --enable-at-boot to retry only the panel restore.' >&2
+	echo "Diagnostics: journalctl -u ${AWG_STATE_PANEL_UNIT} -n 100" >&2
+	return 1
+}
+
+function awgStateRestorePanel() { # <stage> <journal> <work>
+	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER MIGRATIONS DB DATA_DIR SIDECAR
+	local CLIENTS="${AMNEZIAWG_DIR}/clients"
+	local -a FIELDS=() ARGS=()
+	[[ -f "${STAGE}/web/database.sqlite" ]] || return 0
+	if [[ -e "${JOURNAL}/panel-restored" ]]; then
+		echo 'Panel already restored by this migration; nothing to do.'
+		return 0
+	fi
+	INSTALLER="$(awgStatePanelInstaller)" || {
+		echo 'ERROR: the archive contains panel data but amneziawg-web/scripts/amneziawg-web-install.sh was not found next to this script. Run from a repository checkout to restore the panel; the VPN is unaffected.' >&2
+		return 1
+	}
+	if [[ ! -e "${JOURNAL}/panel-installing" ]] &&
+		[[ -e "${WEB_PANEL_ENV_FILE}" || -e "${WEB_PANEL_SYSTEMD_UNIT}" ]]; then
+		echo "ERROR: a panel is already installed on this host (${WEB_PANEL_ENV_FILE} or ${WEB_PANEL_SYSTEMD_UNIT} exists); not overwriting it with the archived panel. The VPN is unaffected." >&2
+		return 1
+	fi
+	MIGRATIONS="${INSTALLER%/scripts/*}/migrations"
+	: >"${JOURNAL}/panel-installing" || { echo 'ERROR: cannot write the panel journal marker.' >&2; return 1; }
+	awgStateJournalStep "${JOURNAL}" panel-restore-started
+	rm -rf -- "${WORK}/panel" "${WORK}/panel.fields"
+	awgStateArchive panel-prepare "${STAGE}" "${WORK}/panel" "${CLIENTS}" "${AWG_STATE_PANEL_DEFAULT_DB}" "${MIGRATIONS}" >"${WORK}/panel.fields" ||
+		{ awgStatePanelFail "${JOURNAL}" 'archived panel data was refused (see above).'; return 1; }
+	mapfile -d '' FIELDS <"${WORK}/panel.fields"
+	[[ ${#FIELDS[@]} -eq 3 ]] || { awgStatePanelFail "${JOURNAL}" 'internal panel prepare error.'; return 1; }
+	DB="${FIELDS[2]}"
+	DATA_DIR="${DB%/*}"
+	# Retry: never run the installer against a running half-restored panel.
+	systemctl stop "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
+	# The archived env is installed first, so the panel installer keeps it
+	# (it never overwrites an existing env file without --force).
+	if ! install -d -m 700 -o root -g root -- "${WEB_PANEL_ENV_FILE%/*}" ||
+		! install -m 600 -o root -g root -- "${WORK}/panel/env.conf" "${WEB_PANEL_ENV_FILE}"; then
+		awgStatePanelFail "${JOURNAL}" "cannot install ${WEB_PANEL_ENV_FILE}."
+		return 1
+	fi
+	ARGS=(--non-interactive --username "${FIELDS[0]}" --password-hash "${FIELDS[1]}" --data-dir "${DATA_DIR}"
+		--env-file "${WEB_PANEL_ENV_FILE}" --config-dir "${CLIENTS}" --no-start --no-enable)
+	[[ -z "${AWG_STATE_PANEL_BINARY:-}" ]] || ARGS+=(--binary-src "${AWG_STATE_PANEL_BINARY}")
+	awgStateJournalStep "${JOURNAL}" panel-install
+	bash "${INSTALLER}" "${ARGS[@]}" </dev/null ||
+		{ awgStatePanelFail "${JOURNAL}" "${INSTALLER} --non-interactive failed."; return 1; }
+	for SIDECAR in -wal -shm -journal; do
+		rm -f -- "${DB}${SIDECAR}" || { awgStatePanelFail "${JOURNAL}" "cannot remove stale ${DB}${SIDECAR}."; return 1; }
+	done
+	if ! install -m 600 -o awg-web -g awg-web -- "${WORK}/panel/database.sqlite" "${DB}.awg-state-new" ||
+		! mv -f -- "${DB}.awg-state-new" "${DB}"; then
+		rm -f -- "${DB}.awg-state-new"
+		awgStatePanelFail "${JOURNAL}" "cannot install the panel database at ${DB}."
+		return 1
+	fi
+	awgStateJournalStep "${JOURNAL}" panel-database-installed
+	systemctl start "${AWG_STATE_PANEL_UNIT}" ||
+		{ awgStatePanelFail "${JOURNAL}" "${AWG_STATE_PANEL_UNIT} did not start."; return 1; }
+	awgStatePanelHealthy "${WEB_PANEL_ENV_FILE}" ||
+		{ awgStatePanelFail "${JOURNAL}" "${AWG_STATE_PANEL_UNIT} did not become healthy (/api/health); a schema newer than this panel or a migration error is reported in its log."; return 1; }
+	systemctl enable "${AWG_STATE_PANEL_UNIT}" ||
+		{ awgStatePanelFail "${JOURNAL}" "cannot enable ${AWG_STATE_PANEL_UNIT} at boot."; return 1; }
+	: >"${JOURNAL}/panel-restored" || echo 'WARNING: cannot write the panel-restored journal marker; a rerun will repeat the panel restore.' >&2
+	rm -f -- "${JOURNAL}/panel-installing" || true
+	awgStateJournalStep "${JOURNAL}" panel-restored
+	echo "Panel restored and healthy (${AWG_STATE_PANEL_UNIT}, DB ${DB}); it now enforces peer expiries. Queued mail from the old host was cancelled, not replayed."
+}
+
 function awgStateWorkDir() {
 	local BASE TYPE WORK
 	for BASE in /dev/shm /run; do
@@ -4559,17 +4813,17 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 	shopt -s nullglob dotglob
 	for ENTRY in "${JOURNAL}/"*; do
 		case "${ENTRY##*/}" in
-			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete) ;;
+			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete|panel-installing|panel-restored) ;;
 			*) echo 'ERROR: unexpected journal entry; refusing purge.' >&2; exit 1 ;;
 		esac
 	done
-	for ENTRY in before before.new before.old recovery receipt nic steps rollback-incomplete; do
+	for ENTRY in before before.new before.old recovery receipt nic steps rollback-incomplete panel-installing; do
 		rm -rf --one-file-system -- "${JOURNAL:?}/${ENTRY:?}" || exit 1
 	done
 	if (( FINALIZED )) && [[ "${OPTION}" != --reset-finalized ]]; then
-		echo 'Purged rollback/receipt material (and any legacy plaintext recovery copies); retained only the non-secret finalized tombstone.'
+		echo 'Purged rollback/receipt material (and any legacy plaintext recovery copies); retained only the non-secret finalized (and panel-restored) markers.'
 	else
-		rm -f -- "${JOURNAL}/finalized" && rmdir -- "${JOURNAL}" || exit 1
+		rm -f -- "${JOURNAL}/finalized" "${JOURNAL}/panel-restored" && rmdir -- "${JOURNAL}" || exit 1
 		if [[ "${OPTION}" == --reset-finalized ]]; then
 			awgStateDropIdentityTombstones "${DIGEST}" || exit 1
 			echo 'Finalized journal reset after uninstall. Fresh import may proceed through normal preflight and current-clock policy checks.'
@@ -4600,6 +4854,12 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 			awgStateRecordIdentityTombstone "${STAGE}" "${JOURNAL##*/}" "${WORK}" || awgStateWarnIdentityTombstone
 		fi
 		echo 'Migration already finalized; archived policy is not replayed. Manage the VPN with systemctl normally.'
+		if [[ "${OPTION}" == --dry-run ]]; then
+			awgStatePanelPlan "${STAGE}"
+		elif [[ "${MODE}" == --activate-state ]]; then
+			releaseClientLifecycleLock
+			awgStateRestorePanel "${STAGE}" "${JOURNAL}" "${WORK}" || return 1
+		fi
 		return 0
 	fi
 	[[ ! -e "${JOURNAL}/finalized" && ! -L "${JOURNAL}/finalized" ]] || { echo 'ERROR: invalid finalized journal marker.' >&2; return 1; }
@@ -4620,6 +4880,7 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 	echo 'Policy: future-expiry peers migrate; expired/disabled/archived/removal-pending peers are excluded. Ongoing expiry enforcement needs the restored panel or operator.'
 	if [[ "${OPTION}" == --dry-run ]]; then
 		echo 'Plan: re-reconcile the unchanged import without reinstalling or activating.'
+		awgStatePanelPlan "${STAGE}"
 		return 0
 	fi
 	# Activation validates the candidate with the installed backend before making
@@ -4729,6 +4990,9 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 			awgStateRecordIdentityTombstone "${STAGE}" "${JOURNAL##*/}" "${WORK}" ||
 				awgStateWarnIdentityTombstone
 			echo "Journal ${JOURNAL} holds no keys (the encrypted archive is the recovery copy). Optional cleanup: --purge-state-journal ${JOURNAL##*/}."
+			# The VPN is final; the panel never runs under the VPN lifecycle lock.
+			releaseClientLifecycleLock
+			awgStateRestorePanel "${STAGE}" "${JOURNAL}" "${WORK}" || return 1
 		else
 			awgStateActivationDisarm
 			echo 'Activated for testing only; still disabled at boot. Stop/disable it, then activate with --enable-at-boot to finalize.'
@@ -4766,7 +5030,11 @@ function awgStateCommand() (
 	# Bound decrypted staging even before inspecting the tar headers.
 	(ulimit -f 614400; age --decrypt --output "${WORK}/state.tar.gz" "${ARCHIVE}") || exit 1
 	if [[ "${MODE}" == --inspect-state ]]; then
-		awgStateArchive inspect "${WORK}/state.tar.gz" "${WORK}/inspect"
+		local PANEL_INSTALLER PANEL_MIGRATIONS=""
+		if PANEL_INSTALLER="$(awgStatePanelInstaller)"; then
+			PANEL_MIGRATIONS="${PANEL_INSTALLER%/scripts/*}/migrations"
+		fi
+		awgStateArchive inspect "${WORK}/state.tar.gz" "${WORK}/inspect" "${PANEL_MIGRATIONS}"
 		exit $?
 	fi
 	awgStateArchive unpack "${WORK}/state.tar.gz" "${WORK}/stage" || exit 1
@@ -4816,8 +5084,11 @@ function awgStateCommand() (
 	awgStateWarnMtuBudget "${WORK}/stage/vpn/server.conf"
 	printf 'Plan: install %s backend, AWG %s, interface %s, UDP %s, uplink %s.\n' "${AWG_BACKEND}" "${AWG_PROTOCOL_VERSION}" "${SERVER_AWG_NIC}" "${SERVER_PORT}" "${NIC}"
 	echo 'Restore original keys/profiles; replace host hooks; migrate future-expiry peers and exclude already-expired/disabled/archived/removal-pending peers.'
-	echo 'Leave VPN stopped/disabled. Panel/mail/proxy data stay only in the encrypted archive (automatic restore TODO); without the panel, nothing enforces future expiries after cutover.'
-	[[ "${OPTION}" != --dry-run ]] || exit 0
+	echo 'Leave VPN stopped/disabled. The panel (if archived) is restored only after finalization by --activate-state --enable-at-boot; proxy data stay only in the encrypted archive.'
+	if [[ "${OPTION}" == --dry-run ]]; then
+		awgStatePanelPlan "${WORK}/stage"
+		exit 0
+	fi
 	acquireClientLifecycleLock || exit 1
 	# Repeat under lock to close the preflight/installation race.
 	awgStateCheckIdentityTombstone "${WORK}/stage" || exit 1
@@ -15701,7 +15972,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	#   amneziawg-install.sh --export-state <file>
 	#   amneziawg-install.sh --inspect-state <file>
 	#   [SERVER_PUB_NIC=<nic>] [SERVER_PUB_IP=<host>] amneziawg-install.sh --import-state <file> [--dry-run]
-	#   amneziawg-install.sh --activate-state <file> [--enable-at-boot]
+	#   [AWG_STATE_PANEL_BINARY=<amneziawg-web>] amneziawg-install.sh --activate-state <file> [--enable-at-boot]
+	#     After finalization, restores an archived amneziawg-web panel via
+	#     amneziawg-web/scripts/amneziawg-web-install.sh from this checkout
+	#     (builds from source unless AWG_STATE_PANEL_BINARY is set); a rerun
+	#     on the finalized journal retries only the panel restore.
 	#   amneziawg-install.sh --purge-state-journal <manifest-sha256> [--force]
 	#   amneziawg-install.sh --reset-state-journal <manifest-sha256> --confirm-policy-replay
 	#
