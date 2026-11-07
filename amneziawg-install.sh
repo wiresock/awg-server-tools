@@ -244,6 +244,14 @@ enable_apt_ipv4() {
 
 	# Save existing trap commands so we can chain them (not just restore).
 	# trap -p output is eval-safe by design (bash always emits: trap -- 'body' SIG).
+	# In a subshell that has not set any trap yet, `trap -p` still prints the
+	# PARENT's handlers (inactive here). Saving and later re-installing them
+	# would run e.g. the parent's EXIT cleanup inside this subshell. Setting
+	# any trap drops that inherited display (ignored signals stay listed and
+	# active); USR2 is unused by this script.
+	if [[ "${BASHPID}" != "$$" ]]; then
+		trap - USR2
+	fi
 	_APT_IPV4_PREV_TRAP_EXIT="$(trap -p EXIT || true)"
 	_APT_IPV4_PREV_TRAP_INT="$(trap -p INT || true)"
 	_APT_IPV4_PREV_TRAP_TERM="$(trap -p TERM || true)"
@@ -3675,7 +3683,7 @@ def peer_policy(root):
     db_path = root / 'web/database.sqlite'
     if not db_path.exists():
         return None
-    with closing(sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True)) as db:
+    with closing(sqlite3.connect(db_path.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
         db.execute('PRAGMA trusted_schema=OFF')
         if db.execute("SELECT type FROM sqlite_master WHERE name='peers'").fetchone() != ('table',):
             raise StatePolicyError('panel peer policy requires a real peers table')
@@ -4005,6 +4013,17 @@ function awgStateSnapshotPanel() {
 	mkdir -p "${STAGE}/web" || return 1
 	# Use .backup, never copy a live WAL-mode DB. Destination is a private mktemp path.
 	sqlite3 -readonly "${DB}" ".timeout 10000" ".backup '${STAGE}/web/database.sqlite'" || return 1
+	# .backup keeps the source's WAL mode; a later non-immutable open would
+	# create -wal/-shm sidecars that pack rejects. Make the copy a plain
+	# rollback-journal DB and prove no sidecar exists (readers use immutable=1).
+	sqlite3 "${STAGE}/web/database.sqlite" 'PRAGMA journal_mode=DELETE;' >/dev/null || return 1
+	local SIDECAR
+	for SIDECAR in -wal -shm -journal; do
+		if [[ -e "${STAGE}/web/database.sqlite${SIDECAR}" || -L "${STAGE}/web/database.sqlite${SIDECAR}" ]]; then
+			echo "ERROR: unexpected SQLite sidecar database.sqlite${SIDECAR} in staging." >&2
+			return 1
+		fi
+	done
 	ENV_FILE="$(resolveWebPanelEnvFile)" || return 1
 	if [[ -n "${ENV_FILE}" && -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]]; then
 		install -m 600 -- "${ENV_FILE}" "${STAGE}/web/env.conf" || return 1
@@ -4159,6 +4178,13 @@ function awgStateImportTransaction() (
 	local STAGE="$1" JOURNAL="$2" COMMITTED=0 CONFIG_EXISTED=0 FILE INDEX=0
 	local -a TRACKED=("${AWG_SYSCTL_FILE}" "${AWG_MODULES_LOAD_FILE}" "${AWG_BT_MODPROBE_OVERRIDE}")
 	[[ -d "${AMNEZIAWG_DIR}" ]] && CONFIG_EXISTED=1
+	# After an INCOMPLETE rollback the host is in an unknown mixed state:
+	# a new before-image would capture it as "before" and lose the real one.
+	# Refuse until the operator has inspected/restored and purged the journal.
+	if [[ -e "${JOURNAL}/rollback-incomplete" || -L "${JOURNAL}/rollback-incomplete" ]]; then
+		echo "ERROR: a previous import rollback was INCOMPLETE; refusing a new attempt. Inspect ${AMNEZIAWG_DIR}, the unit directory and ${JOURNAL}/before, restore manually, then run --purge-state-journal ${JOURNAL##*/} --force before retrying." >&2
+		exit 1
+	fi
 	# Take a complete fresh before-image for THIS attempt (absence = no slot
 	# file), then swap it in. A failed snapshot keeps the previous image intact;
 	# a retry never restores a stale backup of a since-removed file.
@@ -4202,7 +4228,8 @@ function awgStateImportTransaction() (
 			done
 			systemctl daemon-reload || true
 			if ((INCOMPLETE)); then
-				echo "ERROR: import rollback was INCOMPLETE; inspect ${AMNEZIAWG_DIR}, the unit directory and ${JOURNAL}/before before retrying." >&2
+				: >"${JOURNAL}/rollback-incomplete" || true
+				echo "ERROR: import rollback was INCOMPLETE; inspect ${AMNEZIAWG_DIR}, the unit directory and ${JOURNAL}/before, restore manually, then run --purge-state-journal ${JOURNAL##*/} --force. New attempts are refused until then." >&2
 			else
 				echo "ERROR: import rolled back config/unit changes; inspect ${JOURNAL}/steps. Packages may remain installed." >&2
 			fi
@@ -4398,6 +4425,23 @@ function awgStateWarnMtuBudget() { # <server.conf>
 	fi
 }
 
+# SERVER_PUB_IP override for imports. A hostname/IPv4 never contains ':', so
+# host:port is rejected; a value with ':' must be a bare or bracketed IPv6
+# address. Brackets are stripped: the installer adds them itself when it
+# builds Endpoint="[v6]:port", exactly as for interactive installs.
+function awgStateNormalizePubHost() { # <value>; prints the normalized value
+	local VALUE="$1"
+	if [[ "${VALUE}" == *:* ]]; then
+		VALUE="${VALUE#\[}"
+		VALUE="${VALUE%\]}"
+		[[ "${VALUE}" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+		python3 -I -c 'import ipaddress, sys; ipaddress.IPv6Address(sys.argv[1])' "${VALUE}" 2>/dev/null || return 1
+	else
+		[[ ${#VALUE} -le 253 && "${VALUE}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || return 1
+	fi
+	printf '%s\n' "${VALUE}"
+}
+
 function awgStateWorkDir() {
 	local BASE TYPE WORK
 	for BASE in /dev/shm /run; do
@@ -4409,8 +4453,9 @@ function awgStateWorkDir() {
 			return 0
 		fi
 	done
-	echo 'WARNING: RAM-backed staging unavailable; using private /tmp staging. Use encrypted storage.' >&2
-	mktemp -d /tmp/awg-state.XXXXXXXX
+	# Never fall back to disk-backed /tmp: decrypted keys must not touch disk.
+	echo 'ERROR: RAM-backed staging unavailable (neither /dev/shm nor /run is a usable tmpfs); refusing to stage decrypted state on disk.' >&2
+	return 1
 }
 
 function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized]
@@ -4468,11 +4513,11 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 	shopt -s nullglob dotglob
 	for ENTRY in "${JOURNAL}/"*; do
 		case "${ENTRY##*/}" in
-			before|before.new|before.old|recovery|receipt|nic|steps|finalized) ;;
+			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete) ;;
 			*) echo 'ERROR: unexpected journal entry; refusing purge.' >&2; exit 1 ;;
 		esac
 	done
-	for ENTRY in before before.new before.old recovery receipt nic steps; do
+	for ENTRY in before before.new before.old recovery receipt nic steps rollback-incomplete; do
 		rm -rf --one-file-system -- "${JOURNAL:?}/${ENTRY:?}" || exit 1
 	done
 	if (( FINALIZED )) && [[ "${OPTION}" != --reset-finalized ]]; then
@@ -4553,8 +4598,23 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 	trap 'PENDING_SIGNAL=143' TERM
 	trap 'PENDING_SIGNAL=129' HUP
 	if ! cmp -s -- "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}"; then
-		if ! cp -p -- "${SERVER_AWG_CONF}" "${WORK}/previous.conf" ||
-			! replaceFileExactly "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}" 600; then
+		if ! cp -p -- "${SERVER_AWG_CONF}" "${WORK}/previous.conf"; then
+			echo "ERROR: could not save a copy of ${SERVER_AWG_CONF}; it was not changed." >&2
+			awgStateActivationDisarm
+			[[ -z "${PENDING_SIGNAL}" ]] || exit "${PENDING_SIGNAL}"
+			return 1
+		fi
+		if ! replaceFileExactly "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}" 600; then
+			# The replacement may have landed before failing: never leave a
+			# reconciled config without its receipt.
+			if cmp -s -- "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}" &&
+				! replaceFileExactly "${WORK}/previous.conf" "${SERVER_AWG_CONF}" 600; then
+				echo "ERROR: config update failed and the previous ${SERVER_AWG_CONF} could not be restored; restore it from the encrypted archive before retrying." >&2
+			elif [[ -n "${PENDING_SIGNAL}" ]]; then
+				echo "ERROR: interrupted while updating ${SERVER_AWG_CONF}; the previous config was kept. Rerun the import." >&2
+			else
+				echo "ERROR: could not update ${SERVER_AWG_CONF} (I/O error, e.g. no free space); the previous config was kept." >&2
+			fi
 			awgStateActivationDisarm
 			[[ -z "${PENDING_SIGNAL}" ]] || exit "${PENDING_SIGNAL}"
 			return 1
@@ -4565,7 +4625,11 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 		if ((CONFIG_CHANGED)) && ! replaceFileExactly "${WORK}/previous.conf" "${SERVER_AWG_CONF}" 600; then
 			echo "ERROR: receipt publication failed and the previous ${SERVER_AWG_CONF} could not be restored; restore it from the encrypted archive before retrying." >&2
 		else
-			echo 'ERROR: could not publish the import receipt; the previous config was kept. Fix the cause (e.g. free space) and rerun.' >&2
+			if [[ -n "${PENDING_SIGNAL}" ]]; then
+				echo 'ERROR: interrupted while publishing the import receipt; the previous config was kept. Rerun the import.' >&2
+			else
+				echo 'ERROR: could not publish the import receipt; the previous config was kept. Fix the cause (e.g. free space) and rerun.' >&2
+			fi
 		fi
 		awgStateActivationDisarm
 		[[ -z "${PENDING_SIGNAL}" ]] || exit "${PENDING_SIGNAL}"
@@ -4684,8 +4748,8 @@ function awgStateCommand() (
 	# Endpoint for profiles generated after cutover. Restored profiles keep
 	# their own Endpoint lines unchanged.
 	if [[ -n "${PUB_IP}" ]]; then
-		[[ ${#PUB_IP} -le 253 && "${PUB_IP}" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || {
-			echo 'ERROR: SERVER_PUB_IP must be a hostname or IP address.' >&2
+		PUB_IP="$(awgStateNormalizePubHost "${PUB_IP}")" || {
+			echo 'ERROR: SERVER_PUB_IP must be a hostname, IPv4 or IPv6 address (no port).' >&2
 			exit 1
 		}
 		# shellcheck disable=SC2030 # consumed only inside this awgStateCommand subshell (install hook, serializeParams)

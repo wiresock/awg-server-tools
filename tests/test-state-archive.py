@@ -392,6 +392,7 @@ WEB_PANEL_SYSTEMD_UNIT="$ROOT/panel.service"
 WEB_PANEL_ENV_FILE="$ROOT/env.conf"
 readWebPanelEffectiveProperty() { return 1; }
 sqlite3() {
+    [[ "$1" == -readonly ]] || return 0 # journal_mode conversion of the copy.
     printf '%s' "$2" >"$ROOT/chosen"
     python3 - "$2" "$ROOT/stage/web/database.sqlite" <<'SQLITE'
 import sqlite3, sys
@@ -763,7 +764,7 @@ runLockedFreshInstall # Existing unrelated configs are not a new restriction.
         self.assertNotIn(b'unexpected service query', result.stderr)
         self.assertIn('runLockedFreshInstall\n\tfi\nfi\n', SCRIPT.read_text())
 
-    def test_staging_prefers_private_ram_backed_directory_with_safe_fallback(self):
+    def test_staging_prefers_private_ram_backed_directory_and_refuses_disk(self):
         shell = r'''
 set -euo pipefail
 source "$1"
@@ -772,13 +773,15 @@ trap 'rm -rf -- "$WORK"' EXIT
 [[ -d "$WORK" && "$(stat -c %a "$WORK")" == 700 ]]
 if [[ -d /dev/shm && "$(stat -f -c %T /dev/shm)" == tmpfs ]]; then [[ "$WORK" == /dev/shm/awg-state.* ]]; fi
 rm -rf -- "$WORK"
-stat() { return 1; }
-WORK="$(awgStateWorkDir)"
-[[ "$WORK" == /tmp/awg-state.* && -d "$WORK" ]]
+stat() { printf 'ext2/ext3\n'; }
+mktemp() { echo "mktemp-called $*" >&2; return 1; }
+if WORK="$(awgStateWorkDir)"; then exit 10; fi
+[[ -z "$WORK" ]]
 '''
         result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT)], capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
-        self.assertIn(b'WARNING: RAM-backed staging unavailable', result.stderr)
+        self.assertIn(b'refusing to stage decrypted state on disk', result.stderr)
+        self.assertNotIn(b'mktemp-called', result.stderr)
 
     def test_truncated_gzip_and_oversized_tar_member(self):
         self.tar.write_bytes(self.tar.read_bytes()[:30])
@@ -1843,6 +1846,181 @@ SERVER_AWG_S4=18 CLIENT_MTU="" awgStateWarnMtuBudget "$2"
         meta['exported_at'] = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
         make_tar(self.tar, self.files, meta)
         self.assertIn(b'future relative to this host', self.run_helper('inspect', ok=False).stderr)
+
+    def test_wal_mode_panel_db_snapshot_exports_and_imports_without_sidecars(self):
+        if not shutil.which('sqlite3'):
+            self.skipTest('sqlite3 CLI not installed')
+        live = self.root / 'live'
+        live.mkdir()
+        db_path = live / 'awg-web.db'
+        writer = sqlite3.connect(db_path)
+        self.addCleanup(writer.close)
+        writer.execute('PRAGMA journal_mode=WAL')
+        writer.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, removal_pending INTEGER, expires_at TEXT, display_name TEXT)')
+        writer.execute('INSERT INTO peers VALUES(?,?,?,?,?,?)', (PEER, 1, 0, 0, None, 'phone'))
+        writer.commit()  # Writer kept open: live WAL/SHM exist, like a running panel.
+        self.assertTrue((live / 'awg-web.db-wal').exists())
+        source = self.root / 'source'
+        (source / 'clients').mkdir(parents=True)
+        (source / 'params').write_bytes(self.files['vpn/params'])
+        (source / 'awg0.conf').write_bytes(self.files['vpn/server.conf'])
+        (source / 'clients/awg0-client-phone.conf').write_bytes(self.files['clients/awg0-client-phone.conf'])
+        (self.root / 'work').mkdir()
+        shell = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/source"
+AWG_STATE_PROXY_CONFIG="$ROOT/not-installed-proxy"
+acquireClientLifecycleLock() { CLIENT_LIFECYCLE_LOCK_FD=held; }
+releaseClientLifecycleLock() { CLIENT_LIFECYCLE_LOCK_FD=""; }
+awgStateTrustedPath() { return 0; }
+isWebPanelInstalled() { return 0; }
+readWebPanelExecStartSetting() { printf '%s\n' "$ROOT/live/awg-web.db"; }
+resolveWebPanelEnvFile() { printf '\n'; }
+collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=("$ROOT/source/clients/awg0-client-phone.conf"); }
+awg() { printf 'fixture-tools\n'; }
+age() { cat >"$3"; }
+awgStateExport "$ROOT/export.tar.gz" "$ROOT/work"
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        with tarfile.open(self.root / 'export.tar.gz') as archive:
+            names = archive.getnames()
+            data = archive.extractfile('web/database.sqlite').read()
+        self.assertIn('web/database.sqlite', names)
+        self.assertFalse([n for n in names if n.endswith(('-wal', '-shm', '-journal'))], names)
+        self.assertEqual(data[18:20], b'\x01\x01')  # Rollback-journal (DELETE) mode header.
+        # Import side: an archive whose DB still carries a WAL header (older
+        # exports) is read immutably and never grows sidecars next to it.
+        wal_db = self.root / 'wal-origin.sqlite'
+        with closing(sqlite3.connect(wal_db)) as db:
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, removal_pending INTEGER, expires_at TEXT, display_name TEXT)')
+            db.execute('INSERT INTO peers VALUES(?,?,?,?,?,?)', (PEER, 1, 0, 0, None, 'phone'))
+            db.commit()
+        self.assertEqual(wal_db.read_bytes()[18:20], b'\x02\x02')
+        self.files['web/database.sqlite'] = wal_db.read_bytes()
+        make_tar(self.tar, self.files)
+        destination = self.root / 'unpacked'
+        self.run_helper('unpack', self.tar, destination)
+        report = json.loads(self.run_helper('inspect').stdout)['peer_plan']
+        self.assertEqual(report['peers'][0]['decision'], 'drop')
+        self.run_helper('prepare', destination, self.root / 'prepared.conf')
+        leftovers = [p.name for p in destination.rglob('*') if p.name.endswith(('-wal', '-shm', '-journal'))]
+        self.assertEqual(leftovers, [])
+
+    def test_config_replace_failure_in_deferred_window_restores_previous(self):
+        for case in ('landed-then-failed', 'io-error', 'interrupted'):
+            with self.subTest(case=case):
+                root = self.root / case
+                root.mkdir()
+                shell = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"; CASE="$3"
+AMNEZIAWG_DIR="$ROOT/vpn"; SERVER_AWG_NIC=awg0; SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"
+mkdir -p "$AMNEZIAWG_DIR" "$ROOT/journal" "$ROOT/w1"
+printf original >"$SERVER_AWG_CONF"; printf params >"$AMNEZIAWG_DIR/params"; printf ens3 >"$ROOT/journal/nic"
+sha256sum "$AMNEZIAWG_DIR/params" "$SERVER_AWG_CONF" >"$ROOT/journal/receipt"
+acquireClientLifecycleLock() { return 0; }; awgStateTrustedPath() { return 0; }
+awgStateArchive() { printf filtered >"$4"; }
+systemctl() { return 1; }
+eval "$(declare -f replaceFileExactly | sed 's/^replaceFileExactly/realReplaceFileExactly/')"
+replaceFileExactly() {
+    if [[ "$1" == */reconciled.conf ]]; then
+        case "$CASE" in
+            landed-then-failed) realReplaceFileExactly "$@"; return 1 ;;
+            io-error) return 1 ;;
+            interrupted) kill -TERM "$BASHPID"; return 1 ;;
+        esac
+    fi
+    realReplaceFileExactly "$@"
+}
+( trap 'exit 143' TERM; awgStateReconcileImport "$ROOT/stage" "$ROOT/journal" "$ROOT/w1" --import-state '' ens3 )
+echo "rc=$? conf=$(<"$SERVER_AWG_CONF")"
+sha256sum -c --status "$ROOT/journal/receipt" && echo receipt-ok
+"""
+                result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(root), case], capture_output=True)
+                out, err = result.stdout.decode(), result.stderr.decode()
+                self.assertIn('conf=original', out, err)
+                self.assertIn('receipt-ok', out, err)
+                if case == 'interrupted':
+                    self.assertIn('rc=143', out, err)
+                    self.assertIn('interrupted while updating', err)
+                    self.assertNotIn('free space', err)
+                else:
+                    self.assertIn('rc=1', out, err)
+                    self.assertIn('previous config was kept', err)
+
+    def test_server_pub_ip_override_rejects_host_port(self):
+        shell = r"""
+source "$1"
+for value in vpn.example.test 203.0.113.7 2001:db8::1 '[2001:db8::1]' ::ffff:192.0.2.1 \
+             vpn.example.test:51820 203.0.113.7:51820 '[2001:db8::1]:51820' 2001:db8::1%eth0 \
+             ':::' 'a b' -bad bad- '[vpn.example.test]' ''; do
+    if out="$(awgStateNormalizePubHost "$value")"; then echo "ok <$value> -> <$out>"; else echo "bad <$value>"; fi
+done
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT)], capture_output=True)
+        out = result.stdout.decode()
+        for line in ('ok <vpn.example.test> -> <vpn.example.test>', 'ok <203.0.113.7> -> <203.0.113.7>',
+                     'ok <2001:db8::1> -> <2001:db8::1>', 'ok <[2001:db8::1]> -> <2001:db8::1>',
+                     'ok <::ffff:192.0.2.1> -> <::ffff:192.0.2.1>',
+                     'bad <vpn.example.test:51820>', 'bad <203.0.113.7:51820>', 'bad <[2001:db8::1]:51820>',
+                     'bad <2001:db8::1%eth0>', 'bad <:::>', 'bad <a b>', 'bad <-bad>', 'bad <bad->',
+                     'bad <[vpn.example.test]>', 'bad <>'):
+            self.assertIn(line + '\n', out, result.stderr.decode())
+
+    def test_apt_ipv4_in_subshell_never_runs_inherited_parent_traps(self):
+        shell = r"""
+source "$1"
+APT_FORCE_IPV4_CONF="$2/force-ipv4"; GAI_CONF="$2/gai.conf"
+mkdir() { [[ "$*" == '-p /etc/apt/apt.conf.d' ]] && return 0; command mkdir "$@"; }
+trap 'echo "parent-exit pid=$BASHPID"' EXIT
+trap 'echo parent-hup' HUP
+( enable_apt_ipv4; exit 7 ); echo "rc=$?"
+( enable_apt_ipv4; disable_apt_ipv4; echo "restored=[$(trap -p EXIT)]"; exit 3 ); echo "rc=$?"
+( enable_apt_ipv4; kill -TERM "$BASHPID"; echo not-reached ); echo "rc=$?"
+echo "main=[$(trap -p EXIT)]"
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        out = result.stdout.decode()
+        self.assertIn('rc=7\n', out, result.stderr.decode())
+        self.assertIn('restored=[]\nrc=3\n', out)
+        self.assertIn('rc=143\n', out)
+        self.assertNotIn('not-reached', out)
+        self.assertNotIn('parent-hup', out)
+        self.assertEqual(sum(l.startswith('parent-exit pid=') for l in out.splitlines()), 1, out)  # Only the real parent shell's EXIT.
+        self.assertTrue(out.rstrip().rsplit('\n', 1)[1].startswith('parent-exit pid='), out)
+        self.assertFalse((self.root / 'force-ipv4').exists())
+
+    def test_incomplete_rollback_blocks_new_before_image_until_forced_purge(self):
+        shell = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/vpn"; AWG_SYSTEMD_UNIT_DIR="$ROOT/units"; SERVER_AWG_NIC=awg0
+AWG_SYSCTL_FILE="$ROOT/sysctl"; AWG_MODULES_LOAD_FILE="$ROOT/modules"; AWG_BT_MODPROBE_OVERRIDE="$ROOT/modprobe"
+mkdir -p "$ROOT/journal" "$AWG_SYSTEMD_UNIT_DIR"
+printf original >"$AWG_SYSCTL_FILE"
+systemctl() { return 0; }
+installAmneziaWG() { printf mutated >"$AWG_SYSCTL_FILE"; return 1; }
+cp() { [[ "${FAIL_RESTORE:-0}" == 1 && "$*" == *"/before/"* ]] && return 1; command cp "$@"; }
+FAIL_RESTORE=1
+if awgStateImportTransaction "$ROOT/stage" "$ROOT/journal"; then exit 10; fi
+[[ -e "$ROOT/journal/rollback-incomplete" ]] || exit 11
+FAIL_RESTORE=0
+printf operator-fixed >"$AWG_SYSCTL_FILE"
+installAmneziaWG() { touch "$ROOT/install-ran"; return 1; }
+if awgStateImportTransaction "$ROOT/stage" "$ROOT/journal"; then exit 12; fi
+[[ ! -e "$ROOT/install-ran" && "$(<"$ROOT/journal/before/0")" == original ]] || exit 13
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'import rollback was INCOMPLETE', result.stderr)
+        self.assertIn(b'refusing a new attempt', result.stderr)
+        self.assertIn(b'--purge-state-journal journal --force', result.stderr)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

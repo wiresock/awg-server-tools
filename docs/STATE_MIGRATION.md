@@ -28,7 +28,10 @@ VPN interface. If omitted, the installer uses the default-route interface. The
 VPN interface name is retained from the archive. Neither server nor client keys
 are regenerated. Client profiles and Endpoint values remain unchanged.
 
-`SERVER_PUB_IP=<hostname>` may be set at import, like `SERVER_PUB_NIC`, to change
+`SERVER_PUB_IP=<hostname|IPv4|IPv6>` (no port; `host:port` is rejected, and a
+value containing `:` must be a valid IPv6 address, bare or `[bracketed]` —
+brackets are stripped because the installer adds them when it builds
+`Endpoint`) may be set at import, like `SERVER_PUB_NIC`, to change
 the endpoint recorded in the new params (used for profiles generated after
 cutover; restored profiles keep their own `Endpoint` lines). Import warns when
 the effective value is an IP literal, because such profiles do not follow a DNS
@@ -96,7 +99,12 @@ The encrypted payload is a gzip tar containing only regular files:
 - `web/database.sqlite`: if the panel is installed, a consistent online
   `sqlite3 .backup` of the effective database location: `--database-url` takes
   precedence over `AWG_WEB_DB`; absent settings use `awg-web.db`. Relative paths
-  use the service working directory.
+  use the service working directory. The staged copy is converted to
+  `journal_mode=DELETE` right after `.backup` (a WAL-mode panel DB would
+  otherwise yield a WAL copy), export refuses if any `-wal`/`-shm`/`-journal`
+  sidecar exists in staging, and every reader of a staged or unpacked DB opens
+  it with `mode=ro&immutable=1`, so no sidecar is ever created or packed (also
+  for older archives whose DB still has a WAL header).
   Unsupported SQLite URL/query formats fail export rather than silently omit
   the DB. Per-peer `expires_at` values remain in this snapshot; no remaining
   lifetime is reset on the destination. `web/env.conf` is copied from the existing env-file resolver.
@@ -230,13 +238,23 @@ INT/TERM/HUP during activation (from `systemctl start` until finalization, or
 until a test activation completes) likewise stops and disables the unit and
 leaves the import quarantined; rerun `--activate-state` to retry. Rollback
 cleanup runs without errexit or re-entrant signals, attempts every step even if
-logging fails, and reports an incomplete rollback explicitly. Config and receipt
+logging fails, and reports an incomplete rollback explicitly. An INCOMPLETE
+rollback also leaves a `rollback-incomplete` marker in the journal; while it
+exists every new import attempt is refused before a new before-image is taken
+(so the mixed host state is never recorded as "before" and the real image is
+kept). Inspect/restore manually, then `--purge-state-journal <digest> --force`. Config and receipt
 change together: if the receipt cannot be published, the previous config is
-restored so a retry verifies and continues. INT/TERM/HUP are deferred
+restored so a retry verifies and continues. If replacing the config itself
+fails, the target is compared with the reconciled config and the previous
+config is restored if the replacement had already landed; an interrupt and an
+I/O failure get distinct messages. INT/TERM/HUP are deferred
 while the config and its receipt are published, then honoured (before any
 service start). Install and validation run in a nested subshell, so helper trap
 scopes (such as the APT IPv4 override, which now also chains EXIT/HUP to the
-previous handler) can never replace the import's rollback handler.
+previous handler) can never replace the import's rollback handler. In a
+subshell that has not set traps yet, bash still *displays* the parent's
+handlers; the APT helper drops that inherited display before saving, so it
+never re-installs (and runs) a parent's EXIT/INT/TERM/HUP handler there.
 On ordinary failure/INT/TERM, newly created VPN config/instance units are removed
 and previous sysctl/module-load/modprobe files restored. Packages, apt sources,
 verified binaries/helpers, module load side effects and empty directories may
@@ -253,7 +271,8 @@ removals-only reconciliation; a changed local installation is never overwritten.
 The journal holds **no plaintext keys, panel DB/env or proxy data**: the
 encrypted archive is the recovery copy. It keeps `before/` (previous
 sysctl/module-load/modprobe files for rollback), `receipt` (SHA-256 hashes),
-`nic`, `steps` and, after finalization, the non-secret `finalized` marker.
+`nic`, `steps`, a `rollback-incomplete` marker after a failed rollback and,
+after finalization, the non-secret `finalized` marker.
 Journals created by earlier prototype revisions may still contain a plaintext
 `recovery/` directory; purge removes it. Finalizing prints the exact manifest
 digest to use for optional cleanup:
@@ -381,8 +400,8 @@ Export streams gzip tar bytes **directly into age through a pipe**; no plaintext
 failed producer or encryption removes partial ciphertext rather than publishing
 it. Individual-file snapshots (including SQLite `.backup`) still need staging.
 All CLI modes prefer a private 0700 directory on `/dev/shm`, then `/run`, only
-when that location is tmpfs/ramfs; if neither can create a staging directory,
-there is a warned private `/tmp` fallback. Insufficient RAM/staging space aborts
+when that location is tmpfs/ramfs; if neither is usable the command refuses
+(there is no disk-backed `/tmp` fallback). Insufficient RAM/staging space aborts
 rather than silently spilling an in-progress snapshot to disk. Import/inspect
 still decrypt a bounded tarball inside their private staging directory.
 
@@ -427,7 +446,11 @@ lock release before the prompt and early schema refusal at export, skipped
 conflicting client copies, `installer_sha256` under `bash <(…)`, the
 server-identity tombstone, the reset hint, the MTU warning, fractional-second
 expiries and clock-skew tolerance, the `SERVER_PUB_IP` override/IP-literal
-warning, and that journals hold no plaintext keys or panel DB. The suite passes
+warning, and that journals hold no plaintext keys or panel DB. Round-12
+additions use the real `sqlite3` CLI (skipped if absent; CI installs it) to
+export a live WAL-mode panel DB and import a WAL-header DB without sidecars,
+and cover the config-replace failure window, `host:port` rejection, inherited
+subshell traps, refusal without RAM staging and the incomplete-rollback block. The suite passes
 under Python 3.9, 3.10 and 3.13.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.
