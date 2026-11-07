@@ -868,6 +868,15 @@ awgStateCommand --import-state "$ROOT/state.tar.gz" || exit 19
 printf '\n# local change\n' >>"$AMNEZIAWG_DIR/awg0.conf"
 awgStateCommand --import-state "$ROOT/state.tar.gz"
 [[ $? -ne 0 ]] || exit 22
+# A rollback-incomplete marker blocks rerun, dry-run and activation too.
+J=("$AWG_STATE_JOURNAL_DIR"/*); touch "${J[0]}/rollback-incomplete"
+: >"$ROOT/systemctl.log"
+if awgStateCommand --import-state "$ROOT/state.tar.gz" --dry-run 2>>"$ROOT/blocked.err"; then exit 23; fi
+if awgStateCommand --import-state "$ROOT/state.tar.gz" 2>>"$ROOT/blocked.err"; then exit 23; fi
+if awgStateCommand --activate-state "$ROOT/state.tar.gz" 2>>"$ROOT/blocked.err"; then exit 23; fi
+if awgStateCommand --activate-state "$ROOT/state.tar.gz" --enable-at-boot 2>>"$ROOT/blocked.err"; then exit 23; fi
+[[ "$(grep -c 'previous import rollback was INCOMPLETE' "$ROOT/blocked.err")" == 4 ]] || exit 24
+! grep -Eq '^(start|enable) ' "$ROOT/systemctl.log" || exit 25
 '''
         result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
@@ -1958,7 +1967,10 @@ sha256sum -c --status "$ROOT/journal/receipt" && echo receipt-ok
 source "$1"
 for value in vpn.example.test 203.0.113.7 2001:db8::1 '[2001:db8::1]' ::ffff:192.0.2.1 \
              vpn.example.test:51820 203.0.113.7:51820 '[2001:db8::1]:51820' 2001:db8::1%eth0 \
-             ':::' 'a b' -bad bad- '[vpn.example.test]' ''; do
+             ':::' 'a b' -bad bad- '[vpn.example.test]' '' \
+             :: '[::]' ::0 0:0:0:0:0:0:0:0 ::ffff:0.0.0.0 0.0.0.0 '[2001:db8::1' '2001:db8::1]' '[[2001:db8::1]]' \
+             256.1.1.1 1.2.3 1.2.3.4.5 01.2.3.4 1.2.3.4. 10.0.0.255 0.1.2.3 \
+             a..b .a.b a.b. a.-b.c a-.b.c "$(printf 'a%.0s' {1..64}).test" "$(printf 'a%.0s' {1..63}).test" xn--d1acufc.example 1.2.3.4a; do
     if out="$(awgStateNormalizePubHost "$value")"; then echo "ok <$value> -> <$out>"; else echo "bad <$value>"; fi
 done
 """
@@ -1969,7 +1981,14 @@ done
                      'ok <::ffff:192.0.2.1> -> <::ffff:192.0.2.1>',
                      'bad <vpn.example.test:51820>', 'bad <203.0.113.7:51820>', 'bad <[2001:db8::1]:51820>',
                      'bad <2001:db8::1%eth0>', 'bad <:::>', 'bad <a b>', 'bad <-bad>', 'bad <bad->',
-                     'bad <[vpn.example.test]>', 'bad <>'):
+                     'bad <[vpn.example.test]>', 'bad <>',
+                     'bad <::>', 'bad <[::]>', 'bad <::0>', 'bad <0:0:0:0:0:0:0:0>', 'bad <::ffff:0.0.0.0>', 'bad <0.0.0.0>',
+                     'bad <[2001:db8::1>', 'bad <2001:db8::1]>', 'bad <[[2001:db8::1]]>',
+                     'bad <256.1.1.1>', 'bad <1.2.3>', 'bad <1.2.3.4.5>', 'bad <01.2.3.4>', 'bad <1.2.3.4.>',
+                     'ok <10.0.0.255> -> <10.0.0.255>', 'ok <0.1.2.3> -> <0.1.2.3>',
+                     'bad <a..b>', 'bad <.a.b>', 'bad <a.b.>', 'bad <a.-b.c>', 'bad <a-.b.c>',
+                     'bad <' + 'a' * 64 + '.test>', 'ok <' + 'a' * 63 + '.test> -> <' + 'a' * 63 + '.test>',
+                     'ok <xn--d1acufc.example> -> <xn--d1acufc.example>', 'ok <1.2.3.4a> -> <1.2.3.4a>'):
             self.assertIn(line + '\n', out, result.stderr.decode())
 
     def test_apt_ipv4_in_subshell_never_runs_inherited_parent_traps(self):
@@ -1995,6 +2014,26 @@ echo "main=[$(trap -p EXIT)]"
         self.assertTrue(out.rstrip().rsplit('\n', 1)[1].startswith('parent-exit pid='), out)
         self.assertFalse((self.root / 'force-ipv4').exists())
 
+    def test_incomplete_rollback_marker_write_failure_warns_without_claiming_block(self):
+        shell = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/vpn"; AWG_SYSTEMD_UNIT_DIR="$ROOT/units"; SERVER_AWG_NIC=awg0
+AWG_SYSCTL_FILE="$ROOT/sysctl"; AWG_MODULES_LOAD_FILE="$ROOT/modules"; AWG_BT_MODPROBE_OVERRIDE="$ROOT/modprobe"
+mkdir -p "$ROOT/journal" "$AWG_SYSTEMD_UNIT_DIR"
+printf original >"$AWG_SYSCTL_FILE"
+systemctl() { return 0; }
+installAmneziaWG() { printf mutated >"$AWG_SYSCTL_FILE"; mkdir "$ROOT/journal/rollback-incomplete"; return 1; } # Marker path unwritable.
+cp() { [[ "$*" == *"/before/"* ]] && return 1; command cp "$@"; }
+if awgStateImportTransaction "$ROOT/stage" "$ROOT/journal"; then exit 10; fi
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'import rollback was INCOMPLETE', result.stderr)
+        self.assertIn(b'later attempts are NOT blocked automatically', result.stderr)
+        self.assertNotIn(b'are refused until then', result.stderr)
+
     def test_incomplete_rollback_blocks_new_before_image_until_forced_purge(self):
         shell = r"""
 set -uo pipefail
@@ -2019,7 +2058,8 @@ if awgStateImportTransaction "$ROOT/stage" "$ROOT/journal"; then exit 12; fi
         result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
         self.assertIn(b'import rollback was INCOMPLETE', result.stderr)
-        self.assertIn(b'refusing a new attempt', result.stderr)
+        self.assertIn(b'refusing (including --dry-run and --activate-state)', result.stderr)
+        self.assertIn(b'New import/activation attempts for this archive are refused', result.stderr)
         self.assertIn(b'--purge-state-journal journal --force', result.stderr)
 
 if __name__ == '__main__':

@@ -4181,10 +4181,7 @@ function awgStateImportTransaction() (
 	# After an INCOMPLETE rollback the host is in an unknown mixed state:
 	# a new before-image would capture it as "before" and lose the real one.
 	# Refuse until the operator has inspected/restored and purged the journal.
-	if [[ -e "${JOURNAL}/rollback-incomplete" || -L "${JOURNAL}/rollback-incomplete" ]]; then
-		echo "ERROR: a previous import rollback was INCOMPLETE; refusing a new attempt. Inspect ${AMNEZIAWG_DIR}, the unit directory and ${JOURNAL}/before, restore manually, then run --purge-state-journal ${JOURNAL##*/} --force before retrying." >&2
-		exit 1
-	fi
+	awgStateRefuseIncompleteRollback "${JOURNAL}" || exit 1
 	# Take a complete fresh before-image for THIS attempt (absence = no slot
 	# file), then swap it in. A failed snapshot keeps the previous image intact;
 	# a retry never restores a stale backup of a since-removed file.
@@ -4228,8 +4225,12 @@ function awgStateImportTransaction() (
 			done
 			systemctl daemon-reload || true
 			if ((INCOMPLETE)); then
-				: >"${JOURNAL}/rollback-incomplete" || true
-				echo "ERROR: import rollback was INCOMPLETE; inspect ${AMNEZIAWG_DIR}, the unit directory and ${JOURNAL}/before, restore manually, then run --purge-state-journal ${JOURNAL##*/} --force. New attempts are refused until then." >&2
+				echo "ERROR: import rollback was INCOMPLETE; inspect ${AMNEZIAWG_DIR}, the unit directory and ${JOURNAL}/before, restore manually, then run --purge-state-journal ${JOURNAL##*/} --force." >&2
+				if : 2>/dev/null >"${JOURNAL}/rollback-incomplete"; then
+					echo 'New import/activation attempts for this archive are refused until then.' >&2
+				else
+					echo "WARNING: could not write ${JOURNAL}/rollback-incomplete; later attempts are NOT blocked automatically. Do not rerun before the manual check: a rerun would record the current mixed state as its before-image." >&2
+				fi
 			else
 				echo "ERROR: import rolled back config/unit changes; inspect ${JOURNAL}/steps. Packages may remain installed." >&2
 			fi
@@ -4430,16 +4431,51 @@ function awgStateWarnMtuBudget() { # <server.conf>
 # address. Brackets are stripped: the installer adds them itself when it
 # builds Endpoint="[v6]:port", exactly as for interactive installs.
 function awgStateNormalizePubHost() { # <value>; prints the normalized value
-	local VALUE="$1"
+	local VALUE="$1" LABEL OCTET
+	local -a PARTS
+	if [[ "${VALUE}" == '['* || "${VALUE}" == *']' ]]; then
+		# Brackets only as one balanced pair around an IPv6 address.
+		[[ "${VALUE}" == '['*']' ]] || return 1
+		VALUE="${VALUE:1:${#VALUE}-2}"
+		[[ "${VALUE}" == *:* ]] || return 1
+	fi
 	if [[ "${VALUE}" == *:* ]]; then
-		VALUE="${VALUE#\[}"
-		VALUE="${VALUE%\]}"
 		[[ "${VALUE}" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
-		python3 -I -c 'import ipaddress, sys; ipaddress.IPv6Address(sys.argv[1])' "${VALUE}" 2>/dev/null || return 1
+		# Valid IPv6, not the unspecified address (::, ::0, ::ffff:0.0.0.0 ...).
+		python3 -I -c 'import ipaddress, sys
+a = ipaddress.IPv6Address(sys.argv[1])
+m = a.ipv4_mapped
+sys.exit(1 if a.is_unspecified or (m is not None and m.is_unspecified) else 0)' "${VALUE}" 2>/dev/null || return 1
+	elif [[ "${VALUE}" =~ ^[0-9.]+$ ]]; then
+		# All digits and dots: must be a dotted-quad IPv4, octets 0-255, no
+		# leading zeros (ambiguous octal), not the unspecified 0.0.0.0.
+		IFS=. read -r -a PARTS <<<"${VALUE}"
+		[[ ${#PARTS[@]} -eq 4 && "${VALUE}" != *. && "${VALUE}" != 0.0.0.0 ]] || return 1
+		for OCTET in "${PARTS[@]}"; do
+			[[ "${OCTET}" =~ ^(0|[1-9][0-9]{0,2})$ ]] && ((10#${OCTET} <= 255)) || return 1
+		done
 	else
-		[[ ${#VALUE} -le 253 && "${VALUE}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || return 1
+		# DNS hostname: 1-253 chars; labels 1-63 chars, alnum at both ends,
+		# letters/digits/hyphens inside, no empty labels. A trailing root dot
+		# is not accepted (profiles keep the name as written).
+		[[ ${#VALUE} -ge 1 && ${#VALUE} -le 253 ]] || return 1
+		[[ "${VALUE}" != .* && "${VALUE}" != *. && "${VALUE}" != *..* ]] || return 1
+		IFS=. read -r -a PARTS <<<"${VALUE}"
+		for LABEL in "${PARTS[@]}"; do
+			[[ ${#LABEL} -le 63 && "${LABEL}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+		done
 	fi
 	printf '%s\n' "${VALUE}"
+}
+
+# After an INCOMPLETE rollback the host is in an unknown mixed state: a new
+# before-image would record it as "before", and a rerun/activation would act
+# on it. Refuse until the operator has inspected and purged the journal.
+function awgStateRefuseIncompleteRollback() { # <journal>
+	local JOURNAL="$1"
+	[[ -e "${JOURNAL}/rollback-incomplete" || -L "${JOURNAL}/rollback-incomplete" ]] || return 0
+	echo "ERROR: a previous import rollback was INCOMPLETE; refusing (including --dry-run and --activate-state). Inspect ${AMNEZIAWG_DIR}, the unit directory and ${JOURNAL}/before, restore manually, then run --purge-state-journal ${JOURNAL##*/} --force before retrying." >&2
+	return 1
 }
 
 function awgStateWorkDir() {
@@ -4736,6 +4772,8 @@ function awgStateCommand() (
 	STATE_ID="$(sha256sum "${WORK}/stage/manifest.json")"; STATE_ID="${STATE_ID%% *}"
 	JOURNAL="${AWG_STATE_JOURNAL_DIR}/${STATE_ID}"
 	awgStateTrustedPath "${JOURNAL}" || { echo 'ERROR: unsafe journal path.' >&2; exit 1; }
+	# Applies to every path (fresh import, rerun/activation, dry-run).
+	awgStateRefuseIncompleteRollback "${JOURNAL}" || exit 1
 	if [[ -f "${JOURNAL}/receipt" || -e "${JOURNAL}/finalized" || -L "${JOURNAL}/finalized" ]]; then
 		awgStateReconcileImport "${WORK}/stage" "${JOURNAL}" "${WORK}" "${MODE}" "${OPTION}" "${NIC}"
 		exit $?

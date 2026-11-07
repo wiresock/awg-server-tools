@@ -29,9 +29,11 @@ VPN interface name is retained from the archive. Neither server nor client keys
 are regenerated. Client profiles and Endpoint values remain unchanged.
 
 `SERVER_PUB_IP=<hostname|IPv4|IPv6>` (no port; `host:port` is rejected, and a
-value containing `:` must be a valid IPv6 address, bare or `[bracketed]` —
-brackets are stripped because the installer adds them when it builds
-`Endpoint`) may be set at import, like `SERVER_PUB_NIC`, to change
+value containing `:` must be a valid IPv6 address, bare or in one balanced
+`[...]` pair — brackets are stripped because the installer adds them when it
+builds `Endpoint`; all-digits-and-dots values must be a dotted quad with
+octets 0-255 and no leading zeros; hostnames need 1-63-character labels with
+alphanumeric ends; the unspecified `::`/`0.0.0.0` are rejected) may be set at import, like `SERVER_PUB_NIC`, to change
 the endpoint recorded in the new params (used for profiles generated after
 cutover; restored profiles keep their own `Endpoint` lines). Import warns when
 the effective value is an IP literal, because such profiles do not follow a DNS
@@ -240,9 +242,10 @@ leaves the import quarantined; rerun `--activate-state` to retry. Rollback
 cleanup runs without errexit or re-entrant signals, attempts every step even if
 logging fails, and reports an incomplete rollback explicitly. An INCOMPLETE
 rollback also leaves a `rollback-incomplete` marker in the journal; while it
-exists every new import attempt is refused before a new before-image is taken
-(so the mixed host state is never recorded as "before" and the real image is
-kept). Inspect/restore manually, then `--purge-state-journal <digest> --force`. Config and receipt
+exists every attempt for that archive is refused — fresh import (before a new
+before-image is taken, so the real image is kept), rerun/reconcile,
+`--activate-state` and `--dry-run`. If the marker itself cannot be written, an
+explicit warning says later attempts are NOT blocked automatically. Inspect/restore manually, then `--purge-state-journal <digest> --force`. Config and receipt
 change together: if the receipt cannot be published, the previous config is
 restored so a retry verifies and continues. If replacing the config itself
 fails, the target is compared with the reconciled config and the previous
@@ -450,7 +453,13 @@ warning, and that journals hold no plaintext keys or panel DB. Round-12
 additions use the real `sqlite3` CLI (skipped if absent; CI installs it) to
 export a live WAL-mode panel DB and import a WAL-header DB without sidecars,
 and cover the config-replace failure window, `host:port` rejection, inherited
-subshell traps, refusal without RAM staging and the incomplete-rollback block. The suite passes
+subshell traps, refusal without RAM staging and the incomplete-rollback block.
+Round 13 verified on a locally built GNU bash 5.1.16 (signature-checked; the
+Debian 11 / Ubuntu 22.04 major version) that a subshell shows the parent's
+traps exactly like 5.2 and that the `trap - USR2` guard clears that display
+while keeping ignored signals; the whole suite passes with bash 5.1.16 and the
+sqlite 3.34.1 CLI (Debian 11), including `.backup` + `journal_mode=DELETE` on a
+live WAL DB. CI itself runs the distro bash/sqlite only. The suite passes
 under Python 3.9, 3.10 and 3.13.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.
