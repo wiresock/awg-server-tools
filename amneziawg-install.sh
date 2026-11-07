@@ -3376,6 +3376,32 @@ AWG_PARAMS_BORINGTUN_KEYS="AWG_BORINGTUN_IMITATE_PROTOCOL AWG_BORINGTUN_IMITATE_
 _AWG_STATE_IMPORT_DIR=""
 AWG_STATE_JOURNAL_DIR="/var/lib/amneziawg-install/state-imports"
 AWG_STATE_PROXY_CONFIG="/etc/amneziawg-proxy/proxy.toml"
+AWG_STATE_PROXY_UNIT="/etc/systemd/system/amneziawg-proxy.service"
+
+# The proxy installer writes `ExecStart=<install-dir>/amneziawg-proxy <config>`
+# and `WorkingDirectory=<data-dir>`; read the real paths from that unit (the
+# same tokens the proxy installer itself compares), else the defaults.
+function awgStateProxyInstallPaths() { # prints config, data dir, install dir
+	local LINE EXEC CONFIG REST WORKDIR=/var/lib/amneziawg-proxy INSTALL=/usr/local/bin
+	CONFIG="${AWG_STATE_PROXY_CONFIG}"
+	if [[ -f "${AWG_STATE_PROXY_UNIT}" && ! -L "${AWG_STATE_PROXY_UNIT}" ]]; then
+		LINE="$(grep -m1 '^ExecStart=' "${AWG_STATE_PROXY_UNIT}" || true)"
+		if [[ -n "${LINE}" ]]; then
+			read -r EXEC CONFIG REST <<<"${LINE#ExecStart=}" || true
+			EXEC="${EXEC//\"/}"; EXEC="${EXEC//\'/}"
+			CONFIG="${CONFIG//\"/}"; CONFIG="${CONFIG//\'/}"
+			[[ "${EXEC}" == /*/amneziawg-proxy && "${CONFIG}" == /* && -z "${REST}" ]] || {
+				echo "ERROR: cannot parse ExecStart in ${AWG_STATE_PROXY_UNIT}; refusing to guess the proxy config path." >&2
+				return 1
+			}
+			INSTALL="${EXEC%/amneziawg-proxy}"
+		fi
+		LINE="$(grep -m1 '^WorkingDirectory=' "${AWG_STATE_PROXY_UNIT}" || true)"
+		LINE="${LINE#WorkingDirectory=}"; LINE="${LINE//\"/}"; LINE="${LINE//\'/}"
+		[[ -z "${LINE}" ]] || WORKDIR="${LINE}"
+	fi
+	printf '%s\n' "${CONFIG}" "${WORKDIR}" "${INSTALL}"
+}
 
 # Foreign archives are data, including params and awg-quick shell hooks. Keep the
 # verifier embedded so curl/download users do not need a second helper file.
@@ -3561,7 +3587,7 @@ def config(data, state=None, blocked=frozenset(), preserve_hooks=False):
 
 def member_name(name):
     return (name in ('vpn/params', 'vpn/server.conf', 'web/database.sqlite', 'web/env.conf',
-                     'proxy/proxy.toml', 'manifest.json') or
+                     'proxy/proxy.toml', 'proxy/install.json', 'manifest.json') or
             re.fullmatch(r'clients/[A-Za-z0-9_][A-Za-z0-9_.-]{0,90}\.conf', name) is not None)
 
 
@@ -3576,8 +3602,11 @@ def unique_json(pairs):
 def validate_manifest(manifest, files):
     require(type(manifest) is dict, 'invalid manifest')
     export_time(manifest, utc_now())
-    require(type(manifest.get('schema_version')) is int and manifest['schema_version'] == 1,
+    # Schema 2 adds the optional proxy/install.json member; schema 1 archives
+    # (without it) stay importable. Schema 1 never carried install.json.
+    require(type(manifest.get('schema_version')) is int and manifest['schema_version'] in (1, 2),
             'unsupported schema')
+    require(manifest['schema_version'] == 2 or 'proxy/install.json' not in files, 'unsupported schema')
     require(type(manifest.get('files')) is dict and set(manifest['files']) == set(files),
             'manifest file inventory mismatch')
     require({'vpn/params', 'vpn/server.conf'} <= set(files), 'missing VPN state')
@@ -3820,6 +3849,128 @@ def panel_prepare(root, out, clients_dir, default_db, migrations_dir):
     sys.stdout.buffer.write(b'\0'.join(v.encode() for v in (username, env['AUTH_PASSWORD_HASH'], db_live)) + b'\0')
 
 
+SAFE_PATH = re.compile(r'/[A-Za-z0-9._/-]+')
+PROXY_DEFAULTS = dict(config_path='/etc/amneziawg-proxy/proxy.toml', data_dir='/var/lib/amneziawg-proxy', install_dir='/usr/local/bin')
+PROXY_KEYS = {'listen': str, 'backend': str, 'session_ttl_secs': int, 'cleanup_interval_secs': int,
+              'rate_limit_per_sec': int, 'probe_reply_bytes_per_sec': int, 'imitate_protocol': str,
+              'quic_handshake_enabled': bool, 'quic_certificate_domain': str, 'dns_forward_enabled': bool,
+              'dns_upstream': str, 'dns_upstream_timeout_ms': int, 'buffer_size': int, 'relay_buffer_size': int,
+              'socket_buffer_bytes': int, 'max_sessions': int, 'status_file': str, 'status_interval_secs': int,
+              'awg_config': str}
+
+
+def safe_path(value):
+    return (isinstance(value, str) and SAFE_PATH.fullmatch(value) is not None and len(value) <= 255 and
+            not any(part in ('', '.', '..') for part in value[1:].split('/')))
+
+
+def proxy_toml(data):
+    # The proxy config is flat `key = value` TOML (what the proxy installer
+    # writes). Python 3.9/3.10 have no tomllib: parse only that subset and
+    # refuse anything else rather than guess.
+    values = {}
+    for line in data.decode('utf-8').splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        match = re.fullmatch(r'([a-z_]+)\s*=\s*("([^"\\]*)"|true|false|[0-9]{1,12})\s*(#.*)?', stripped)
+        require(match is not None, 'unsupported proxy.toml line')
+        name, raw = match.group(1), match.group(2)
+        require(name in PROXY_KEYS and name not in values, 'unknown or duplicate proxy.toml key')
+        value = match.group(3) if raw.startswith('"') else (raw == 'true' if raw in ('true', 'false') else int(raw))
+        require(type(value) is PROXY_KEYS[name], 'proxy.toml type mismatch')
+        values[name] = value
+    require('listen' in values and 'backend' in values, 'proxy.toml needs listen and backend')
+    return values
+
+
+def socket_parts(value):
+    match = re.fullmatch(r'(\[[0-9A-Fa-f:.]+\]|[0-9.]+):([0-9]{1,5})', value)
+    require(match is not None and 1 <= int(match.group(2)) <= 65535, 'invalid proxy socket address')
+    ipaddress.ip_address(match.group(1).strip('[]'))
+    return match.group(1), int(match.group(2))
+
+
+def awg_listen_port(data):
+    port = None
+    for line in data.decode('utf-8').splitlines():
+        match = re.fullmatch(r'\s*ListenPort\s*=\s*([0-9]{1,5})\s*', line)
+        if match:
+            port = int(match.group(1))
+            break
+    return port
+
+
+def proxy_install(root):
+    meta_path = root / 'proxy/install.json'
+    meta = dict(PROXY_DEFAULTS)
+    if meta_path.exists():
+        loaded = json.loads(meta_path.read_bytes(), object_pairs_hook=unique_json)
+        require(type(loaded) is dict and set(loaded) == set(PROXY_DEFAULTS) and all(map(safe_path, loaded.values())),
+                'invalid proxy/install.json')
+        meta = loaded
+    return meta
+
+
+def proxy_plan(root):
+    path = root / 'proxy/proxy.toml'
+    if not path.exists():
+        return dict(present=False)
+    values = proxy_toml(path.read_bytes())
+    _, listen_port = socket_parts(values['listen'])
+    backend_host, backend_port = socket_parts(values['backend'])
+    awg_port = awg_listen_port((root / 'vpn/server.conf').read_bytes())
+    return dict(present=True, listen=values['listen'], backend=values['backend'],
+                imitate_protocol=values.get('imitate_protocol', 'quic'),
+                awg_listen_port=awg_port, awg_matches_backend=awg_port == backend_port,
+                install_paths=proxy_install(root), https='not managed by this repository (not archived)')
+
+
+def proxy_prepare(root, out, awg_conf):
+    plan = proxy_plan(root)
+    require(plan['present'], 'archive has no proxy config')
+    if not plan['awg_matches_backend']:
+        raise StatePolicyError('archived server ListenPort (%s) is not the proxy backend port; restoring the proxy would '
+                               'rewrite the VPN config, refused' % plan['awg_listen_port'])
+    require(safe_path(awg_conf), 'unsafe AWG config path')
+    values = proxy_toml((root / 'proxy/proxy.toml').read_bytes())
+    meta = plan['install_paths']
+    listen_host, listen_port = socket_parts(values['listen'])
+    backend_host, backend_port = socket_parts(values['backend'])
+    flags = ['--listen-host', listen_host, '--listen-port', str(listen_port),
+             '--backend-host', backend_host, '--backend-port', str(backend_port)]
+    protocol = values.get('imitate_protocol', 'quic')
+    require(protocol in ('quic', 'dns', 'stun', 'sip', 'auto'), 'unsupported proxy imitate_protocol')
+    flags += ['--protocol', protocol]
+    for key, flag in (('session_ttl_secs', '--session-ttl'), ('rate_limit_per_sec', '--rate-limit'),
+                      ('probe_reply_bytes_per_sec', '--probe-reply-bytes')):
+        if key in values:
+            flags += [flag, str(values[key])]
+    safe_word = re.compile(r'[A-Za-z0-9._:\[\]-]{1,253}')
+    if values.get('dns_forward_enabled'):
+        require(safe_word.fullmatch(values.get('dns_upstream', '1.1.1.1:53')) is not None, 'unsafe dns_upstream')
+        flags += ['--dns-forward', '--dns-upstream', values.get('dns_upstream', '1.1.1.1:53')]
+    if values.get('quic_handshake_enabled'):
+        require(safe_word.fullmatch(values.get('quic_certificate_domain', 'cloudflare.com')) is not None, 'unsafe quic domain')
+        flags += ['--quic-handshake', '--quic-domain', values.get('quic_certificate_domain', 'cloudflare.com')]
+    # Restore the archived file verbatim except for the local AWG config path.
+    out.mkdir(mode=0o700)
+    lines = []
+    replaced = False
+    for line in (root / 'proxy/proxy.toml').read_text().splitlines():
+        if re.fullmatch(r'\s*awg_config\s*=.*', line):
+            line, replaced = 'awg_config = "%s"' % awg_conf, True
+        lines.append(line)
+    if not replaced:
+        lines.append('awg_config = "%s"' % awg_conf)
+    target = out / 'proxy.toml'
+    with target.open('x') as handle:
+        handle.write('\n'.join(lines) + '\n')
+    target.chmod(0o600)
+    fields = [meta['config_path'], meta['data_dir'], meta['install_dir'], str(listen_port)] + flags
+    sys.stdout.buffer.write(b'\0'.join(v.encode() for v in fields) + b'\0')
+
+
 def migration_plan(manifest, files, data, policy, phase):
     now = utc_now()
     exported = export_time(manifest, now)
@@ -3951,12 +4102,12 @@ def main():
                 require(sum(map(len, files.values())) <= MAX_TOTAL, 'oversized staging tree')
         state = params(files['vpn/params'])
         peer_policy(root)  # Same schema gate as export-check; never pack an unimportable DB.
-        manifest = dict(schema_version=1, exported_at=utc_text(utc_now().replace(microsecond=0)), backend=state['AWG_BACKEND'],
+        manifest = dict(schema_version=2, exported_at=utc_text(utc_now().replace(microsecond=0)), backend=state['AWG_BACKEND'],
                         protocol=state['AWG_PROTOCOL_VERSION'], interface=state['SERVER_AWG_NIC'],
                         versions={'installer_format': 'state-v1', 'installer_sha256': args[2] if len(args) > 2 and re.fullmatch(r'[0-9a-f]{64}', args[2]) else 'unknown', 'awg_tools': args[1],
                                   'panel': 'not-probed'},
                         files={name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
-                        limitations=['Panel DB/env are restored by --activate-state --enable-at-boot when the panel installer is available; mail queue is not replayed; proxy files stay only inside this archive.',
+                        limitations=['Panel DB/env and the amneziawg-proxy config are restored by --activate-state --enable-at-boot when their installers are available; mail queue is not replayed.',
                                      'No TLS keys, binaries, systemd units, sessions or firewall dumps.'])
         validate_manifest(manifest, files)
         files['manifest.json'] = json.dumps(manifest, sort_keys=True, indent=2).encode()
@@ -3986,10 +4137,19 @@ def main():
                     _, report = staged_plan(root, files['vpn/server.conf'], 'inspect')
                     for warning in report['warnings']:
                         print('WARNING: ' + warning, file=sys.stderr)
-                    print(json.dumps(dict(manifest, peer_plan=report, panel_plan=panel_plan(root, args[1] if len(args) > 1 else None)),
-                                     sort_keys=True, indent=2))
+                    print(json.dumps(dict(manifest, peer_plan=report, panel_plan=panel_plan(root, args[1] if len(args) > 1 else None),
+                                          proxy_plan=proxy_plan(root)), sort_keys=True, indent=2))
     elif mode == 'panel-plan':
         print(json.dumps(panel_plan(Path(path), args[0] if args else None), sort_keys=True))
+    elif mode == 'proxy-plan':
+        print(json.dumps(proxy_plan(Path(path)), sort_keys=True))
+    elif mode == 'proxy-prepare':
+        proxy_prepare(Path(path), Path(args[0]), args[1])
+    elif mode == 'proxy-meta':
+        # Export: install paths discovered from the real proxy unit.
+        meta = dict(zip(('config_path', 'data_dir', 'install_dir'), [path] + args[:2]))
+        require(all(map(safe_path, meta.values())), 'unsafe proxy install path')
+        print(json.dumps(meta, sort_keys=True))
     elif mode == 'panel-prepare':
         panel_prepare(Path(path), Path(args[0]), args[1], args[2], args[3] if len(args) > 3 else None)
     elif mode == 'reconcile':
@@ -4186,10 +4346,14 @@ function awgStateExport() { # <destination> <private work directory>
 		fi
 	done
 	awgStateSnapshotPanel "${WORK}/stage" || return 1
-	if [[ -f "${AWG_STATE_PROXY_CONFIG}" && ! -L "${AWG_STATE_PROXY_CONFIG}" ]]; then
+	local PROXY_PATHS=()
+	awgStateProxyInstallPaths >"${WORK}/proxy.paths" || return 1
+	mapfile -t PROXY_PATHS <"${WORK}/proxy.paths"
+	if [[ ${#PROXY_PATHS[@]} -eq 3 && -f "${PROXY_PATHS[0]}" && ! -L "${PROXY_PATHS[0]}" ]]; then
 		mkdir -p "${WORK}/stage/proxy" || return 1
-		install -m 600 -- "${AWG_STATE_PROXY_CONFIG}" "${WORK}/stage/proxy/proxy.toml" || return 1
-		echo 'NOTE: default proxy config is kept only inside the encrypted archive; custom proxy paths/TLS are TODO.' >&2
+		install -m 600 -- "${PROXY_PATHS[0]}" "${WORK}/stage/proxy/proxy.toml" || return 1
+		awgStateArchive proxy-meta "${PROXY_PATHS[@]}" >"${WORK}/stage/proxy/install.json" || return 1
+		chmod 600 "${WORK}/stage/proxy/install.json" || return 1
 	fi
 	# Validate the panel policy schema and server config now, before the prompt.
 	awgStateArchive export-check "${WORK}/stage" || {
@@ -4672,7 +4836,7 @@ function awgStatePanelFail() { # <journal> <message>
 	systemctl stop "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
 	awgStateJournalStep "$1" panel-restore-failed
 	echo "ERROR: panel restore failed: $2" >&2
-	echo 'The finalized VPN is unaffected and keeps running. Fix the cause, then rerun --activate-state <same-archive> --enable-at-boot to retry only the panel restore.' >&2
+	echo 'The finalized VPN is unaffected and keeps running. Fix the cause, then rerun --activate-state <same-archive> --enable-at-boot to retry only the unfinished steps.' >&2
 	echo "Diagnostics: journalctl -u ${AWG_STATE_PANEL_UNIT} -n 100" >&2
 	return 1
 }
@@ -4740,6 +4904,119 @@ function awgStateRestorePanel() { # <stage> <journal> <work>
 	rm -f -- "${JOURNAL}/panel-installing" || true
 	awgStateJournalStep "${JOURNAL}" panel-restored
 	echo "Panel restored and healthy (${AWG_STATE_PANEL_UNIT}, DB ${DB}); it now enforces peer expiries. Queued mail from the old host was cancelled, not replayed."
+}
+
+# ── amneziawg-proxy restore ──────────────────────────────────────────────────
+# After the panel step. Reuses amneziawg-proxy-install.sh --non-interactive with
+# flags derived from the archived proxy.toml and the archived install paths,
+# then installs the archived proxy.toml (only awg_config rebound), starts the
+# service and checks it stays active and listens before enabling it. The proxy
+# installer leaves the AWG config alone when it already listens on the backend
+# port; restore refuses otherwise, so it never rewrites the finalized VPN config.
+AWG_STATE_PROXY_SERVICE="amneziawg-proxy"
+
+function awgStateProxyInstaller() {
+	local DIR
+	DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
+	[[ -f "${DIR}/amneziawg-proxy/scripts/amneziawg-proxy-install.sh" ]] || return 1
+	printf '%s\n' "${DIR}/amneziawg-proxy/scripts/amneziawg-proxy-install.sh"
+}
+
+function awgStateProxyPlan() { # <stage>
+	local STAGE="$1" PLAN
+	[[ -f "${STAGE}/proxy/proxy.toml" ]] || { echo 'Proxy: none in archive.'; return 0; }
+	PLAN="$(awgStateArchive proxy-plan "${STAGE}")" || return 1
+	echo "Proxy plan (after the panel step): ${PLAN}"
+	if ! awgStateProxyInstaller >/dev/null; then
+		echo 'Proxy: installer not found next to this script (run from a repository checkout); proxy restore would be refused.'
+	fi
+	echo 'HTTPS/reverse proxy for the panel is operator-managed (nginx/Caddy) and is not archived or restored.'
+}
+
+function awgStateProxyHealthy() { # <udp port>
+	local TRY
+	for TRY in 1 2 3 4 5 6 7 8 9 10; do
+		sleep 1
+		systemctl is-active --quiet "${AWG_STATE_PROXY_SERVICE}" || return 1
+		if ((TRY >= 3)) && [[ -n "$(ss -Hlun "sport = :$1" 2>/dev/null)" ]]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+function awgStateProxyFail() { # <journal> <message>
+	systemctl stop "${AWG_STATE_PROXY_SERVICE}" >/dev/null 2>&1 || true
+	awgStateJournalStep "$1" proxy-restore-failed
+	echo "ERROR: proxy restore failed: $2" >&2
+	echo 'The finalized VPN and the panel are unaffected, but clients that connect through the proxy port cannot reach the VPN until it runs. Fix the cause, then rerun --activate-state <same-archive> --enable-at-boot to retry only the unfinished steps.' >&2
+	echo "Diagnostics: journalctl -u ${AWG_STATE_PROXY_SERVICE} -n 100" >&2
+	return 1
+}
+
+function awgStateRestoreProxy() { # <stage> <journal> <work>
+	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER CONFIG DATA_DIR INSTALL_DIR PORT
+	local -a FIELDS=() ARGS=()
+	[[ -f "${STAGE}/proxy/proxy.toml" ]] || return 0
+	if [[ -e "${JOURNAL}/proxy-restored" ]]; then
+		echo 'Proxy already restored by this migration; nothing to do.'
+		return 0
+	fi
+	INSTALLER="$(awgStateProxyInstaller)" || {
+		echo 'ERROR: the archive contains an amneziawg-proxy config but amneziawg-proxy/scripts/amneziawg-proxy-install.sh was not found next to this script. Run from a repository checkout to restore the proxy.' >&2
+		return 1
+	}
+	rm -rf -- "${WORK}/proxy" "${WORK}/proxy.fields"
+	awgStateArchive proxy-prepare "${STAGE}" "${WORK}/proxy" "${SERVER_AWG_CONF}" >"${WORK}/proxy.fields" || {
+		echo 'ERROR: archived proxy config was refused (see above); the VPN and panel are unaffected.' >&2
+		return 1
+	}
+	mapfile -d '' FIELDS <"${WORK}/proxy.fields"
+	[[ ${#FIELDS[@]} -gt 4 ]] || { echo 'ERROR: internal proxy prepare error.' >&2; return 1; }
+	CONFIG="${FIELDS[0]}" DATA_DIR="${FIELDS[1]}" INSTALL_DIR="${FIELDS[2]}" PORT="${FIELDS[3]}"
+	if [[ ! -e "${JOURNAL}/proxy-installing" ]] &&
+		[[ -e "${CONFIG}" || -e "${AWG_STATE_PROXY_UNIT}" ]]; then
+		echo "ERROR: an amneziawg-proxy is already installed on this host (${CONFIG} or ${AWG_STATE_PROXY_UNIT} exists); not overwriting it. The VPN and panel are unaffected." >&2
+		return 1
+	fi
+	: >"${JOURNAL}/proxy-installing" || { echo 'ERROR: cannot write the proxy journal marker.' >&2; return 1; }
+	awgStateJournalStep "${JOURNAL}" proxy-restore-started
+	systemctl stop "${AWG_STATE_PROXY_SERVICE}" >/dev/null 2>&1 || true
+	# A retry starts from a clean generated config (the installer keeps an
+	# existing one without --force and would then skip unit installation).
+	if [[ -f "${CONFIG}" ]]; then
+		rm -f -- "${CONFIG}" || { awgStateProxyFail "${JOURNAL}" "cannot reset ${CONFIG} for retry."; return 1; }
+	fi
+	ARGS=(--non-interactive "${FIELDS[@]:4}" --config-file "${CONFIG}" --data-dir "${DATA_DIR}"
+		--install-dir "${INSTALL_DIR}" --awg-dir "${AMNEZIAWG_DIR}" --no-start --no-enable)
+	[[ -z "${AWG_STATE_PROXY_BINARY:-}" ]] || ARGS+=(--binary-src "${AWG_STATE_PROXY_BINARY}")
+	awgStateJournalStep "${JOURNAL}" proxy-install
+	bash "${INSTALLER}" "${ARGS[@]}" </dev/null ||
+		{ awgStateProxyFail "${JOURNAL}" "${INSTALLER} --non-interactive failed."; return 1; }
+	if ! install -m 600 -o root -g root -- "${WORK}/proxy/proxy.toml" "${CONFIG}"; then
+		awgStateProxyFail "${JOURNAL}" "cannot install ${CONFIG}."
+		return 1
+	fi
+	awgStateJournalStep "${JOURNAL}" proxy-config-installed
+	systemctl start "${AWG_STATE_PROXY_SERVICE}" ||
+		{ awgStateProxyFail "${JOURNAL}" "${AWG_STATE_PROXY_SERVICE} did not start."; return 1; }
+	awgStateProxyHealthy "${PORT}" ||
+		{ awgStateProxyFail "${JOURNAL}" "${AWG_STATE_PROXY_SERVICE} did not stay active/listen on UDP ${PORT}."; return 1; }
+	systemctl enable "${AWG_STATE_PROXY_SERVICE}" ||
+		{ awgStateProxyFail "${JOURNAL}" "cannot enable ${AWG_STATE_PROXY_SERVICE} at boot."; return 1; }
+	: >"${JOURNAL}/proxy-restored" || echo 'WARNING: cannot write the proxy-restored journal marker; a rerun will repeat the proxy restore.' >&2
+	rm -f -- "${JOURNAL}/proxy-installing" || true
+	awgStateJournalStep "${JOURNAL}" proxy-restored
+	echo "Proxy restored (${AWG_STATE_PROXY_SERVICE}, UDP ${PORT}, config ${CONFIG})."
+}
+
+# Post-finalization companions: panel, then proxy. Each is independent and
+# retried on rerun; a failure of one never undoes the VPN or the other.
+function awgStateRestoreCompanions() { # <stage> <journal> <work>
+	local STATUS=0
+	awgStateRestorePanel "$@" || STATUS=1
+	awgStateRestoreProxy "$@" || STATUS=1
+	return "${STATUS}"
 }
 
 function awgStateWorkDir() {
@@ -4813,17 +5090,17 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 	shopt -s nullglob dotglob
 	for ENTRY in "${JOURNAL}/"*; do
 		case "${ENTRY##*/}" in
-			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete|panel-installing|panel-restored) ;;
+			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete|panel-installing|panel-restored|proxy-installing|proxy-restored) ;;
 			*) echo 'ERROR: unexpected journal entry; refusing purge.' >&2; exit 1 ;;
 		esac
 	done
-	for ENTRY in before before.new before.old recovery receipt nic steps rollback-incomplete panel-installing; do
+	for ENTRY in before before.new before.old recovery receipt nic steps rollback-incomplete panel-installing proxy-installing; do
 		rm -rf --one-file-system -- "${JOURNAL:?}/${ENTRY:?}" || exit 1
 	done
 	if (( FINALIZED )) && [[ "${OPTION}" != --reset-finalized ]]; then
-		echo 'Purged rollback/receipt material (and any legacy plaintext recovery copies); retained only the non-secret finalized (and panel-restored) markers.'
+		echo 'Purged rollback/receipt material (and any legacy plaintext recovery copies); retained only the non-secret finalized (and panel-/proxy-restored) markers.'
 	else
-		rm -f -- "${JOURNAL}/finalized" "${JOURNAL}/panel-restored" && rmdir -- "${JOURNAL}" || exit 1
+		rm -f -- "${JOURNAL}/finalized" "${JOURNAL}/panel-restored" "${JOURNAL}/proxy-restored" && rmdir -- "${JOURNAL}" || exit 1
 		if [[ "${OPTION}" == --reset-finalized ]]; then
 			awgStateDropIdentityTombstones "${DIGEST}" || exit 1
 			echo 'Finalized journal reset after uninstall. Fresh import may proceed through normal preflight and current-clock policy checks.'
@@ -4856,9 +5133,10 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 		echo 'Migration already finalized; archived policy is not replayed. Manage the VPN with systemctl normally.'
 		if [[ "${OPTION}" == --dry-run ]]; then
 			awgStatePanelPlan "${STAGE}"
+			awgStateProxyPlan "${STAGE}"
 		elif [[ "${MODE}" == --activate-state ]]; then
 			releaseClientLifecycleLock
-			awgStateRestorePanel "${STAGE}" "${JOURNAL}" "${WORK}" || return 1
+			awgStateRestoreCompanions "${STAGE}" "${JOURNAL}" "${WORK}" || return 1
 		fi
 		return 0
 	fi
@@ -4881,6 +5159,7 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 	if [[ "${OPTION}" == --dry-run ]]; then
 		echo 'Plan: re-reconcile the unchanged import without reinstalling or activating.'
 		awgStatePanelPlan "${STAGE}"
+		awgStateProxyPlan "${STAGE}"
 		return 0
 	fi
 	# Activation validates the candidate with the installed backend before making
@@ -4992,7 +5271,7 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 			echo "Journal ${JOURNAL} holds no keys (the encrypted archive is the recovery copy). Optional cleanup: --purge-state-journal ${JOURNAL##*/}."
 			# The VPN is final; the panel never runs under the VPN lifecycle lock.
 			releaseClientLifecycleLock
-			awgStateRestorePanel "${STAGE}" "${JOURNAL}" "${WORK}" || return 1
+			awgStateRestoreCompanions "${STAGE}" "${JOURNAL}" "${WORK}" || return 1
 		else
 			awgStateActivationDisarm
 			echo 'Activated for testing only; still disabled at boot. Stop/disable it, then activate with --enable-at-boot to finalize.'
@@ -5084,9 +5363,10 @@ function awgStateCommand() (
 	awgStateWarnMtuBudget "${WORK}/stage/vpn/server.conf"
 	printf 'Plan: install %s backend, AWG %s, interface %s, UDP %s, uplink %s.\n' "${AWG_BACKEND}" "${AWG_PROTOCOL_VERSION}" "${SERVER_AWG_NIC}" "${SERVER_PORT}" "${NIC}"
 	echo 'Restore original keys/profiles; replace host hooks; migrate future-expiry peers and exclude already-expired/disabled/archived/removal-pending peers.'
-	echo 'Leave VPN stopped/disabled. The panel (if archived) is restored only after finalization by --activate-state --enable-at-boot; proxy data stay only in the encrypted archive.'
+	echo 'Leave VPN stopped/disabled. The panel and amneziawg-proxy (if archived) are restored only after finalization by --activate-state --enable-at-boot.'
 	if [[ "${OPTION}" == --dry-run ]]; then
 		awgStatePanelPlan "${WORK}/stage"
+		awgStateProxyPlan "${WORK}/stage"
 		exit 0
 	fi
 	acquireClientLifecycleLock || exit 1
@@ -15972,11 +16252,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	#   amneziawg-install.sh --export-state <file>
 	#   amneziawg-install.sh --inspect-state <file>
 	#   [SERVER_PUB_NIC=<nic>] [SERVER_PUB_IP=<host>] amneziawg-install.sh --import-state <file> [--dry-run]
-	#   [AWG_STATE_PANEL_BINARY=<amneziawg-web>] amneziawg-install.sh --activate-state <file> [--enable-at-boot]
-	#     After finalization, restores an archived amneziawg-web panel via
-	#     amneziawg-web/scripts/amneziawg-web-install.sh from this checkout
-	#     (builds from source unless AWG_STATE_PANEL_BINARY is set); a rerun
-	#     on the finalized journal retries only the panel restore.
+	#   [AWG_STATE_PANEL_BINARY=<amneziawg-web>] [AWG_STATE_PROXY_BINARY=<amneziawg-proxy>] \
+	#     amneziawg-install.sh --activate-state <file> [--enable-at-boot]
+	#     After finalization, restores an archived amneziawg-web panel and then
+	#     amneziawg-proxy via their installers from this checkout (each builds
+	#     from source unless its *_BINARY is set); a rerun on the finalized
+	#     journal retries only the unfinished companion steps.
 	#   amneziawg-install.sh --purge-state-journal <manifest-sha256> [--force]
 	#   amneziawg-install.sh --reset-state-journal <manifest-sha256> --confirm-policy-replay
 	#

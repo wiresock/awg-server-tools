@@ -4,7 +4,8 @@
 # Server state archives (experimental CLI prototype)
 
 This is the first CLI slice of [#185](https://github.com/wiresock/awg-server-tools/issues/185),
-covering the VPN and the amneziawg-web panel (proxy and HTTPS are not restored). Do a restore drill
+covering the VPN, the amneziawg-web panel and amneziawg-proxy (HTTPS for the
+panel is operator-managed and not restored). Do a restore drill
 before relying on an archive. Debian/Ubuntu only (including the derivatives the
 installer already maps to them: Raspbian and Linux Mint), one server interface, same
 AWG protocol and backend, installer-standard /24 IPv4 and optional /64 IPv6
@@ -60,7 +61,8 @@ fallback.
 ## Timestamps and peer decisions
 
 `--inspect-state` emits the manifest as JSON with a `peer_plan` object and a
-`panel_plan` object (panel DB present, env/hash present — never the hash
+`panel_plan` and a `proxy_plan` object (proxy listen/backend, AWG port match,
+install paths; panel DB present, env/hash present — never the hash
 itself —, archive vs. panel-source migration versions, mail jobs that would be
 cancelled). `--dry-run` also prints the panel plan and how the panel would be
 installed.
@@ -85,7 +87,8 @@ No deadline is extended by the age of the archive or time spent quarantined.
 
 The encrypted payload is a gzip tar containing only regular files:
 
-- `manifest.json`: schema version 1, protocol, backend, interface, installer
+- `manifest.json`: schema version 2 (schema 1 archives, which cannot carry
+  `proxy/install.json`, remain importable), protocol, backend, interface, installer
   SHA-256, AWG tools version, per-file SHA-256 inventory, and mandatory
   `exported_at` (UTC ISO 8601, `YYYY-MM-DDTHH:MM:SSZ`, at snapshot packaging). The panel version is
   currently recorded as `not-probed`, not guessed. `installer_sha256` is
@@ -115,7 +118,11 @@ The encrypted payload is a gzip tar containing only regular files:
   Unsupported SQLite URL/query formats fail export rather than silently omit
   the DB. Per-peer `expires_at` values remain in this snapshot; no remaining
   lifetime is reset on the destination. `web/env.conf` is copied from the existing env-file resolver.
-- `proxy/proxy.toml`: the default `/etc/amneziawg-proxy/proxy.toml`, if present.
+- `proxy/proxy.toml` and `proxy/install.json`: the amneziawg-proxy config and
+  its install paths (`config_path`, `data_dir`, `install_dir`), read from the
+  real proxy unit's `ExecStart=<install-dir>/amneziawg-proxy <config>` and
+  `WorkingDirectory=` (defaults when no unit exists); an unparsable `ExecStart`
+  fails export instead of guessing.
 
 Before the passphrase prompt, export validates the staged panel snapshot against
 the schema import requires (`peers` table with `public_key`, `disabled`,
@@ -140,15 +147,13 @@ Saved SMTP settings (including credentials) are in the panel DB's
 mail defaults may live in env.conf or unit settings; this prototype does not
 flatten systemd Environment directives or merge multiple env files.
 
-The proxy installer defaults to `/etc/amneziawg-proxy/proxy.toml`, and supports
-custom `--config-file` paths. Custom proxy paths are **not discovered** yet.
-`/var/lib/amneziawg-proxy/sessions.json` is runtime state and is excluded.
+The proxy installer defaults to `/etc/amneziawg-proxy/proxy.toml` and supports
+custom `--config-file`/`--data-dir`/`--install-dir`; export discovers them from
+the unit. `/var/lib/amneziawg-proxy/sessions.json` is runtime state and is excluded.
 
 The panel DB/env are installed to their live locations only by the panel
-restore step below. Proxy config (`proxy/proxy.toml`) stays **only inside the
-encrypted archive**: proxy installation and HTTPS/TLS setup remain **TODO**
-(TLS keys are not archived). Import never writes plaintext keys, panel DB/env
-or proxy data to the journal. TLS keys, binaries, service units, firewall
+restore step below, and the proxy config only by the proxy restore step. Import
+never writes plaintext keys, panel DB/env or proxy data to the journal. TLS keys, binaries, service units, firewall
 dumps, sessions and arbitrary directory contents are excluded.
 
 ### Panel restore
@@ -206,10 +211,62 @@ Flow: after `--activate-state <archive> --enable-at-boot` has finalized the VPN
 `AWG_STATE_PANEL_BINARY=/path/to/amneziawg-web` is the only new input (an
 environment variable, like `SERVER_PUB_IP`). The password hash is passed to the
 panel installer on its command line (it is a hash, not the password). Saved
-SMTP settings travel inside the DB. Remaining TODO: proxy/HTTPS restore,
-discovering custom proxy paths, merging multiple env files or systemd
-`Environment=` directives, and restoring a panel without the repository
-checkout.
+SMTP settings travel inside the DB. Remaining TODO: merging multiple env files
+or systemd `Environment=` directives, and restoring without the repository
+checkout (the only checkout-less path, `amneziawg-web.sh`/`amneziawg-proxy.sh`,
+clones the `main` branch at run time, which may not match the archive or this
+installer, so it is not used automatically).
+
+### amneziawg-proxy restore
+
+`amneziawg-proxy` is the repository's **UDP obfuscation proxy** in front of
+AWG (AWG 1.0/2.0 only), not an HTTP reverse proxy. Its installer
+(`amneziawg-proxy/scripts/amneziawg-proxy-install.sh`) builds or takes
+`--binary-src`, writes a 0600 root `proxy.toml`, rebinds AWG to the backend
+port only if it is not already there, installs `amneziawg-proxy.service`
+(`ExecStart=<install-dir>/amneziawg-proxy <config>`,
+`WorkingDirectory=<data-dir>`), and keeps an existing config without `--force`.
+The proxy has no certificate or key files (`quic_certificate_domain` is only an
+SNI name).
+
+After the panel step (independently of its outcome), when the archive has
+`proxy/proxy.toml`:
+
+1. Refuse if `amneziawg-proxy/scripts/amneziawg-proxy-install.sh` is not in
+   this checkout, if a proxy config/unit exists that this migration did not
+   install, if the config is not the flat `key = value` subset the installer
+   writes, or if the archived server `ListenPort` is not the proxy backend port
+   (the installer would then rewrite the finalized VPN config).
+2. Run the proxy installer with `--non-interactive --listen-host --listen-port
+   --backend-host --backend-port --protocol [--session-ttl --rate-limit
+   --probe-reply-bytes --dns-forward --dns-upstream --quic-handshake
+   --quic-domain] --config-file --data-dir --install-dir --awg-dir --no-start
+   --no-enable` (values from the archived config and install paths; plus
+   `--binary-src` when `AWG_STATE_PROXY_BINARY` is set).
+3. Install the archived `proxy.toml` verbatim (root 0600) except `awg_config`,
+   which points to the restored server config; start the service; require it
+   to stay active and listen on its UDP port; then enable it at boot.
+4. Journal `proxy-installing` / `proxy-restored` and steps
+   (`proxy-restore-started`, `proxy-install`, `proxy-config-installed`,
+   `proxy-restored` / `proxy-restore-failed`). A failure stops the proxy, never
+   enables it, leaves the VPN and panel untouched, exits non-zero, and a rerun
+   of `--activate-state <archive> --enable-at-boot` retries only the unfinished
+   companion steps.
+
+Clients that connect through the proxy reach the VPN only once it runs, so
+keep the old server serving until the proxy step succeeds.
+
+### HTTPS for the panel
+
+This repository does not set up HTTPS: the panel installer binds plain HTTP
+(default `127.0.0.1:8080`) and `amneziawg-web/docs/DEPLOYMENT.md` only gives
+nginx/Caddy examples. There is no repo-managed reverse proxy, certificate,
+ACME account or renewal timer whose paths could be discovered from real
+configuration, so nothing HTTPS-related is archived or restored. Operators
+re-create their reverse proxy on the new host; with Let's Encrypt HTTP-01
+(certbot/Caddy defaults), switch DNS to the new host **before** issuing or
+renewing there. `AUTH_SECURE_COOKIE` and `AWG_WEB_BASE_PATH` travel in the
+restored env.conf.
 
 ## Import safety and activation
 
@@ -333,7 +390,7 @@ removals-only reconciliation; a changed local installation is never overwritten.
 The journal holds **no plaintext keys, panel DB/env or proxy data**: the
 encrypted archive is the recovery copy. It keeps `before/` (previous
 sysctl/module-load/modprobe files for rollback), `receipt` (SHA-256 hashes),
-`nic`, `steps`, a `rollback-incomplete` marker after a failed rollback and,
+`nic`, `steps`, `panel-*`/`proxy-*` progress markers, a `rollback-incomplete` marker after a failed rollback and,
 after finalization, the non-secret `finalized` marker.
 Journals created by earlier prototype revisions may still contain a plaintext
 `recovery/` directory; purge removes it. Finalizing prints the exact manifest
@@ -521,6 +578,6 @@ CI installs age and runs this suite.
 Still required: full two-container/VM install roundtrip with distinct uplinks,
 real client datapath/handshake, DNS failover across representative clients,
 BoringTun/kernel install drills, a live panel restore (build, start, expiry
-enforcement) — the panel tests here mock the installer/systemd —, proxy restore,
+enforcement) and a live proxy restore — the panel/proxy tests here mock the installers/systemd —,
 concurrent panel export stress, and power-loss recovery testing. The mock
 roundtrip must not be described as those live tests.

@@ -221,7 +221,7 @@ datetime = TestDatetime
             self.assertEqual((dest / name).stat().st_mode & 0o777, 0o600)
         view = self.run_helper('inspect').stdout
         self.assertNotIn(KEY.encode(), view)
-        self.assertEqual(json.loads(view)['schema_version'], 1)
+        self.assertEqual(json.loads(view)['schema_version'], 2)
         stamp = json.loads(view)['exported_at']
         self.assertRegex(stamp, r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
         self.assertLessEqual(datetime.fromisoformat(stamp.replace('Z', '+00:00')), datetime.now(timezone.utc))
@@ -263,7 +263,7 @@ datetime = TestDatetime
         bad = copy.deepcopy(base)
         bad['files']['vpn/params'] = '0' * 64
         variants = [bad]
-        for field, value in (('schema_version', 2), ('schema_version', True),
+        for field, value in (('schema_version', 3), ('schema_version', True),
                              ('backend', 'boringtun'), ('protocol', '3.1'), ('interface', 'awg1')):
             bad = copy.deepcopy(base)
             bad[field] = value
@@ -2247,6 +2247,204 @@ echo "rc=$? running=$([[ -e $ROOT/running ]] && echo y) enabled=$([[ -e $ROOT/en
         out = result.stdout.decode()
         self.assertIn('panel-called lock=none', out, result.stderr.decode())
         self.assertIn('rc=1 running=y enabled=y finalized=y', out, result.stderr.decode())
+
+    PROXY_TOML = ('# generated\nlisten = "0.0.0.0:51820"\nbackend = "127.0.0.1:51821"\nimitate_protocol = "dns"\n'
+                  'quic_handshake_enabled = false\ndns_forward_enabled = true\ndns_upstream = "1.1.1.1:53"\n'
+                  'session_ttl_secs = 300\nmax_sessions = 777\nstatus_file = "/var/lib/amneziawg-proxy/sessions.json"\n'
+                  'rate_limit_per_sec = 5\nawg_config = "/etc/amnezia/amneziawg/awg0.conf"\n')
+
+    def proxy_stage(self, root, toml=None, listen_port=51821, meta=None):
+        stage = root / 'stage'
+        (stage / 'vpn').mkdir(parents=True, exist_ok=True)
+        (stage / 'proxy').mkdir(parents=True, exist_ok=True)
+        (stage / 'vpn/server.conf').write_text(f'[Interface]\nPrivateKey = {KEY}\nListenPort = {listen_port}\n')
+        (stage / 'proxy/proxy.toml').write_text(toml if toml is not None else self.PROXY_TOML)
+        if meta is not None:
+            (stage / 'proxy/install.json').write_text(json.dumps(meta))
+        installer = root / 'checkout/amneziawg-proxy/scripts/amneziawg-proxy-install.sh'
+        installer.parent.mkdir(parents=True)
+        installer.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >>"$PROXY_ROOT/installer.args"\necho run >>"$PROXY_ROOT/installer.runs"\n'
+                             '[[ -z "${FAIL_INSTALLER:-}" ]] || exit 1\n'
+                             'while (($#)); do [[ "$1" == --config-file ]] && { mkdir -p "${2%/*}"; echo generated >"$2"; }; shift; done\n'
+                             'touch "$PROXY_ROOT/unit"\n')
+        return stage
+
+    PROXY_HARNESS = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"; export PROXY_ROOT="$ROOT"
+AMNEZIAWG_DIR="$ROOT/vpn"; SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"; mkdir -p "$ROOT/journal" "$ROOT/work"
+AWG_STATE_PROXY_UNIT="$ROOT/unit"
+awgStateProxyInstaller() { printf '%s\n' "$ROOT/checkout/amneziawg-proxy/scripts/amneziawg-proxy-install.sh"; }
+install() { local a=(); while (($#)); do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; command install "${a[@]}"; }
+systemctl() { printf '%s\n' "$*" >>"$ROOT/systemctl.log"; [[ "$1 ${FAIL_START:-}" != 'start 1' ]]; }
+awgStateProxyHealthy() { [[ -z "${UNHEALTHY:-}" ]]; }
+"""
+
+    def run_proxy(self, root, body, **env):
+        return subprocess.run(['bash', '-c', self.PROXY_HARNESS + body, 'test', str(SCRIPT), str(root)],
+                              capture_output=True, env=dict(os.environ, **env))
+
+    def test_proxy_restore_uses_installer_flags_archived_config_and_is_idempotent(self):
+        root = self.root / 'proxy-ok'
+        root.mkdir()
+        meta = dict(config_path=str(root / 'custom/proxy.toml'), data_dir=str(root / 'pdata'), install_dir=str(root / 'bin'))
+        self.proxy_stage(root, meta=meta)
+        result = self.run_proxy(root, r"""
+awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 10
+awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 11
+""")
+        out = (result.stdout + result.stderr).decode()
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn('Proxy already restored', out)
+        self.assertEqual((root / 'installer.runs').read_text(), 'run\n')
+        args = (root / 'installer.args').read_text().splitlines()
+        def value(flag):
+            return args[args.index(flag) + 1]
+        self.assertEqual((value('--listen-host'), value('--listen-port'), value('--backend-host'), value('--backend-port')),
+                         ('0.0.0.0', '51820', '127.0.0.1', '51821'))
+        self.assertEqual(value('--protocol'), 'dns')
+        self.assertEqual(value('--dns-upstream'), '1.1.1.1:53')
+        self.assertEqual(value('--config-file'), meta['config_path'])
+        self.assertEqual(value('--data-dir'), meta['data_dir'])
+        self.assertEqual(value('--install-dir'), meta['install_dir'])
+        self.assertEqual(value('--awg-dir'), str(root / 'vpn'))
+        for flag in ('--non-interactive', '--no-start', '--no-enable', '--dns-forward'):
+            self.assertIn(flag, args)
+        self.assertNotIn('--quic-handshake', args)
+        config = (root / 'custom/proxy.toml').read_text()
+        self.assertIn('max_sessions = 777', config)  # Archived file, not the generated one.
+        self.assertIn('awg_config = "%s/vpn/awg0.conf"' % root, config)
+        self.assertEqual(oct((root / 'custom/proxy.toml').stat().st_mode & 0o777), '0o600')
+        log = (root / 'systemctl.log').read_text()
+        self.assertLess(log.index('start amneziawg-proxy'), log.index('enable amneziawg-proxy'))
+        self.assertTrue((root / 'journal/proxy-restored').exists())
+        self.assertFalse((root / 'journal/proxy-installing').exists())
+        self.assertIn('proxy-restored', (root / 'journal/steps').read_text())
+
+    def test_proxy_restore_failure_is_retryable(self):
+        root = self.root / 'proxy-retry'
+        root.mkdir()
+        self.proxy_stage(root, meta=dict(config_path=str(root / 'p/proxy.toml'), data_dir=str(root / 'd'), install_dir=str(root / 'b')))
+        result = self.run_proxy(root, r"""
+if UNHEALTHY=1 awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ -e "$ROOT/journal/proxy-installing" && ! -e "$ROOT/journal/proxy-restored" ]] || exit 11
+! grep -q '^enable' "$ROOT/systemctl.log" || exit 12
+awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 13
+[[ -e "$ROOT/journal/proxy-restored" ]] || exit 14
+""")
+        out = (result.stdout + result.stderr).decode()
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn('did not stay active/listen', out)
+        self.assertIn('VPN and the panel are unaffected', out)
+
+    def test_proxy_restore_refusals(self):
+        cases = {
+            'existing-proxy': ('touch "$ROOT/unit"', {}, 'already installed'),
+            'backend-mismatch': ('', {'listen_port': 51820}, 'is not the proxy backend port'),
+            'unsupported-toml': ('', {'toml': '[table]\nlisten = "0.0.0.0:1"\n'}, 'invalid or unsupported'),
+            'no-installer': ('awgStateProxyInstaller() { return 1; }', {}, 'was not found next to this script'),
+            'installer-fails': ('export FAIL_INSTALLER=1', {}, '--non-interactive failed'),
+        }
+        for name, (setup, kwargs, message) in cases.items():
+            with self.subTest(name=name):
+                root = self.root / ('proxy-' + name)
+                root.mkdir()
+                self.proxy_stage(root, meta=dict(config_path=str(root / 'p/proxy.toml'), data_dir=str(root / 'd'),
+                                                 install_dir=str(root / 'b')), **kwargs)
+                result = self.run_proxy(root, setup + r"""
+if awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ ! -e "$ROOT/journal/proxy-restored" ]] || exit 11
+! grep -q '^enable' "$ROOT/systemctl.log" 2>/dev/null || exit 12
+""")
+                out = (result.stdout + result.stderr).decode()
+                self.assertEqual(result.returncode, 0, out)
+                self.assertIn(message, out)
+
+    def test_companion_failure_isolation(self):
+        result = subprocess.run(['bash', '-c', r"""
+source "$1"
+awgStateRestorePanel() { echo panel; return 1; }
+awgStateRestoreProxy() { echo proxy; return 0; }
+awgStateRestoreCompanions a b c; echo "rc=$?"
+""", 'test', str(SCRIPT)], capture_output=True)
+        self.assertEqual(result.stdout.decode(), 'panel\nproxy\nrc=1\n')
+
+    def test_proxy_install_paths_from_unit(self):
+        unit = self.root / 'proxy.service'
+        shell = r"""
+source "$1"
+AWG_STATE_PROXY_UNIT="$2"
+awgStateProxyInstallPaths
+"""
+        unit.write_text('[Service]\nExecStart="/opt/p/bin/amneziawg-proxy" /srv/p/proxy.toml\nWorkingDirectory=/srv/p/data\n')
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(unit)], capture_output=True)
+        self.assertEqual(result.stdout.decode(), '/srv/p/proxy.toml\n/srv/p/data\n/opt/p/bin\n', result.stderr.decode())
+        unit.write_text('[Service]\nExecStart=/usr/bin/env amneziawg-proxy --config x\n')
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(unit)], capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'refusing to guess', result.stderr)
+        unit.unlink()
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(unit)], capture_output=True)
+        self.assertEqual(result.stdout.decode(), '/etc/amneziawg-proxy/proxy.toml\n/var/lib/amneziawg-proxy\n/usr/local/bin\n')
+
+    def test_export_includes_custom_proxy_and_schema_2(self):
+        source = self.root / 'source'
+        (source / 'clients').mkdir(parents=True)
+        (source / 'params').write_bytes(self.files['vpn/params'])
+        (source / 'awg0.conf').write_bytes(self.files['vpn/server.conf'])
+        (self.root / 'srv').mkdir()
+        (self.root / 'srv/proxy.toml').write_text(self.PROXY_TOML)
+        (self.root / 'proxy.service').write_text('[Service]\nExecStart=/opt/bin/amneziawg-proxy %s/srv/proxy.toml\n'
+                                                 'WorkingDirectory=/srv/pdata\n' % self.root)
+        (self.root / 'work').mkdir()
+        shell = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/source"; AWG_STATE_PROXY_UNIT="$ROOT/proxy.service"
+acquireClientLifecycleLock() { CLIENT_LIFECYCLE_LOCK_FD=held; }
+releaseClientLifecycleLock() { CLIENT_LIFECYCLE_LOCK_FD=""; }
+awgStateTrustedPath() { return 0; }
+isWebPanelInstalled() { return 1; }
+collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=(); }
+awg() { printf 'fixture-tools\n'; }
+age() { cat >"$3"; }
+awgStateExport "$ROOT/export.tar.gz" "$ROOT/work"
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        with tarfile.open(self.root / 'export.tar.gz') as archive:
+            meta = json.load(archive.extractfile('manifest.json'))
+            install = json.load(archive.extractfile('proxy/install.json'))
+            toml = archive.extractfile('proxy/proxy.toml').read().decode()
+        self.assertEqual(meta['schema_version'], 2)
+        self.assertIn('proxy/install.json', meta['files'])
+        self.assertEqual(install, dict(config_path=str(self.root / 'srv/proxy.toml'), data_dir='/srv/pdata', install_dir='/opt/bin'))
+        self.assertEqual(toml, self.PROXY_TOML)
+        # Imports both schemas; schema 1 may not carry install.json.
+        self.run_helper('verify', self.root / 'export.tar.gz')
+        plan = json.loads(self.run_helper('inspect', self.root / 'export.tar.gz').stdout)['proxy_plan']
+        self.assertEqual(plan['install_paths']['install_dir'], '/opt/bin')
+        self.assertFalse(plan['awg_matches_backend'])  # Fixture AWG listens on 51820.
+        self.files['proxy/install.json'] = json.dumps(install).encode()
+        make_tar(self.tar, self.files)
+        self.assertNotEqual(self.run_helper('verify', ok=False).returncode, 0)
+        meta1 = manifest(self.files)
+        meta1['schema_version'] = 2
+        make_tar(self.tar, self.files, meta1)
+        self.run_helper('verify')
+
+    def test_proxy_plan_in_dry_run(self):
+        root = self.root / 'proxy-plan'
+        root.mkdir()
+        self.proxy_stage(root)
+        result = self.run_proxy(root, 'awgStateProxyPlan "$ROOT/stage"')
+        out = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn('"awg_matches_backend": true', out)
+        self.assertIn('"listen": "0.0.0.0:51820"', out)
+        self.assertIn('HTTPS/reverse proxy for the panel is operator-managed', out)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
