@@ -417,7 +417,7 @@ function getAmneziaPpaHttpStatus() {
 			END { print status }
 		')
 	elif command -v python3 &>/dev/null; then
-		STATUS=$(python3 - "${URL}" <<'PY'
+		STATUS=$(python3 -I - "${URL}" <<'PY'
 import sys
 import urllib.error
 import urllib.request
@@ -3345,10 +3345,10 @@ AWG_STATE_PROXY_CONFIG="/etc/amneziawg-proxy/proxy.toml"
 # Foreign archives are data, including params and awg-quick shell hooks. Keep the
 # verifier embedded so curl/download users do not need a second helper file.
 function awgStateArchive() {
-	python3 - "${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}" "$@" <<'AWG_STATE_PY'
+	python3 -I - "${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}" "$@" <<'AWG_STATE_PY'
 # Standard-library only. This code is embedded so a downloaded installer stays standalone.
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 import base64
 import hashlib
@@ -3595,7 +3595,14 @@ def parse_expiry(value):
     if not isinstance(value, str) or not re.fullmatch(
             r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})', value):
         raise ValueError('invalid expiry')
-    return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(timezone.utc)
+    # Python < 3.11 fromisoformat accepts only 3 or 6 fractional digits:
+    # normalize to exactly 6 (truncating nanoseconds) so all versions agree.
+    value = re.sub(r'\.(\d+)', lambda m: '.' + (m[1] + '000000')[:6], value.replace('Z', '+00:00'), count=1)
+    return datetime.fromisoformat(value).astimezone(timezone.utc)
+
+
+# Small tolerance for NTP drift between the old and new host; beyond it fail closed.
+CLOCK_SKEW_SECONDS = 300
 
 
 def export_time(manifest, now):
@@ -3606,8 +3613,8 @@ def export_time(manifest, now):
         exported = parse_expiry(value)
     except ValueError:
         raise StatePolicyError('manifest exported_at is not a valid UTC timestamp') from None
-    if exported > now:
-        raise StatePolicyError('archive export timestamp is in the future relative to this host; check both clocks before importing')
+    if exported > now + timedelta(seconds=CLOCK_SKEW_SECONDS):
+        raise StatePolicyError('archive export timestamp is more than 5 minutes in the future relative to this host; check both clocks before importing')
     return exported
 
 
@@ -3694,7 +3701,7 @@ def migration_plan(manifest, files, data, policy, phase):
         decisions.append(dict(name=label, peer_id=hashlib.sha256(public.encode()).hexdigest()[:12],
                               expires_at=expiry_text, decision=decision,
                               reason=reason or ('future_expiry' if expiry is not None else 'no_expiry')))
-    age = int((now - exported).total_seconds())
+    age = max(0, int((now - exported).total_seconds()))
     warnings = ['Archive is older than 7 days; policy and user inventory may be stale.'] if age > 7 * 86400 else []
     if any(item['reason'] == 'future_expiry' and item['decision'] == 'migrate' for item in decisions):
         warnings.append('Future-expiry peers migrate. After activation, ongoing expiry enforcement requires the restored panel or operator.')
@@ -3753,6 +3760,23 @@ def main():
         state = params(Path(path).read_bytes())
         for name, value in state.items():
             sys.stdout.buffer.write(name.encode() + b'\0' + value.encode() + b'\0')
+    elif mode == 'export-check':
+        # Fail before the passphrase prompt: the staged panel snapshot must have
+        # the schema import will require, and the server config must parse.
+        root = Path(path)
+        state = params((root / 'vpn/params').read_bytes())
+        data = (root / 'vpn/server.conf').read_bytes()
+        config(data, state, set())
+        stamp = utc_text(utc_now().replace(microsecond=0))
+        migration_plan(dict(exported_at=stamp), {'vpn/server.conf': data}, data, peer_policy(root), 'export')
+    elif mode == 'identity':
+        # Server identity for the cross-archive tombstone: interface + public key.
+        root = Path(path)
+        state = params((root / 'vpn/params').read_bytes())
+        manifest = json.loads((root / 'manifest.json').read_bytes(), object_pairs_hook=unique_json)
+        export_time(manifest, utc_now())
+        identity = hashlib.sha256((state['SERVER_AWG_NIC'] + '\n' + state['SERVER_PUB_KEY']).encode()).hexdigest()
+        print(identity, manifest['exported_at'])
     elif mode == 'local-identity':
         local_identity_matches(path, args[0], args[1])
     elif mode == 'pack':
@@ -3767,12 +3791,13 @@ def main():
                 files[name] = file.read_bytes()
                 require(sum(map(len, files.values())) <= MAX_TOTAL, 'oversized staging tree')
         state = params(files['vpn/params'])
+        peer_policy(root)  # Same schema gate as export-check; never pack an unimportable DB.
         manifest = dict(schema_version=1, exported_at=utc_text(utc_now().replace(microsecond=0)), backend=state['AWG_BACKEND'],
                         protocol=state['AWG_PROTOCOL_VERSION'], interface=state['SERVER_AWG_NIC'],
-                        versions={'installer_format': 'state-v1', 'installer_sha256': args[2] if len(args) > 2 else 'unknown', 'awg_tools': args[1],
+                        versions={'installer_format': 'state-v1', 'installer_sha256': args[2] if len(args) > 2 and re.fullmatch(r'[0-9a-f]{64}', args[2]) else 'unknown', 'awg_tools': args[1],
                                   'panel': 'not-probed'},
                         files={name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
-                        limitations=['Panel/mail/proxy files are recovery-only; not activated by import.',
+                        limitations=['Panel/mail/proxy files are kept only inside this encrypted archive; not activated by import.',
                                      'No TLS keys, binaries, systemd units, sessions or firewall dumps.'])
         validate_manifest(manifest, files)
         files['manifest.json'] = json.dumps(manifest, sort_keys=True, indent=2).encode()
@@ -3892,7 +3917,7 @@ function awgStateWriteInstallState() {
 		echo 'ERROR: server public/private key mismatch.' >&2
 		return 1
 	}
-	# The original config is retained in the encrypted archive/recovery files.
+	# The original config is retained only in the encrypted archive.
 	# Only host hooks change; keys, peers, addresses, MTU and protocol fields do not.
 	cat "${_AWG_STATE_IMPORT_DIR}/interface.conf" >"${SERVER_AWG_CONF}" || return 1
 	writeFirewallRules >>"${SERVER_AWG_CONF}" || return 1
@@ -3948,11 +3973,11 @@ function awgStateSnapshotPanel() {
 	if [[ -n "${ENV_FILE}" && -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]]; then
 		install -m 600 -- "${ENV_FILE}" "${STAGE}/web/env.conf" || return 1
 	fi
-	echo 'NOTE: panel DB/env included for recovery only; automatic panel/mail restore is TODO.' >&2
+	echo 'NOTE: panel DB/env are kept only inside the encrypted archive; automatic panel/mail restore is TODO.' >&2
 }
 
 function awgStateExport() { # <destination> <private work directory>
-	local DEST="$1" WORK="$2" FILE BASE VERSION
+	local DEST="$1" WORK="$2" FILE BASE VERSION INSTALLER_SHA256
 	local -a CANDIDATES=()
 	[[ ! -e "${DEST}" && ! -L "${DEST}" ]] || {
 		echo 'ERROR: export destination already exists.' >&2
@@ -3973,12 +3998,14 @@ function awgStateExport() { # <destination> <private work directory>
 	collectAwgClientConfigCandidates CANDIDATES || return 1
 	for FILE in "${CANDIDATES[@]}"; do
 		BASE="${FILE##*/}"
-		# Conflicting same-name copies must be resolved by the operator, not guessed.
+		# Candidates come root-owned directory first. Keep that first copy and
+		# never let a later same-name (e.g. user-writable home) copy replace or
+		# abort it; the operator is told which file was skipped.
 		if [[ -f "${WORK}/stage/clients/${BASE}" ]]; then
-			cmp -s -- "${FILE}" "${WORK}/stage/clients/${BASE}" || {
-				echo 'ERROR: conflicting client config copies.' >&2
-				return 1
-			}
+			if ! cmp -s -- "${FILE}" "${WORK}/stage/clients/${BASE}"; then
+				echo 'WARNING: skipped a conflicting same-name client config copy (the first, preferred copy is exported):' >&2
+				LC_ALL=C printf '  %q\n' "${FILE}" >&2
+			fi
 		else
 			install -m 600 -- "${FILE}" "${WORK}/stage/clients/${BASE}" || return 1
 		fi
@@ -3987,12 +4014,21 @@ function awgStateExport() { # <destination> <private work directory>
 	if [[ -f "${AWG_STATE_PROXY_CONFIG}" && ! -L "${AWG_STATE_PROXY_CONFIG}" ]]; then
 		mkdir -p "${WORK}/stage/proxy" || return 1
 		install -m 600 -- "${AWG_STATE_PROXY_CONFIG}" "${WORK}/stage/proxy/proxy.toml" || return 1
-		echo 'NOTE: default proxy config included for recovery only; custom proxy paths/TLS are TODO.' >&2
+		echo 'NOTE: default proxy config is kept only inside the encrypted archive; custom proxy paths/TLS are TODO.' >&2
 	fi
+	# Validate the panel policy schema and server config now, before the prompt.
+	awgStateArchive export-check "${WORK}/stage" || {
+		echo 'ERROR: staged state would not be importable; export refused before encryption.' >&2
+		return 1
+	}
+	# The private staging copy is a complete, consistent snapshot. Do not hold
+	# the lifecycle locks (blocking panel/CLI operations) during the prompt.
+	releaseClientLifecycleLock
 	VERSION="$(awg --version 2>/dev/null || printf unknown)"
+	INSTALLER_SHA256="$(awgStateInstallerSha256)"
 	# Stream plaintext tar directly into age. Its passphrase still comes only
 	# from /dev/tty, never argv/environment/logs. Check BOTH sides of the pipe.
-	if ! (set -o pipefail; awgStateArchive pack "${WORK}/stage" - "${VERSION}" "$(sha256sum "${BASH_SOURCE[0]}" | cut -d ' ' -f1)" |
+	if ! (set -o pipefail; awgStateArchive pack "${WORK}/stage" - "${VERSION}" "${INSTALLER_SHA256}" |
 		age --passphrase --output "${WORK}/encrypted"); then
 		rm -f -- "${WORK}/encrypted"
 		return 1
@@ -4006,6 +4042,19 @@ function awgStateExport() { # <destination> <private work directory>
 	fi
 	rm -f -- "${PUBLISH}"
 	echo 'Encrypted state archive created. Keep it offline; it grants full VPN access.'
+}
+
+# Hash the installer only when it runs from a regular file. Under
+# `bash <(curl ...)` BASH_SOURCE is an already-consumed pipe; report unknown
+# rather than the hash of empty/partial input.
+function awgStateInstallerSha256() {
+	local SOURCE="${BASH_SOURCE[0]:-}" SUM
+	if [[ -n "${SOURCE}" && -f "${SOURCE}" && -r "${SOURCE}" ]] &&
+		SUM="$(sha256sum -- "${SOURCE}" 2>/dev/null)" && [[ "${SUM%% *}" =~ ^[0-9a-f]{64}$ ]]; then
+		printf '%s\n' "${SUM%% *}"
+	else
+		printf 'unknown\n'
+	fi
 }
 
 # No symlink components or non-root-writable ancestors for privileged output.
@@ -4124,12 +4173,9 @@ function awgStateImportTransaction() (
 	awgStateArchive reconcile "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" "${STAGE}" "${STAGE}/post-install.conf"
 	replaceFileExactly "${STAGE}/post-install.conf" "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" 600
 	printf '%s\n' restore-complete-quarantined >>"${JOURNAL}/steps"
-	# Preserve recovery-only panel/proxy files privately. Never source env.conf,
-	# start the panel, replay the mail queue or expose a proxy listener.
-	mkdir -p "${JOURNAL}/recovery"
-	for FILE in web proxy vpn; do
-		[[ ! -d "${STAGE}/${FILE}" ]] || cp -a -- "${STAGE}/${FILE}" "${JOURNAL}/recovery/"
-	done
+	# The encrypted archive IS the recovery copy: never keep plaintext keys,
+	# panel DB/env or proxy config in the journal. Never source env.conf, start
+	# the panel, replay the mail queue or expose a proxy listener.
 	# Receipt includes the target NIC and archive identity, plus target file hashes.
 	printf '%s\n' "${SERVER_PUB_NIC}" >"${JOURNAL}/nic"
 	sha256sum "${AMNEZIAWG_DIR}/params" "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" >"${JOURNAL}/receipt"
@@ -4157,6 +4203,76 @@ function awgStateIsFinalized() { # <journal> <interface>
 	local MARKER="$1/finalized" INTERFACE="$2"
 	[[ -f "${MARKER}" && ! -L "${MARKER}" ]] && awgStateTrustedPath "${MARKER}" &&
 		[[ "$(<"${MARKER}")" == "${INTERFACE}" ]]
+}
+
+# Cross-archive tombstone, keyed by server identity (interface + public key),
+# under the journal directory that uninstall keeps. A finalized migration
+# records its archive exported_at; an archive of the same server that is not
+# newer could resurrect removed peers and needs an explicit reset.
+function awgStateIdentityDir() {
+	printf '%s\n' "${AWG_STATE_JOURNAL_DIR}/identities"
+}
+
+function awgStateCheckIdentityTombstone() { # <stage>
+	local IDENTITY EXPORTED MARKER LINE OLD_EXPORTED OLD_DIGEST
+	read -r IDENTITY EXPORTED < <(awgStateArchive identity "${1}") || return 1
+	[[ "${IDENTITY}" =~ ^[0-9a-f]{64}$ && "${EXPORTED}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+	MARKER="$(awgStateIdentityDir)/${IDENTITY}"
+	[[ -e "${MARKER}" || -L "${MARKER}" ]] || return 0
+	if [[ -L "${MARKER}" || ! -f "${MARKER}" ]] || ! awgStateTrustedPath "${MARKER}"; then
+		echo 'ERROR: unsafe server-identity tombstone; refusing import.' >&2
+		return 1
+	fi
+	LINE="$(<"${MARKER}")"
+	read -r OLD_EXPORTED OLD_DIGEST <<<"${LINE}"
+	if [[ ! "${OLD_EXPORTED}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ || ! "${OLD_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+		echo 'ERROR: invalid server-identity tombstone; refusing import.' >&2
+		return 1
+	fi
+	# Fixed-width UTC timestamps order lexicographically.
+	if [[ ! "${EXPORTED}" > "${OLD_EXPORTED}" ]]; then
+		echo "ERROR: a migration of this server from an archive exported at ${OLD_EXPORTED} was already finalized here; this archive (${EXPORTED}) is not newer and could resurrect removed peers." >&2
+		echo "After uninstalling, deliberately allow it with --reset-state-journal ${OLD_DIGEST} --confirm-policy-replay." >&2
+		return 1
+	fi
+}
+
+function awgStateRecordIdentityTombstone() { # <stage> <digest> <work>
+	local IDENTITY EXPORTED DIR
+	read -r IDENTITY EXPORTED < <(awgStateArchive identity "${1}") || return 1
+	[[ "${IDENTITY}" =~ ^[0-9a-f]{64}$ && "${2}" =~ ^[0-9a-f]{64}$ ]] || return 1
+	DIR="$(awgStateIdentityDir)"
+	[[ ! -L "${DIR}" ]] || return 1
+	[[ -d "${DIR}" ]] || mkdir -m 700 -- "${DIR}" || return 1
+	awgStateTrustedPath "${DIR}" || return 1
+	printf '%s %s\n' "${EXPORTED}" "${2}" >"${3}/identity" || return 1
+	replaceFileExactly "${3}/identity" "${DIR}/${IDENTITY}" 600
+}
+
+function awgStateDropIdentityTombstones() { # <digest>
+	local DIR FILE LINE OLD_EXPORTED OLD_DIGEST
+	DIR="$(awgStateIdentityDir)"
+	[[ -d "${DIR}" && ! -L "${DIR}" ]] || return 0
+	for FILE in "${DIR}/"*; do
+		[[ -f "${FILE}" && ! -L "${FILE}" ]] || continue
+		LINE="$(<"${FILE}")"
+		read -r OLD_EXPORTED OLD_DIGEST <<<"${LINE}"
+		[[ "${OLD_DIGEST}" != "${1}" ]] || rm -f -- "${FILE}" || return 1
+	done
+}
+
+# Warn when the restored server MTU or client MTU does not fit this host's
+# outer budget. Keys/configs are restored exactly; the operator decides.
+function awgStateWarnMtuBudget() { # <server.conf>
+	local BUDGET SERVER_MTU LIMIT
+	BUDGET="$(freshOuterMtuBudget)"
+	warnIfClientMtuUnsafe "${BUDGET}"
+	SERVER_MTU="$(awk -F= '/^[[:space:]]*\[/ {s=$0; gsub(/[[:space:]]/, "", s)} s == "[Interface]" && $1 ~ /^[[:space:]]*MTU[[:space:]]*$/ {v=$2; gsub(/[[:space:]]/, "", v); print v; exit}' "${1}")"
+	[[ "${SERVER_MTU}" =~ ^[0-9]{1,5}$ ]] || return 0
+	LIMIT="$(recommendedMtuForS4 "$((10#${SERVER_AWG_S4:-0}))" "${BUDGET}" 2>/dev/null)" || return 0
+	if (( 10#${SERVER_MTU} > LIMIT )); then
+		echo "WARNING: restored server MTU ${SERVER_MTU} exceeds ${LIMIT}, the largest that fits this host's ${BUDGET}-byte outer budget with S4=${SERVER_AWG_S4:-0}. Lower MTU in the server config after import if large packets stall." >&2
+	fi
 }
 
 function awgStateWorkDir() {
@@ -4190,6 +4306,9 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 	if [[ -f "${JOURNAL}/finalized" && ! -L "${JOURNAL}/finalized" ]] &&
 		awgStateTrustedPath "${JOURNAL}/finalized" && [[ -s "${JOURNAL}/finalized" ]]; then
 		FINALIZED=1
+	elif [[ "${OPTION}" == --reset-finalized ]]; then
+		echo "ERROR: journal is not finalized; there is no finalization to reset. To abandon this quarantine import, use --purge-state-journal ${DIGEST} --force." >&2
+		exit 1
 	elif [[ "${OPTION}" != --force ]]; then
 		echo 'ERROR: journal is not finalized; --force explicitly abandons quarantine/rollback recovery.' >&2
 		exit 1
@@ -4234,10 +4353,11 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 		rm -rf --one-file-system -- "${JOURNAL:?}/${ENTRY:?}" || exit 1
 	done
 	if (( FINALIZED )) && [[ "${OPTION}" != --reset-finalized ]]; then
-		echo 'Purged plaintext recovery/rollback material; retained only the non-secret finalized tombstone.'
+		echo 'Purged rollback/receipt material (and any legacy plaintext recovery copies); retained only the non-secret finalized tombstone.'
 	else
 		rm -f -- "${JOURNAL}/finalized" && rmdir -- "${JOURNAL}" || exit 1
 		if [[ "${OPTION}" == --reset-finalized ]]; then
+			awgStateDropIdentityTombstones "${DIGEST}" || exit 1
 			echo 'Finalized journal reset after uninstall. Fresh import may proceed through normal preflight and current-clock policy checks.'
 		else
 			echo 'Purged unfinalized journal by explicit force; this archive can no longer reconcile/activate that import.'
@@ -4327,7 +4447,9 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 			fi
 			printf '%s\n' finalized >>"${JOURNAL}/steps" || echo 'WARNING: finalized marker saved but journal step append failed.' >&2
 			echo 'Finalized: VPN enabled at boot. Normal systemctl management no longer requires the archive/passphrase.'
-			echo "REMINDER: plaintext secrets remain in ${JOURNAL}; after reviewing recovery needs, purge with --purge-state-journal ${JOURNAL##*/}."
+			awgStateRecordIdentityTombstone "${STAGE}" "${JOURNAL##*/}" "${WORK}" ||
+				echo 'WARNING: could not record the server-identity tombstone; older archives of this server are not blocked.' >&2
+			echo "Journal ${JOURNAL} holds no keys (the encrypted archive is the recovery copy). Optional cleanup: --purge-state-journal ${JOURNAL##*/}."
 		else
 			echo 'Activated for testing only; still disabled at boot. Stop/disable it, then activate with --enable-at-boot to finalize.'
 		fi
@@ -4340,11 +4462,12 @@ function awgStateCommand() (
 	# xtrace must not echo imported private keys during printf -v/serialization.
 	set +x
 	umask 077
-	local MODE="$1" ARCHIVE="$2" OPTION="${3:-}" WORK NIC="${SERVER_PUB_NIC:-}" STATE_ID JOURNAL
+	local MODE="$1" ARCHIVE="$2" OPTION="${3:-}" WORK NIC="${SERVER_PUB_NIC:-}" PUB_IP="${SERVER_PUB_IP:-}" STATE_ID JOURNAL
 	isRoot || exit 1
 	checkOS
-	[[ "${ID:-}" == debian || "${ID:-}" == ubuntu ]] || {
-		echo 'ERROR: state migration supports Debian/Ubuntu only.' >&2
+	# checkOS normalizes Raspbian to debian and Linux Mint to ubuntu.
+	[[ "${OS:-}" == debian || "${OS:-}" == ubuntu ]] || {
+		echo 'ERROR: state migration supports Debian/Ubuntu (and their supported derivatives) only.' >&2
 		exit 1
 	}
 	local ALLOW_INSTALL=1
@@ -4386,15 +4509,30 @@ function awgStateCommand() (
 		echo 'ERROR: this archive has no completed local import; import it into quarantine first.' >&2
 		exit 1
 	fi
+	awgStateCheckIdentityTombstone "${WORK}/stage" || exit 1
+	# Endpoint for profiles generated after cutover. Restored profiles keep
+	# their own Endpoint lines unchanged.
+	if [[ -n "${PUB_IP}" ]]; then
+		[[ ${#PUB_IP} -le 253 && "${PUB_IP}" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || {
+			echo 'ERROR: SERVER_PUB_IP must be a hostname or IP address.' >&2
+			exit 1
+		}
+		SERVER_PUB_IP="${PUB_IP}"
+	fi
+	if endpointIsIPv4 "${SERVER_PUB_IP}" || [[ "${SERVER_PUB_IP}" == *:* ]]; then
+		echo 'WARNING: SERVER_PUB_IP is an IP literal; new profiles will not follow a DNS switch. Set SERVER_PUB_IP=<hostname> for seamless failover.' >&2
+	fi
 	awgStateImportPreflight "${NIC}" "${WORK}" || exit 1
 	awgStateArchive prepare "${WORK}/stage" || exit 1
 	SERVER_PUB_NIC="${NIC}"
+	awgStateWarnMtuBudget "${WORK}/stage/vpn/server.conf"
 	printf 'Plan: install %s backend, AWG %s, interface %s, UDP %s, uplink %s.\n' "${AWG_BACKEND}" "${AWG_PROTOCOL_VERSION}" "${SERVER_AWG_NIC}" "${SERVER_PORT}" "${NIC}"
 	echo 'Restore original keys/profiles; replace host hooks; migrate future-expiry peers and exclude already-expired/disabled/archived/removal-pending peers.'
-	echo 'Leave VPN stopped/disabled. Panel/mail/proxy files are recovery-only (automatic restore TODO).'
+	echo 'Leave VPN stopped/disabled. Panel/mail/proxy data stay only in the encrypted archive (automatic restore TODO); without the panel, nothing enforces future expiries after cutover.'
 	[[ "${OPTION}" != --dry-run ]] || exit 0
 	acquireClientLifecycleLock || exit 1
 	# Repeat under lock to close the preflight/installation race.
+	awgStateCheckIdentityTombstone "${WORK}/stage" || exit 1
 	awgStateImportPreflight "${NIC}" "${WORK}" || exit 1
 	mkdir -p "${AWG_STATE_JOURNAL_DIR}" || exit 1
 	[[ ! -L "${AWG_STATE_JOURNAL_DIR}" && ! -L "${JOURNAL}" ]] || exit 1
@@ -4403,7 +4541,7 @@ function awgStateCommand() (
 	awgStateImportTransaction "${WORK}/stage" "${JOURNAL}"
 	local STATUS=$?
 	[[ ${STATUS} -eq 0 ]] || exit "${STATUS}"
-	echo "Imported in quarantine. Journal/recovery: ${JOURNAL}"
+	echo "Imported in quarantine. Journal (no plaintext keys): ${JOURNAL}"
 	echo 'Before DNS cutover: fence the old server, inspect firewall hooks, and test a client handshake.'
 	echo "After fencing the old server, use: bash amneziawg-install.sh --activate-state <same-archive> --enable-at-boot"
 	echo 'Before finalization, do not start/enable the unit manually: activation must re-reconcile peer policy.'
@@ -12153,7 +12291,7 @@ function uninstallAmneziaWG() {
 			echo "AmneziaWG uninstalled successfully."
 			# Keep recovery data and no-replay tombstones unless explicitly reset.
 			if [[ -d "${AWG_STATE_JOURNAL_DIR}" ]]; then
-				echo "Migration journals retained in ${AWG_STATE_JOURNAL_DIR}; purge secrets explicitly, or use --reset-state-journal <manifest-sha256> --confirm-policy-replay before restoring the same finalized archive."
+				echo "Migration journals and server-identity tombstones retained in ${AWG_STATE_JOURNAL_DIR}; purge journals with --purge-state-journal <manifest-sha256>, or use --reset-state-journal <manifest-sha256> --confirm-policy-replay before restoring the same finalized archive."
 			fi
 			exit 0
 		fi
@@ -14904,6 +15042,18 @@ function acquireClientLifecycleDirectoryLock() { # <dir> <fd-variable> <create>
 	result_fd="${lock_fd}"
 }
 
+# Create the missing installer lock directory with private permissions.
+# Fails (quietly) only when the filesystem view is read-only or otherwise
+# refuses creation; acquireClientLifecycleDirectoryLock re-validates it.
+function installerLifecycleLockDirCreatable() {
+	local old_umask rc=0
+	old_umask="$(umask)"
+	umask 077
+	mkdir -p -- "${INSTALLER_LIFECYCLE_LOCK_DIR}" 2>/dev/null || rc=1
+	umask "${old_umask}"
+	return "${rc}"
+}
+
 # Every installer lifecycle caller takes the stable root-private lock. Keep the
 # existing panel directory lock too: native Rust operations hold that inode
 # across DB/config updates and privileged helper calls. Both are non-blocking,
@@ -14914,6 +15064,21 @@ function acquireClientLifecycleLock() {
 	if ! command -v flock >/dev/null 2>&1; then
 		echo "ERROR: flock is required for serialized client lifecycle operations" >&2
 		return 1
+	fi
+	if [[ ! -e "${INSTALLER_LIFECYCLE_LOCK_DIR}" && ! -L "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]] &&
+		! installerLifecycleLockDirCreatable; then
+		# The web panel helper runs this script inside the panel's
+		# ProtectSystem=strict view, where /var/lib is read-only. Panel
+		# install/upgrade pre-create the root-private directory; on hosts not
+		# yet upgraded, serialize on the panel DB-directory lock alone. Every
+		# root caller also takes that lock while a panel exists, so mutual
+		# exclusion with panel and CLI operations is preserved.
+		if panel_dir="$(resolveClientLifecycleLockDir)" &&
+			[[ "${panel_dir}" != "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]]; then
+			echo "WARNING: cannot create '${INSTALLER_LIFECYCLE_LOCK_DIR}' (read-only view); using the web panel lifecycle lock only. Rerun the panel upgrade to create it." >&2
+			acquireClientLifecycleDirectoryLock "${panel_dir}" CLIENT_PANEL_LIFECYCLE_LOCK_FD 0 || return 1
+			return 0
+		fi
 	fi
 	acquireClientLifecycleDirectoryLock "${INSTALLER_LIFECYCLE_LOCK_DIR}" CLIENT_LIFECYCLE_LOCK_FD 1 || return 1
 	if ! panel_dir="$(resolveClientLifecycleLockDir)"; then
@@ -15235,6 +15400,14 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	#   amneziawg-install.sh --backend-status
 	#   amneziawg-install.sh --upgrade-boringtun
 	#   amneziawg-install.sh --rollback-boringtun
+	#
+	# Server state migration (root; docs/STATE_MIGRATION.md):
+	#   amneziawg-install.sh --export-state <file>
+	#   amneziawg-install.sh --inspect-state <file>
+	#   [SERVER_PUB_NIC=<nic>] [SERVER_PUB_IP=<host>] amneziawg-install.sh --import-state <file> [--dry-run]
+	#   amneziawg-install.sh --activate-state <file> [--enable-at-boot]
+	#   amneziawg-install.sh --purge-state-journal <manifest-sha256> [--force]
+	#   amneziawg-install.sh --reset-state-journal <manifest-sha256> --confirm-policy-replay
 	#
 	# Requires AmneziaWG to be already installed (params file must exist).
 	case "${1:-}" in

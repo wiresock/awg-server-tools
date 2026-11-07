@@ -839,7 +839,7 @@ installAmneziaWG() {
     mkdir -p "$AWG_SYSTEMD_UNIT_DIR/awg-quick@awg0.service.d"
     printf 'regenerated unit\n' >"$AWG_SYSTEMD_UNIT_DIR/awg-quick@awg0.service.d/override.conf"
 }
-awgStateCommand --import-state "$ROOT/state.tar.gz" --dry-run >"$ROOT/dry-run.out" || exit 10
+SERVER_PUB_IP=203.0.113.7 awgStateCommand --import-state "$ROOT/state.tar.gz" --dry-run >"$ROOT/dry-run.out" || exit 10
 [[ ! -e "$AMNEZIAWG_DIR" && ! -e "$AWG_STATE_JOURNAL_DIR" && ! -e "$ROOT/install.log" ]] || exit 11
 [[ "$(<"$AWG_SYSCTL_FILE")" == 'original sysctl' ]] || exit 12
 FAIL_INSTALL=1
@@ -854,7 +854,8 @@ awgStateCommand --import-state "$ROOT/state.tar.gz"
 [[ "$(<"$AWG_SYSCTL_FILE")" == 'original sysctl' ]] || exit 15
 FAIL_INSTALL=0
 rmdir "$AMNEZIAWG_DIR" || exit 43 # Truly fresh successful import with the retained lock inode.
-awgStateCommand --import-state "$ROOT/state.tar.gz" || exit 16
+SERVER_PUB_IP=new-vpn.example.test awgStateCommand --import-state "$ROOT/state.tar.gz" || exit 16
+grep -qx "SERVER_PUB_IP='new-vpn.example.test'" "$AMNEZIAWG_DIR/params" || exit 44
 [[ -f "$AMNEZIAWG_DIR/params" && -f "$AMNEZIAWG_DIR/awg0.conf" ]] || exit 17
 [[ "$(grep -c '^install$' "$ROOT/install.log")" == 3 ]] || exit 18
 awgStateCommand --import-state "$ROOT/state.tar.gz" || exit 19
@@ -868,6 +869,16 @@ awgStateCommand --import-state "$ROOT/state.tar.gz"
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
         self.assertNotIn(KEY.encode(), result.stdout + result.stderr)
         self.assertIn('rollback', ''.join(p.read_text() for p in (self.root / 'journals').glob('*/steps')))
+        self.assertIn(b'SERVER_PUB_IP is an IP literal', result.stderr)
+        # The encrypted archive is the recovery copy: no plaintext keys or panel DB in journals.
+        journal_files = [p for p in (self.root / 'journals').rglob('*') if p.is_file()]
+        self.assertTrue(journal_files)
+        self.assertFalse(list((self.root / 'journals').glob('*/recovery')))
+        for path in journal_files:
+            data = path.read_bytes()
+            self.assertNotIn(KEY.encode(), data, path)
+            self.assertNotIn(PEER.encode(), data, path)
+            self.assertNotIn(b'SQLite format 3', data, path)
         plan, _ = json.JSONDecoder().raw_decode((self.root / 'dry-run.out').read_text())
         self.assertEqual(plan['counts'], {'migrate': 1, 'drop': 1})
         self.assertRegex(plan['exported_at'], r'Z$')
@@ -1317,6 +1328,195 @@ awgStateExport "$ROOT/backup.awgx" "$ROOT/work"
         self.assertNotEqual(rc, 0, log)
         self.assertFalse(wrong.exists() and wrong.stat().st_size)
 
+
+    def test_state_helper_runs_isolated_from_cwd_modules(self):
+        # Root runs the embedded verifier from an arbitrary cwd: a planted
+        # tarfile.py/json.py there must never be imported (python3 -I).
+        planted = self.root / 'cwd'
+        planted.mkdir()
+        marker = self.root / 'planted-ran'
+        for name in ('tarfile', 'json', 'hashlib'):
+            (planted / f'{name}.py').write_text(f'open({str(marker)!r}, "w").write("pwned")\n')
+        shell = r'''
+set -euo pipefail
+source "$1"
+cd "$3"
+awgStateArchive verify "$2"
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.tar), str(planted)], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertFalse(marker.exists())
+        # Every python3 heredoc in the installer runs isolated.
+        self.assertEqual(re.findall(r'python3 -(?!I )[^c]', SOURCE), [])
+
+    def test_lifecycle_lock_falls_back_to_panel_lock_in_read_only_view(self):
+        shell = r'''
+set -uo pipefail
+source "$1"
+ROOT="$2"
+mkdir -p "$ROOT/ro" "$ROOT/panel-state"
+chmod 555 "$ROOT/ro" # Like /var/lib under the panel's ProtectSystem=strict.
+INSTALLER_LIFECYCLE_LOCK_DIR="$ROOT/ro/amneziawg-install/lifecycle"
+WEB_PANEL_ENV_FILE="$ROOT/absent.env"
+WEB_PANEL_SYSTEMD_UNIT="$ROOT/web.service"
+systemctl() { return 1; }
+printf '[Service]\nEnvironment=AWG_WEB_DB=%s/panel-state/panel.db\n' "$ROOT" >"$WEB_PANEL_SYSTEMD_UNIT"
+acquireClientLifecycleLock || exit 10
+[[ -z "$CLIENT_LIFECYCLE_LOCK_FD" && -n "$CLIENT_PANEL_LIFECYCLE_LOCK_FD" ]] || exit 11
+if flock -xn "$ROOT/panel-state" -c true; then exit 12; fi # Panel lock is held.
+if (acquireClientLifecycleLock); then exit 13; fi
+releaseClientLifecycleLock
+flock -xn "$ROOT/panel-state" -c true || exit 14
+[[ ! -e "$INSTALLER_LIFECYCLE_LOCK_DIR" ]] || exit 15
+# Without a panel there is no shared lock to fall back to: fail closed.
+rm "$WEB_PANEL_SYSTEMD_UNIT"
+if acquireClientLifecycleLock; then exit 16; fi
+# Once panel install/upgrade created it, the read-only directory is used.
+chmod 755 "$ROOT/ro"; mkdir -p -m 700 "$INSTALLER_LIFECYCLE_LOCK_DIR"; chmod 555 "$ROOT/ro"
+acquireClientLifecycleLock || exit 17
+[[ -n "$CLIENT_LIFECYCLE_LOCK_FD" ]] || exit 18
+releaseClientLifecycleLock
+chmod 755 "$ROOT/ro"
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        subprocess.run(['chmod', '-R', 'u+w', str(self.root)])
+        if os.geteuid() == 0:
+            self.skipTest('root bypasses the read-only directory permission')
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'using the web panel lifecycle lock only', result.stderr)
+        for script in ('amneziawg-web-install.sh', 'amneziawg-web-upgrade.sh'):
+            text = (ROOT / 'amneziawg-web/scripts' / script).read_text()
+            self.assertIn('INSTALLER_LIFECYCLE_LOCK_DIR="/var/lib/amneziawg-install/lifecycle"', text)
+            self.assertIn('\n    ensure_installer_lifecycle_lock_dir\n', text)
+
+    def test_export_releases_lock_before_prompt_checks_schema_and_skips_conflicts(self):
+        source = self.root / 'source'
+        (source / 'clients').mkdir(parents=True)
+        (source / 'params').write_bytes(self.files['vpn/params'])
+        (source / 'awg0.conf').write_bytes(self.files['vpn/server.conf'])
+        (source / 'clients/awg0-client-phone.conf').write_bytes(self.files['clients/awg0-client-phone.conf'])
+        (self.root / 'home').mkdir()
+        (self.root / 'home/awg0-client-phone.conf').write_text('user-edited conflicting copy\n')
+        bad = self.root / 'bad.sqlite'
+        with closing(sqlite3.connect(bad)) as db, db:
+            db.execute('CREATE TABLE peers(public_key TEXT)')
+        (self.root / 'work').mkdir()
+        shell = r'''
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/source"
+AWG_STATE_PROXY_CONFIG="$ROOT/not-installed-proxy"
+acquireClientLifecycleLock() { CLIENT_LIFECYCLE_LOCK_FD=held; }
+releaseClientLifecycleLock() { CLIENT_LIFECYCLE_LOCK_FD=""; }
+awgStateTrustedPath() { return 0; }
+awgStateSnapshotPanel() { [[ -z "${BAD_DB:-}" ]] || { mkdir -p "$1/web" && cp "$BAD_DB" "$1/web/database.sqlite"; }; }
+collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=("$ROOT/source/clients/awg0-client-phone.conf" "$ROOT/home/awg0-client-phone.conf"); }
+awg() { printf 'fixture-tools\n'; }
+age() { [[ -z "$CLIENT_LIFECYCLE_LOCK_FD" ]] || return 77; touch "$ROOT/age-ran"; cat >"$3"; }
+BAD_DB="$ROOT/bad.sqlite" awgStateExport "$ROOT/bad-export" "$ROOT/work/a"
+[[ $? -ne 0 && ! -e "$ROOT/age-ran" && ! -e "$ROOT/bad-export" ]] || exit 10
+awgStateExport "$ROOT/good-export" "$ROOT/work/b" || exit 11
+[[ -e "$ROOT/age-ran" ]] || exit 12
+'''
+        (self.root / 'work/a').mkdir()
+        (self.root / 'work/b').mkdir()
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'missing required columns', result.stderr)
+        self.assertIn(b'skipped a conflicting same-name client config copy', result.stderr)
+        with tarfile.open(self.root / 'good-export') as archive:
+            data = archive.extractfile('clients/awg0-client-phone.conf').read()
+            meta = json.load(archive.extractfile('manifest.json'))
+        self.assertEqual(data, self.files['clients/awg0-client-phone.conf'])
+        self.assertRegex(meta['versions']['installer_sha256'], r'^[0-9a-f]{64}$')
+
+    def test_installer_sha256_unknown_when_not_run_from_a_regular_file(self):
+        shell = r'source <(cat "$1"); awgStateInstallerSha256'
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT)], capture_output=True)
+        self.assertEqual(result.stdout.strip(), b'unknown', result.stderr.decode())
+        result = subprocess.run(['bash', '-c', 'source "$1"; awgStateInstallerSha256', 'test', str(SCRIPT)], capture_output=True)
+        self.assertEqual(result.stdout.strip().decode(), hashlib.sha256(SCRIPT.read_bytes()).hexdigest())
+
+    def test_identity_tombstone_blocks_not_newer_archives_until_reset(self):
+        stage = self.root / 'stage'
+        self.run_helper('unpack', self.tar, stage)
+        shell = r'''
+set -uo pipefail
+source "$1"
+ROOT="$2"; STAGE="$3"
+AWG_STATE_JOURNAL_DIR="$ROOT/journals"
+mkdir -p "$AWG_STATE_JOURNAL_DIR" "$ROOT/work"
+awgStateTrustedPath() { return 0; }
+DIGEST="$(printf 'b%.0s' {1..64})"
+awgStateCheckIdentityTombstone "$STAGE" || exit 10 # Nothing finalized yet.
+awgStateRecordIdentityTombstone "$STAGE" "$DIGEST" "$ROOT/work" || exit 11
+[[ "$(stat -c %a "$AWG_STATE_JOURNAL_DIR/identities")" == 700 ]] || exit 12
+if awgStateCheckIdentityTombstone "$STAGE"; then exit 13; fi # Same export time.
+cp "$STAGE/manifest.json" "$ROOT/manifest.orig"
+python3 - "$STAGE/manifest.json" <<'PY'
+import json, sys
+p = sys.argv[1]; m = json.load(open(p)); m['exported_at'] = '2000-01-01T00:00:00Z'; json.dump(m, open(p, 'w'))
+PY
+if awgStateCheckIdentityTombstone "$STAGE"; then exit 14; fi # Older archive.
+cp "$ROOT/manifest.orig" "$STAGE/manifest.json"
+printf '2000-01-01T00:00:00Z %s\n' "$DIGEST" >"$(echo "$AWG_STATE_JOURNAL_DIR"/identities/*)"
+awgStateCheckIdentityTombstone "$STAGE" || exit 15 # Newer archive migrates.
+awgStateDropIdentityTombstones "$(printf 'c%.0s' {1..64})" || exit 16
+[[ -n "$(ls "$AWG_STATE_JOURNAL_DIR/identities")" ]] || exit 17
+awgStateDropIdentityTombstones "$DIGEST" || exit 18
+[[ -z "$(ls "$AWG_STATE_JOURNAL_DIR/identities")" ]] || exit 19
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root), str(stage)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'--reset-state-journal ' + b'b' * 64, result.stderr)
+
+    def test_reset_on_unfinalized_journal_points_to_forced_purge(self):
+        shell = r'''
+source "$1"
+AWG_STATE_JOURNAL_DIR="$2/journals"
+DIGEST="$(printf 'a%.0s' {1..64})"
+mkdir -p "$AWG_STATE_JOURNAL_DIR/$DIGEST/before"
+isRoot() { return 0; }
+awgStateTrustedPath() { return 0; }
+acquireClientLifecycleLock() { return 0; }
+releaseClientLifecycleLock() { return 0; }
+if awgStatePurgeJournal "$DIGEST" --reset-finalized; then exit 10; fi
+[[ -d "$AWG_STATE_JOURNAL_DIR/$DIGEST/before" ]]
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'--purge-state-journal ' + b'a' * 64 + b' --force', result.stderr)
+
+    def test_mtu_budget_warning_for_restored_server_mtu(self):
+        conf = self.root / 'server.conf'
+        conf.write_text('[Interface]\nMTU = 1420\nPrivateKey = x\n[Peer]\nMTU = 9000\n')
+        shell = r'''
+source "$1"
+freshOuterMtuBudget() { printf 1400; }
+SERVER_AWG_S4=18 CLIENT_MTU="" awgStateWarnMtuBudget "$2"
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(conf)], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn(b'restored server MTU 1420 exceeds', result.stderr)
+
+    def test_fractional_expiry_and_small_clock_skew(self):
+        # Python 3.9/3.10 fromisoformat accepts only 3 or 6 fractional digits.
+        self.add_policy([(PEER, 0, 0, 0, '2999-01-01T00:00:00.5Z', None)])
+        report = json.loads(self.run_helper('inspect').stdout)['peer_plan']
+        self.assertEqual(report['peers'][0]['decision'], 'migrate')
+        self.assertEqual(report['peers'][0]['expires_at'], '2999-01-01T00:00:00.500000Z')
+        (self.root / 'fixture-policy.sqlite').unlink()
+        self.add_policy([(PEER, 0, 0, 0, '2999-01-01T00:00:00.123456789+00:00', None)])
+        report = json.loads(self.run_helper('inspect').stdout)['peer_plan']
+        self.assertEqual(report['peers'][0]['decision'], 'migrate')
+        meta = manifest(self.files)
+        meta['exported_at'] = (datetime.now(timezone.utc) + timedelta(seconds=60)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        make_tar(self.tar, self.files, meta)
+        self.run_helper('inspect')  # Within the tolerated skew.
+        meta['exported_at'] = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        make_tar(self.tar, self.files, meta)
+        self.assertIn(b'future relative to this host', self.run_helper('inspect', ok=False).stderr)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
