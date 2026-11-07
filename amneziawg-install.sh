@@ -3577,6 +3577,15 @@ def read_archive(path):
             total += member.size
             require(total <= MAX_TOTAL, 'oversized archive')
             files[member.name] = archive.extractfile(member).read()
+        # tarfile stops at the end-of-archive blocks; read the gzip stream to
+        # EOF so a missing/corrupt trailer (CRC, length) fails closed too.
+        rest = 0
+        while True:
+            chunk = archive.fileobj.read(65536)
+            if not chunk:
+                break
+            rest += len(chunk)
+            require(rest <= MAX_TOTAL, 'oversized archive')
     require('manifest.json' in files, 'missing manifest')
     manifest = json.loads(files.pop('manifest.json'), object_pairs_hook=unique_json)
     require(type(manifest) is dict, 'invalid manifest')
@@ -4149,32 +4158,42 @@ function awgStateImportTransaction() (
 	mv -T -- "${JOURNAL}/before.new" "${JOURNAL}/before" || exit 1
 	rm -rf --one-file-system -- "${JOURNAL}/before.old" || exit 1
 	function stateImportFinish() {
-		local STATUS=$? FILE INDEX=0
+		local STATUS=$? FILE INDEX=0 INCOMPLETE=0
+		# Cleanup must run to the end: no errexit, no re-entrant signals, and
+		# every step is attempted even when an earlier one (or logging) fails.
+		set +e
+		trap '' INT TERM HUP
 		if (( ! COMMITTED )); then
-			printf '%s\n' rollback >>"${JOURNAL}/steps"
-			rm -f -- "${JOURNAL}/receipt"
+			awgStateJournalStep "${JOURNAL}" rollback
+			rm -f -- "${JOURNAL}/receipt" || INCOMPLETE=1
 			# The clean install hook returns before systemctl enable/start.
-			rm -rf -- "${AMNEZIAWG_DIR}" "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service.d"
-			rm -f -- "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service"
+			rm -rf -- "${AMNEZIAWG_DIR}" "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service.d" || INCOMPLETE=1
+			rm -f -- "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service" || INCOMPLETE=1
 			if ((CONFIG_EXISTED)); then
-				mkdir -p "${AMNEZIAWG_DIR}" && chmod 700 "${AMNEZIAWG_DIR}"
+				{ mkdir -p "${AMNEZIAWG_DIR}" && chmod 700 "${AMNEZIAWG_DIR}"; } || INCOMPLETE=1
 			fi
 			for FILE in "${TRACKED[@]}"; do
 				if [[ -f "${JOURNAL}/before/${INDEX}" ]]; then
-					cp -p -- "${JOURNAL}/before/${INDEX}" "${FILE}" || true
+					cp -p -- "${JOURNAL}/before/${INDEX}" "${FILE}" || INCOMPLETE=1
 				else
-					rm -f -- "${FILE}"
+					rm -f -- "${FILE}" || INCOMPLETE=1
 				fi
 				INDEX=$((INDEX + 1))
 			done
 			systemctl daemon-reload || true
-			echo "ERROR: import rolled back config/unit changes; inspect ${JOURNAL}/steps. Packages may remain installed." >&2
+			if ((INCOMPLETE)); then
+				echo "ERROR: import rollback was INCOMPLETE; inspect ${AMNEZIAWG_DIR}, the unit directory and ${JOURNAL}/before before retrying." >&2
+			else
+				echo "ERROR: import rolled back config/unit changes; inspect ${JOURNAL}/steps. Packages may remain installed." >&2
+			fi
+			((STATUS)) || STATUS=1
 		fi
 		return "${STATUS}"
 	}
 	trap stateImportFinish EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
+	trap 'exit 129' HUP
 	printf '%s\n' install-packages >>"${JOURNAL}/steps"
 	_AWG_STATE_IMPORT_DIR="${STAGE}"
 	# Run normally rather than under `if`/`!`: preserve failure propagation in the
@@ -4283,6 +4302,41 @@ function awgStateJournalStep() { # <journal> <step>
 	if ! { printf '%s\n' "$2" >>"$1/steps"; } 2>/dev/null; then
 		echo "WARNING: could not append '$2' to $1/steps (audit log only; state is unaffected)." >&2
 	fi
+}
+
+# Activation guard state (set only while an activation may have started the unit).
+_AWG_STATE_ACTIVATION_UNIT=""
+_AWG_STATE_ACTIVATION_JOURNAL=""
+
+# Undo a not-yet-finalized activation: disable (harmless if never enabled) and
+# stop. A published finalized marker means the terminal state was reached.
+function awgStateActivationAbort() {
+	local UNIT="${_AWG_STATE_ACTIVATION_UNIT}" JOURNAL="${_AWG_STATE_ACTIVATION_JOURNAL}"
+	[[ -n "${UNIT}" ]] || return 0
+	if [[ -n "${JOURNAL}" && -f "${JOURNAL}/finalized" && ! -L "${JOURNAL}/finalized" ]]; then
+		awgStateActivationDisarm
+		return 0
+	fi
+	systemctl disable "${UNIT}" >/dev/null 2>&1 || true
+	systemctl stop "${UNIT}" || true
+	awgStateActivationDisarm
+}
+
+function awgStateActivationDisarm() {
+	_AWG_STATE_ACTIVATION_UNIT=""
+	_AWG_STATE_ACTIVATION_JOURNAL=""
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	trap 'exit 129' HUP
+}
+
+function awgStateActivationInterrupted() { # <exit status>
+	trap '' INT TERM HUP
+	local JOURNAL="${_AWG_STATE_ACTIVATION_JOURNAL}"
+	echo 'ERROR: activation interrupted before finalization; stopping and disabling the VPN. The import stays quarantined; rerun --activate-state to retry.' >&2
+	awgStateActivationAbort
+	[[ -z "${JOURNAL}" ]] || awgStateJournalStep "${JOURNAL}" activation-interrupted
+	exit "$1"
 }
 
 function awgStateWarnIdentityTombstone() {
@@ -4461,14 +4515,35 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 		awgStateArchive reconcile "${SERVER_AWG_CONF}" "${STAGE}" "${WORK}/at-start.conf" || return 1
 		mv -- "${WORK}/at-start.conf" "${WORK}/reconciled.conf" || return 1
 	fi
+	# Config and receipt change together: on receipt failure restore the
+	# previous config, so the unchanged old receipt still verifies on retry.
+	local CONFIG_CHANGED=0
 	if ! cmp -s -- "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}"; then
+		cp -p -- "${SERVER_AWG_CONF}" "${WORK}/previous.conf" || return 1
 		replaceFileExactly "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}" 600 || return 1
+		CONFIG_CHANGED=1
 	fi
-	awgStateWriteReceipt "${JOURNAL}" "${WORK}/receipt" || return 1
-	printf '%s\n' reconciled >>"${JOURNAL}/steps" || return 1
+	if ! awgStateWriteReceipt "${JOURNAL}" "${WORK}/receipt"; then
+		if ((CONFIG_CHANGED)) && ! replaceFileExactly "${WORK}/previous.conf" "${SERVER_AWG_CONF}" 600; then
+			echo "ERROR: receipt publication failed and the previous ${SERVER_AWG_CONF} could not be restored; restore it from the encrypted archive before retrying." >&2
+			return 1
+		fi
+		echo 'ERROR: could not publish the import receipt; the previous config was kept. Fix the cause (e.g. free space) and rerun.' >&2
+		return 1
+	fi
+	awgStateJournalStep "${JOURNAL}" reconciled
 	if [[ "${MODE}" == --activate-state ]]; then
+		# From before start until the intended terminal state, an INT/TERM/HUP
+		# stops (and disables) the unit, exactly like the post-start failure
+		# branches: an interrupted activation leaves a stopped, unfinalized,
+		# retryable import, never a running/enabled one.
+		_AWG_STATE_ACTIVATION_UNIT="awg-quick@${SERVER_AWG_NIC}"
+		_AWG_STATE_ACTIVATION_JOURNAL="${JOURNAL}"
+		trap 'awgStateActivationInterrupted 130' INT
+		trap 'awgStateActivationInterrupted 143' TERM
+		trap 'awgStateActivationInterrupted 129' HUP
 		if ! systemctl start "awg-quick@${SERVER_AWG_NIC}"; then
-			systemctl stop "awg-quick@${SERVER_AWG_NIC}" || true
+			awgStateActivationAbort
 			awgStateJournalStep "${JOURNAL}" activation-failed
 			return 1
 		fi
@@ -4478,26 +4553,27 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 		awgStateJournalStep "${JOURNAL}" activated
 		if [[ "${OPTION}" == --enable-at-boot ]]; then
 			if ! printf '%s\n' "${SERVER_AWG_NIC}" >"${WORK}/finalized"; then
-				systemctl stop "awg-quick@${SERVER_AWG_NIC}" || true
+				awgStateActivationAbort
 				return 1
 			fi
 			if ! systemctl enable "awg-quick@${SERVER_AWG_NIC}"; then
-				systemctl disable "awg-quick@${SERVER_AWG_NIC}" || true
-				systemctl stop "awg-quick@${SERVER_AWG_NIC}" || true
+				awgStateActivationAbort
 				return 1
 			fi
 			if ! replaceFileExactly "${WORK}/finalized" "${JOURNAL}/finalized" 600 ||
 				! awgStateIsFinalized "${JOURNAL}" "${SERVER_AWG_NIC}"; then
-				systemctl disable "awg-quick@${SERVER_AWG_NIC}" || true
-				systemctl stop "awg-quick@${SERVER_AWG_NIC}" || true
+				rm -f -- "${JOURNAL}/finalized" || true
+				awgStateActivationAbort
 				return 1
 			fi
+			awgStateActivationDisarm
 			awgStateJournalStep "${JOURNAL}" finalized
 			echo 'Finalized: VPN enabled at boot. Normal systemctl management no longer requires the archive/passphrase.'
 			awgStateRecordIdentityTombstone "${STAGE}" "${JOURNAL##*/}" "${WORK}" ||
 				awgStateWarnIdentityTombstone
 			echo "Journal ${JOURNAL} holds no keys (the encrypted archive is the recovery copy). Optional cleanup: --purge-state-journal ${JOURNAL##*/}."
 		else
+			awgStateActivationDisarm
 			echo 'Activated for testing only; still disabled at boot. Stop/disable it, then activate with --enable-at-boot to finalize.'
 		fi
 	else
@@ -4524,6 +4600,7 @@ function awgStateCommand() (
 	trap 'rm -rf -- "${WORK}"; releaseClientLifecycleLock' EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
+	trap 'exit 129' HUP
 	if [[ "${MODE}" == --export-state ]]; then
 		awgStateExport "${ARCHIVE}" "${WORK}"
 		exit $?

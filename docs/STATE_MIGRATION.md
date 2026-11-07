@@ -146,7 +146,8 @@ restoring a usable panel.
    inventory, checksums, params/config agreement, member names/types and size
    limits **before extraction**. Absolute paths, dot segments, duplicate
    members, symlinks, hardlinks, devices, directories and PAX overrides fail.
-   JSON duplicate keys fail too. Checksums detect inconsistent payloads; they
+   JSON duplicate keys fail too. The gzip stream is read to EOF, so a missing or corrupt
+   trailer (CRC/length) or trailing garbage fails closed even when tar parsing ends early. Checksums detect inconsistent payloads; they
    are not proof of the archive author's identity.
 2. Preflight validates target paths, free UDP port, existing interface/unit and
    installation conflicts. The archive selects its original protocol/backend;
@@ -225,6 +226,13 @@ absent) and swaps it in atomically, so a retry never restores a stale backup.
 The `steps` file is an audit log only: after the VPN starts, a failed append
 warns instead of aborting; real post-start failures (enable, finalized marker)
 stop and disable the unit and leave the migration unfinalized.
+INT/TERM/HUP during activation (from `systemctl start` until finalization, or
+until a test activation completes) likewise stops and disables the unit and
+leaves the import quarantined; rerun `--activate-state` to retry. Rollback
+cleanup runs without errexit or re-entrant signals, attempts every step even if
+logging fails, and reports an incomplete rollback explicitly. Config and receipt
+change together: if the receipt cannot be published, the previous config is
+restored so a retry verifies and continues.
 On ordinary failure/INT/TERM, newly created VPN config/instance units are removed
 and previous sysctl/module-load/modprobe files restored. Packages, apt sources,
 verified binaries/helpers, module load side effects and empty directories may

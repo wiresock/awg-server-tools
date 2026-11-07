@@ -1598,6 +1598,130 @@ if awgStateImportTransaction "$ROOT/stage" "$ROOT/journal"; then exit 12; fi
         result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
 
+    def test_gzip_missing_trailer_or_bad_crc_fails_closed(self):
+        original = self.tar.read_bytes()
+        for name, data in (('missing-trailer', original[:-8]),
+                           ('bad-crc', original[:-8] + b'\0\0\0\0' + original[-4:]),
+                           ('bad-length', original[:-4] + b'\xff\xff\xff\x7f'),
+                           ('trailing-garbage', original + b'garbage')):
+            with self.subTest(name=name):
+                self.tar.write_bytes(data)
+                self.run_helper('verify', ok=False)
+                self.run_helper('inspect', ok=False)
+                destination = self.root / ('unpacked-' + name)
+                self.run_helper('unpack', self.tar, destination, ok=False)
+                self.assertFalse(destination.exists())
+        self.tar.write_bytes(original)
+        self.run_helper('verify')
+
+    def test_rollback_survives_audit_log_failure_under_errexit(self):
+        shell = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/vpn"; AWG_SYSTEMD_UNIT_DIR="$ROOT/units"; SERVER_AWG_NIC=awg0
+AWG_SYSCTL_FILE="$ROOT/sysctl"; AWG_MODULES_LOAD_FILE="$ROOT/modules"; AWG_BT_MODPROBE_OVERRIDE="$ROOT/modprobe"
+mkdir -p "$ROOT/journal" "$AWG_SYSTEMD_UNIT_DIR"
+printf original >"$AWG_SYSCTL_FILE"
+systemctl() { return 0; }
+installAmneziaWG() {
+    mkdir -p "$AMNEZIAWG_DIR"; printf PRIVATE-KEY >"$AMNEZIAWG_DIR/awg0.conf"
+    printf mutated >"$AWG_SYSCTL_FILE"
+    rm -f "$ROOT/journal/steps"; ln -s /dev/full "$ROOT/journal/steps" # ENOSPC
+    return 1
+}
+# Plain command, not under if/!: production errexit stays active inside.
+awgStateImportTransaction "$ROOT/stage" "$ROOT/journal"
+rc=$?
+[[ $rc -ne 0 && ! -e "$AMNEZIAWG_DIR" && "$(<"$AWG_SYSCTL_FILE")" == original ]] || exit 10
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b"could not append 'rollback'", result.stderr)
+
+    def activation_harness(self):
+        return r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/vpn"; SERVER_AWG_NIC=awg0; SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"
+mkdir -p "$AMNEZIAWG_DIR" "$ROOT/work" "$ROOT/journal" "$ROOT/stage"
+printf x >"$SERVER_AWG_CONF"; printf ens3 >"$ROOT/journal/nic"
+acquireClientLifecycleLock() { return 0; }; awgStateTrustedPath() { return 0; }; sha256sum() { return 0; }
+awgStateArchive() { [[ "$1" == identity ]] && return 1; cp -- "$2" "$4"; }
+ensureAwgBackendReady() { return 0; }; validateStagedAwgConfigs() { return 0; }; sysctl() { return 0; }
+awgStateWriteReceipt() { return 0; }
+systemctl() {
+    case "$1" in
+        is-active|is-enabled) return 1 ;;
+        start) touch "$ROOT/running"; [[ "$SIG_AT" != start ]] || kill -s "$SIG" "$BASHPID" ;;
+        enable) touch "$ROOT/enabled"; [[ "$SIG_AT" != enable ]] || kill -s "$SIG" "$BASHPID" ;;
+        stop) rm -f "$ROOT/running" ;;
+        disable) rm -f "$ROOT/enabled" ;;
+    esac
+}
+replaceFileExactly() {
+    [[ "$SIG_AT" != marker || "$2" != */finalized ]] || kill -s "$SIG" "$BASHPID"
+    cp -p -- "$1" "$2"
+}
+"""
+
+    def test_signal_during_activation_stops_and_disables_unfinalized_vpn(self):
+        for sig, code in (('TERM', 143), ('INT', 130), ('HUP', 129)):
+            for point in ('start', 'enable', 'marker'):
+                with self.subTest(sig=sig, point=point):
+                    root = self.root / f'{sig}-{point}'
+                    root.mkdir()
+                    shell = self.activation_harness() + r"""
+SIG="$3"; SIG_AT="$4"
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP # As awgStateCommand.
+( awgStateReconcileImport "$ROOT/stage" "$ROOT/journal" "$ROOT/work" --activate-state --enable-at-boot ens3 )
+echo "rc=$? running=$([[ -e $ROOT/running ]] && echo y || echo n) enabled=$([[ -e $ROOT/enabled ]] && echo y || echo n) finalized=$([[ -e $ROOT/journal/finalized ]] && echo y || echo n)"
+"""
+                    result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(root), sig, point],
+                                            capture_output=True)
+                    out = result.stdout.decode()
+                    if point == 'marker':
+                        # Interrupted while publishing: either finalized (terminal) or fully undone.
+                        self.assertTrue(f'rc={code} running=n enabled=n finalized=n' in out or
+                                        'running=y enabled=y finalized=y' in out, out + result.stderr.decode())
+                    else:
+                        self.assertIn(f'rc={code} running=n enabled=n finalized=n', out, result.stderr.decode())
+        # Uninterrupted activation still finalizes and keeps the unit running.
+        root = self.root / 'clean'
+        root.mkdir()
+        shell = self.activation_harness() + r"""
+SIG=TERM SIG_AT=none
+awgStateReconcileImport "$ROOT/stage" "$ROOT/journal" "$ROOT/work" --activate-state --enable-at-boot ens3 || exit 10
+[[ -e $ROOT/running && -e $ROOT/enabled && -e $ROOT/journal/finalized ]] || exit 11
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+
+    def test_receipt_failure_restores_config_and_retry_recovers(self):
+        shell = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/vpn"; SERVER_AWG_NIC=awg0; SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"
+mkdir -p "$AMNEZIAWG_DIR" "$ROOT/journal" "$ROOT/w1" "$ROOT/w2"
+printf original >"$SERVER_AWG_CONF"; printf params >"$AMNEZIAWG_DIR/params"; printf ens3 >"$ROOT/journal/nic"
+sha256sum "$AMNEZIAWG_DIR/params" "$SERVER_AWG_CONF" >"$ROOT/journal/receipt"
+acquireClientLifecycleLock() { return 0; }; awgStateTrustedPath() { return 0; }
+awgStateArchive() { printf filtered >"$4"; } # Peer-removing reconciliation.
+systemctl() { return 1; }
+realWriteReceipt="$(declare -f awgStateWriteReceipt)"
+awgStateWriteReceipt() { return 1; } # One-shot publication failure.
+if awgStateReconcileImport "$ROOT/stage" "$ROOT/journal" "$ROOT/w1" --import-state '' ens3; then exit 10; fi
+[[ "$(<"$SERVER_AWG_CONF")" == original ]] || exit 11
+sha256sum -c --status "$ROOT/journal/receipt" || exit 12
+eval "$realWriteReceipt"
+awgStateReconcileImport "$ROOT/stage" "$ROOT/journal" "$ROOT/w2" --import-state '' ens3 || exit 13
+[[ "$(<"$SERVER_AWG_CONF")" == filtered ]] && sha256sum -c --status "$ROOT/journal/receipt" || exit 14
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+
     def test_reset_on_unfinalized_journal_points_to_forced_purge(self):
         shell = r'''
 source "$1"
