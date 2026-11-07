@@ -33,7 +33,8 @@ value containing `:` must be a valid IPv6 address, bare or in one balanced
 `[...]` pair — brackets are stripped because the installer adds them when it
 builds `Endpoint`; all-digits-and-dots values must be a dotted quad with
 octets 0-255 and no leading zeros; hostnames need 1-63-character labels with
-alphanumeric ends; the unspecified `::`/`0.0.0.0` are rejected) may be set at import, like `SERVER_PUB_NIC`, to change
+alphanumeric ends; the unspecified `::`/`0.0.0.0`, loopback (`127.0.0.0/8`, `::1`) and multicast
+(`224.0.0.0/4`, `ff00::/8`), including IPv4-mapped forms, are rejected) may be set at import, like `SERVER_PUB_NIC`, to change
 the endpoint recorded in the new params (used for profiles generated after
 cutover; restored profiles keep their own `Endpoint` lines). Import warns when
 the effective value is an IP literal, because such profiles do not follow a DNS
@@ -454,13 +455,7 @@ additions use the real `sqlite3` CLI (skipped if absent; CI installs it) to
 export a live WAL-mode panel DB and import a WAL-header DB without sidecars,
 and cover the config-replace failure window, `host:port` rejection, inherited
 subshell traps, refusal without RAM staging and the incomplete-rollback block.
-Round 13 verified on a locally built GNU bash 5.1.16 (signature-checked; the
-Debian 11 / Ubuntu 22.04 major version) that a subshell shows the parent's
-traps exactly like 5.2 and that the `trap - USR2` guard clears that display
-while keeping ignored signals; the whole suite passes with bash 5.1.16 and the
-sqlite 3.34.1 CLI (Debian 11), including `.backup` + `journal_mode=DELETE` on a
-live WAL DB. CI itself runs the distro bash/sqlite only. The suite passes
-under Python 3.9, 3.10 and 3.13.
+The suite passes under Python 3.9, 3.10 and 3.13.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.
 CI installs age and runs this suite.

@@ -1970,7 +1970,10 @@ for value in vpn.example.test 203.0.113.7 2001:db8::1 '[2001:db8::1]' ::ffff:192
              ':::' 'a b' -bad bad- '[vpn.example.test]' '' \
              :: '[::]' ::0 0:0:0:0:0:0:0:0 ::ffff:0.0.0.0 0.0.0.0 '[2001:db8::1' '2001:db8::1]' '[[2001:db8::1]]' \
              256.1.1.1 1.2.3 1.2.3.4.5 01.2.3.4 1.2.3.4. 10.0.0.255 0.1.2.3 \
-             a..b .a.b a.b. a.-b.c a-.b.c "$(printf 'a%.0s' {1..64}).test" "$(printf 'a%.0s' {1..63}).test" xn--d1acufc.example 1.2.3.4a; do
+             a..b .a.b a.b. a.-b.c a-.b.c "$(printf 'a%.0s' {1..64}).test" "$(printf 'a%.0s' {1..63}).test" xn--d1acufc.example 1.2.3.4a \
+             127.0.0.1 127.255.255.254 ::1 '[::1]' ::ffff:127.0.0.1 224.0.0.1 239.255.255.255 ff02::1 ff0e::1 ::ffff:224.0.0.1 \
+             223.255.255.255 240.0.0.1 126.0.0.1 128.0.0.1 fe80::1 fd00::1 ::ffff:203.0.113.7 ::2; do
+    awgStateNormalizePubHost "$value" >/dev/null; echo "rc <$value> $?"
     if out="$(awgStateNormalizePubHost "$value")"; then echo "ok <$value> -> <$out>"; else echo "bad <$value>"; fi
 done
 """
@@ -1988,7 +1991,14 @@ done
                      'ok <10.0.0.255> -> <10.0.0.255>', 'ok <0.1.2.3> -> <0.1.2.3>',
                      'bad <a..b>', 'bad <.a.b>', 'bad <a.b.>', 'bad <a.-b.c>', 'bad <a-.b.c>',
                      'bad <' + 'a' * 64 + '.test>', 'ok <' + 'a' * 63 + '.test> -> <' + 'a' * 63 + '.test>',
-                     'ok <xn--d1acufc.example> -> <xn--d1acufc.example>', 'ok <1.2.3.4a> -> <1.2.3.4a>'):
+                     'ok <xn--d1acufc.example> -> <xn--d1acufc.example>', 'ok <1.2.3.4a> -> <1.2.3.4a>',
+                     'ok <223.255.255.255> -> <223.255.255.255>', 'ok <240.0.0.1> -> <240.0.0.1>',
+                     'ok <126.0.0.1> -> <126.0.0.1>', 'ok <128.0.0.1> -> <128.0.0.1>', 'ok <fe80::1> -> <fe80::1>',
+                     'ok <fd00::1> -> <fd00::1>', 'ok <::ffff:203.0.113.7> -> <::ffff:203.0.113.7>', 'ok <::2> -> <::2>',
+                     'bad <127.0.0.1>', 'bad <127.255.255.254>', 'bad <::1>', 'bad <[::1]>', 'bad <::ffff:127.0.0.1>',
+                     'bad <224.0.0.1>', 'bad <239.255.255.255>', 'bad <ff02::1>', 'bad <ff0e::1>', 'bad <::ffff:224.0.0.1>',
+                     'rc <127.0.0.1> 2', 'rc <::1> 2', 'rc <[::1]> 2', 'rc <::ffff:127.0.0.1> 2', 'rc <224.0.0.1> 2',
+                     'rc <ff02::1> 2', 'rc <::ffff:224.0.0.1> 2', 'rc <::> 1', 'rc <0.0.0.0> 1', 'rc <vpn.example.test:51820> 1'):
             self.assertIn(line + '\n', out, result.stderr.decode())
 
     def test_apt_ipv4_in_subshell_never_runs_inherited_parent_traps(self):

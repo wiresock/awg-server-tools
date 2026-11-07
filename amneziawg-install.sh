@@ -4430,6 +4430,7 @@ function awgStateWarnMtuBudget() { # <server.conf>
 # host:port is rejected; a value with ':' must be a bare or bracketed IPv6
 # address. Brackets are stripped: the installer adds them itself when it
 # builds Endpoint="[v6]:port", exactly as for interactive installs.
+# Returns 1 for malformed/unspecified values, 2 for loopback/multicast.
 function awgStateNormalizePubHost() { # <value>; prints the normalized value
 	local VALUE="$1" LABEL OCTET
 	local -a PARTS
@@ -4441,11 +4442,18 @@ function awgStateNormalizePubHost() { # <value>; prints the normalized value
 	fi
 	if [[ "${VALUE}" == *:* ]]; then
 		[[ "${VALUE}" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
-		# Valid IPv6, not the unspecified address (::, ::0, ::ffff:0.0.0.0 ...).
+		# Valid IPv6; unspecified (::, ::ffff:0.0.0.0 ...) is invalid (1);
+		# loopback/multicast, also IPv4-mapped, cannot be an endpoint (2).
 		python3 -I -c 'import ipaddress, sys
-a = ipaddress.IPv6Address(sys.argv[1])
+try:
+    a = ipaddress.IPv6Address(sys.argv[1])
+except ValueError:
+    sys.exit(1)
 m = a.ipv4_mapped
-sys.exit(1 if a.is_unspecified or (m is not None and m.is_unspecified) else 0)' "${VALUE}" 2>/dev/null || return 1
+if a.is_unspecified or (m is not None and m.is_unspecified):
+    sys.exit(1)
+if any(x is not None and (x.is_loopback or x.is_multicast) for x in (a, m)):
+    sys.exit(2)' "${VALUE}" 2>/dev/null || return $?
 	elif [[ "${VALUE}" =~ ^[0-9.]+$ ]]; then
 		# All digits and dots: must be a dotted-quad IPv4, octets 0-255, no
 		# leading zeros (ambiguous octal), not the unspecified 0.0.0.0.
@@ -4454,6 +4462,8 @@ sys.exit(1 if a.is_unspecified or (m is not None and m.is_unspecified) else 0)' 
 		for OCTET in "${PARTS[@]}"; do
 			[[ "${OCTET}" =~ ^(0|[1-9][0-9]{0,2})$ ]] && ((10#${OCTET} <= 255)) || return 1
 		done
+		# Loopback 127.0.0.0/8 and multicast 224.0.0.0/4.
+		((PARTS[0] != 127 && (PARTS[0] < 224 || PARTS[0] > 239))) || return 2
 	else
 		# DNS hostname: 1-253 chars; labels 1-63 chars, alnum at both ends,
 		# letters/digits/hyphens inside, no empty labels. A trailing root dot
@@ -4787,7 +4797,11 @@ function awgStateCommand() (
 	# their own Endpoint lines unchanged.
 	if [[ -n "${PUB_IP}" ]]; then
 		PUB_IP="$(awgStateNormalizePubHost "${PUB_IP}")" || {
-			echo 'ERROR: SERVER_PUB_IP must be a hostname, IPv4 or IPv6 address (no port).' >&2
+			if [[ $? -eq 2 ]]; then
+				echo 'ERROR: SERVER_PUB_IP must not be a loopback or multicast address; clients cannot reach the server there.' >&2
+			else
+				echo 'ERROR: SERVER_PUB_IP must be a hostname, IPv4 or IPv6 address (no port).' >&2
+			fi
 			exit 1
 		}
 		# shellcheck disable=SC2030 # consumed only inside this awgStateCommand subshell (install hook, serializeParams)
