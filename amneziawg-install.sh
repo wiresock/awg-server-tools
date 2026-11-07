@@ -3121,6 +3121,13 @@ function validateClientTransportBudget() { # [assumed outer budget, default1500]
 }
 
 function validateFreshInstallMtu() {
+	# A state import restores an existing, already-deployed MTU/S4 pair exactly;
+	# fresh-install admission does not apply. Keep syntax validation; the budget
+	# mismatch is reported as a warning by awgStateWarnMtuBudget.
+	if [[ -n "${_AWG_STATE_IMPORT_DIR:-}" ]]; then
+		validateClientMtu
+		return
+	fi
 	validateClientTransportBudget "$(freshOuterMtuBudget)"
 }
 
@@ -4123,15 +4130,24 @@ function awgStateImportTransaction() (
 	local STAGE="$1" JOURNAL="$2" COMMITTED=0 CONFIG_EXISTED=0 FILE INDEX=0
 	local -a TRACKED=("${AWG_SYSCTL_FILE}" "${AWG_MODULES_LOAD_FILE}" "${AWG_BT_MODPROBE_OVERRIDE}")
 	[[ -d "${AMNEZIAWG_DIR}" ]] && CONFIG_EXISTED=1
-	mkdir -p "${JOURNAL}/before" || exit 1
+	# Take a complete fresh before-image for THIS attempt (absence = no slot
+	# file), then swap it in. A failed snapshot keeps the previous image intact;
+	# a retry never restores a stale backup of a since-removed file.
+	rm -rf --one-file-system -- "${JOURNAL}/before.new" "${JOURNAL}/before.old" || exit 1
+	mkdir -p "${JOURNAL}/before.new" || exit 1
 	for FILE in "${TRACKED[@]}"; do
 		[[ ! -L "${FILE}" ]] || exit 1
 		if [[ -e "${FILE}" ]]; then
 			[[ -f "${FILE}" ]] || exit 1
-			cp -p -- "${FILE}" "${JOURNAL}/before/${INDEX}" || exit 1
+			cp -p -- "${FILE}" "${JOURNAL}/before.new/${INDEX}" || exit 1
 		fi
 		INDEX=$((INDEX + 1))
 	done
+	if [[ -e "${JOURNAL}/before" ]]; then
+		mv -T -- "${JOURNAL}/before" "${JOURNAL}/before.old" || exit 1
+	fi
+	mv -T -- "${JOURNAL}/before.new" "${JOURNAL}/before" || exit 1
+	rm -rf --one-file-system -- "${JOURNAL}/before.old" || exit 1
 	function stateImportFinish() {
 		local STATUS=$? FILE INDEX=0
 		if (( ! COMMITTED )); then
@@ -4262,6 +4278,13 @@ function awgStateRecordIdentityTombstone() { # <stage> <digest> <work>
 	replaceFileExactly "${3}/identity" "${DIR}/${IDENTITY}" 600
 }
 
+# Append an audit-only step; the receipt/finalized marker carry state.
+function awgStateJournalStep() { # <journal> <step>
+	if ! { printf '%s\n' "$2" >>"$1/steps"; } 2>/dev/null; then
+		echo "WARNING: could not append '$2' to $1/steps (audit log only; state is unaffected)." >&2
+	fi
+}
+
 function awgStateWarnIdentityTombstone() {
 	echo "WARNING: could not write the server-identity tombstone in $(awgStateIdentityDir)/. The migration IS finalized, but older archives of this server are NOT blocked from a later import. Fix the cause and rerun --activate-state <same-archive> to retry the write." >&2
 }
@@ -4362,11 +4385,11 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 	shopt -s nullglob dotglob
 	for ENTRY in "${JOURNAL}/"*; do
 		case "${ENTRY##*/}" in
-			before|recovery|receipt|nic|steps|finalized) ;;
+			before|before.new|before.old|recovery|receipt|nic|steps|finalized) ;;
 			*) echo 'ERROR: unexpected journal entry; refusing purge.' >&2; exit 1 ;;
 		esac
 	done
-	for ENTRY in before recovery receipt nic steps; do
+	for ENTRY in before before.new before.old recovery receipt nic steps; do
 		rm -rf --one-file-system -- "${JOURNAL:?}/${ENTRY:?}" || exit 1
 	done
 	if (( FINALIZED )) && [[ "${OPTION}" != --reset-finalized ]]; then
@@ -4446,10 +4469,13 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 	if [[ "${MODE}" == --activate-state ]]; then
 		if ! systemctl start "awg-quick@${SERVER_AWG_NIC}"; then
 			systemctl stop "awg-quick@${SERVER_AWG_NIC}" || true
-			printf '%s\n' activation-failed >>"${JOURNAL}/steps"
+			awgStateJournalStep "${JOURNAL}" activation-failed
 			return 1
 		fi
-		printf '%s\n' activated >>"${JOURNAL}/steps" || return 1
+		# After a successful start, every fatal path below stops (and, once
+		# enabled, disables) the unit. The steps log is audit-only: its append
+		# failures warn and never strand a running, unfinalized VPN.
+		awgStateJournalStep "${JOURNAL}" activated
 		if [[ "${OPTION}" == --enable-at-boot ]]; then
 			if ! printf '%s\n' "${SERVER_AWG_NIC}" >"${WORK}/finalized"; then
 				systemctl stop "awg-quick@${SERVER_AWG_NIC}" || true
@@ -4466,7 +4492,7 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 				systemctl stop "awg-quick@${SERVER_AWG_NIC}" || true
 				return 1
 			fi
-			printf '%s\n' finalized >>"${JOURNAL}/steps" || echo 'WARNING: finalized marker saved but journal step append failed.' >&2
+			awgStateJournalStep "${JOURNAL}" finalized
 			echo 'Finalized: VPN enabled at boot. Normal systemctl management no longer requires the archive/passphrase.'
 			awgStateRecordIdentityTombstone "${STAGE}" "${JOURNAL##*/}" "${WORK}" ||
 				awgStateWarnIdentityTombstone

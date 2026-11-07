@@ -1510,6 +1510,94 @@ if awgStateRecordIdentityTombstone "$STAGE" "$D2" "$ROOT/work"; then exit 15; fi
         branch = SOURCE.split("Retry a server-identity tombstone write", 1)[1][:300]
         self.assertIn('awgStateRecordIdentityTombstone', branch)
 
+    def test_import_entry_points_skip_fresh_mtu_admission_for_both_backends(self):
+        shell = r"""
+source "$1"
+ensureSupportedInstallDistro() { return 0; }
+selectFreshInstallBackend() { return 0; }
+selectFreshInstallImitation() { return 0; }
+freshOuterMtuBudget() { printf 1400; }
+installQuestions() { return 0; }
+checkBoringtunHostSupport() { return 0; }
+# First host mutation after admission on both backends: stop there.
+enable_apt_ipv4() { echo REACHED-INSTALL >&2; exit 42; }
+apt-get() { echo REACHED-INSTALL >&2; exit 42; }
+OS=debian CLIENT_MTU=1380 SERVER_AWG_S4=20
+for backend in kernel boringtun; do
+    AWG_BACKEND=$backend _AWG_STATE_IMPORT_DIR=/staged; (installAmneziaWG); echo "$backend import rc=$?"
+    AWG_BACKEND=$backend _AWG_STATE_IMPORT_DIR=; (installAmneziaWG); echo "$backend fresh rc=$?"
+done
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT)], capture_output=True)
+        out = result.stdout.decode()
+        for backend in ('kernel', 'boringtun'):
+            self.assertIn(f'{backend} import rc=42', out, result.stderr.decode())
+            self.assertIn(f'{backend} fresh rc=1', out, result.stderr.decode())
+        self.assertEqual(result.stderr.count(b'exceeds 1300'), 2)  # Fresh installs still refuse.
+
+    def test_post_start_journal_append_failure_does_not_strand_running_vpn(self):
+        journal = self.root / 'journal'
+        (self.root / 'stage').mkdir()
+        shell = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/vpn"; SERVER_AWG_NIC=awg0; AWG_STATE_JOURNAL_DIR="$ROOT/journals"
+mkdir -p "$AMNEZIAWG_DIR" "$ROOT/work" "$ROOT/journal"; printf x >"$AMNEZIAWG_DIR/awg0.conf"
+SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"; printf ens3 >"$ROOT/journal/nic"
+acquireClientLifecycleLock() { return 0; }
+awgStateTrustedPath() { return 0; }
+sha256sum() { return 0; }
+awgStateArchive() { [[ "$1" == identity ]] && return 1; cp -- "$2" "$4"; }
+ensureAwgBackendReady() { return 0; }
+validateStagedAwgConfigs() { return 0; }
+sysctl() { return 0; }
+awgStateWriteReceipt() { return 0; }
+systemctl() {
+    printf '%s\n' "$1" >>"$ROOT/systemctl.log"
+    case "$1" in
+        is-active|is-enabled) return 1 ;;
+        start) touch "$ROOT/running"; rm -f "$ROOT/journal/steps"; ln -s /dev/full "$ROOT/journal/steps" ;;
+        stop) rm -f "$ROOT/running" ;;
+        enable) [[ "${FAIL_ENABLE:-0}" == 0 ]] || return 1; touch "$ROOT/enabled" ;;
+        disable) rm -f "$ROOT/enabled" ;;
+    esac
+}
+# ENOSPC on the audit log right after start: finalization still completes.
+awgStateReconcileImport "$ROOT/stage" "$ROOT/journal" "$ROOT/work" --activate-state --enable-at-boot ens3 || exit 10
+[[ -e "$ROOT/running" && -e "$ROOT/enabled" && "$(<"$ROOT/journal/finalized")" == awg0 ]] || exit 11
+# A real post-start failure (enable) stops and disables; nothing is finalized.
+rm -f "$ROOT/journal/finalized" "$ROOT/running" "$ROOT/enabled"
+if FAIL_ENABLE=1 awgStateReconcileImport "$ROOT/stage" "$ROOT/journal" "$ROOT/work" --activate-state --enable-at-boot ens3; then exit 12; fi
+[[ ! -e "$ROOT/running" && ! -e "$ROOT/enabled" && ! -e "$ROOT/journal/finalized" ]] || exit 13
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b"could not append 'activated'", result.stderr)
+
+    def test_retry_rollback_uses_fresh_before_image_including_absence(self):
+        shell = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/vpn"; AWG_SYSTEMD_UNIT_DIR="$ROOT/units"; SERVER_AWG_NIC=awg0
+AWG_SYSCTL_FILE="$ROOT/sysctl"; AWG_MODULES_LOAD_FILE="$ROOT/modules"; AWG_BT_MODPROBE_OVERRIDE="$ROOT/modprobe"
+mkdir -p "$ROOT/journal" "$AWG_SYSTEMD_UNIT_DIR"
+printf 'original\n' >"$AWG_SYSCTL_FILE"; printf 'mods\n' >"$AWG_MODULES_LOAD_FILE"
+systemctl() { return 0; }
+installAmneziaWG() { mkdir -p "$AMNEZIAWG_DIR"; printf 'attempt\n' | tee "$AWG_SYSCTL_FILE" "$AWG_MODULES_LOAD_FILE" "$AWG_BT_MODPROBE_OVERRIDE" >/dev/null; return 1; }
+if awgStateImportTransaction "$ROOT/stage" "$ROOT/journal"; then exit 10; fi
+[[ "$(<"$AWG_SYSCTL_FILE")" == original && ! -e "$AWG_BT_MODPROBE_OVERRIDE" ]] || exit 11
+rm "$AWG_SYSCTL_FILE"                 # Operator change between attempts.
+printf 'new-baseline\n' >"$AWG_BT_MODPROBE_OVERRIDE"
+if awgStateImportTransaction "$ROOT/stage" "$ROOT/journal"; then exit 12; fi
+[[ ! -e "$AWG_SYSCTL_FILE" ]] || exit 13 # Absence preserved, not resurrected.
+[[ "$(<"$AWG_MODULES_LOAD_FILE")" == mods && "$(<"$AWG_BT_MODPROBE_OVERRIDE")" == new-baseline ]] || exit 14
+[[ ! -e "$ROOT/journal/before.new" && ! -e "$ROOT/journal/before.old" ]] || exit 15
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+
     def test_reset_on_unfinalized_journal_points_to_forced_purge(self):
         shell = r'''
 source "$1"

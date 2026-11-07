@@ -34,7 +34,9 @@ cutover; restored profiles keep their own `Endpoint` lines). Import warns when
 the effective value is an IP literal, because such profiles do not follow a DNS
 switch. Import also warns when the restored client MTU or the server
 `[Interface] MTU` exceeds the new host's outer MTU budget (uplink route/NIC MTU,
-capped at 1500) with the archived S4; values are not rewritten automatically.
+capped at 1500) with the archived S4; values are not rewritten automatically. Import
+is **not** subject to fresh-install MTU admission: a deployed MTU/S4 pair is
+restored as is (with the warning), while normal fresh installs still refuse it.
 
 `age` prompts for the archive passphrase on the controlling terminal, confirming
 it on export. There is no password flag, environment variable, stdin protocol,
@@ -218,6 +220,11 @@ restoring a usable panel.
    between enabling and recording the marker needs operator inspection.
 
 The journal is `/var/lib/amneziawg-install/state-imports/<manifest-digest>/`.
+Each import attempt takes a fresh `before/` image (a missing file is recorded as
+absent) and swaps it in atomically, so a retry never restores a stale backup.
+The `steps` file is an audit log only: after the VPN starts, a failed append
+warns instead of aborting; real post-start failures (enable, finalized marker)
+stop and disable the unit and leave the migration unfinalized.
 On ordinary failure/INT/TERM, newly created VPN config/instance units are removed
 and previous sysctl/module-load/modprobe files restored. Packages, apt sources,
 verified binaries/helpers, module load side effects and empty directories may
