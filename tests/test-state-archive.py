@@ -33,6 +33,7 @@ KEYS = ' '.join(re.search(r'^' + name + r'="([^"]+)"', SOURCE, re.M)[1]
 KEY = base64.b64encode(b'A' * 32).decode()
 PUB = base64.b64encode(b'B' * 32).decode()
 PEER = base64.b64encode(b'C' * 32).decode()
+INSTALLER_LOCK_FN = re.compile(r'^readonly INSTALLER_LIFECYCLE_LOCK_DIR=.*?^}\n', re.M | re.S)
 
 
 def state_fixture():
@@ -1383,7 +1384,14 @@ chmod 755 "$ROOT/ro"
         if os.geteuid() == 0:
             self.skipTest('root bypasses the read-only directory permission')
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
-        self.assertIn(b'using the web panel lifecycle lock only', result.stderr)
+        # Non-TTY callers (the panel helper) get one short, greppable line.
+        self.assertIn(b'NOTICE: lifecycle-lock-fallback=panel', result.stderr)
+        self.assertNotIn(b'WARNING: cannot create', result.stderr)
+        install_copy = INSTALLER_LOCK_FN.search((ROOT / 'amneziawg-web/scripts/amneziawg-web-install.sh').read_text())
+        upgrade_copy = INSTALLER_LOCK_FN.search((ROOT / 'amneziawg-web/scripts/amneziawg-web-upgrade.sh').read_text())
+        self.assertIsNotNone(install_copy)
+        self.assertEqual(install_copy[0], upgrade_copy[0])
+        self.assertIn('INSTALLER_LIFECYCLE_LOCK_DIR="/var/lib/amneziawg-install/lifecycle"', SOURCE)
         for script in ('amneziawg-web-install.sh', 'amneziawg-web-upgrade.sh'):
             text = (ROOT / 'amneziawg-web/scripts' / script).read_text()
             self.assertIn('INSTALLER_LIFECYCLE_LOCK_DIR="/var/lib/amneziawg-install/lifecycle"', text)
@@ -1470,6 +1478,37 @@ awgStateDropIdentityTombstones "$DIGEST" || exit 18
         result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root), str(stage)], capture_output=True)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
         self.assertIn(b'--reset-state-journal ' + b'b' * 64, result.stderr)
+
+    def test_identity_tombstone_write_failure_is_retried_and_verifier_failure_fails(self):
+        stage = self.root / 'stage'
+        self.run_helper('unpack', self.tar, stage)
+        shell = r'''
+set -uo pipefail
+source "$1"
+ROOT="$2"; STAGE="$3"
+AWG_STATE_JOURNAL_DIR="$ROOT/journals"
+mkdir -p "$AWG_STATE_JOURNAL_DIR" "$ROOT/work"
+awgStateTrustedPath() { return 0; }
+D1="$(printf 'd%.0s' {1..64})"; D2="$(printf 'e%.0s' {1..64})"
+: >"$AWG_STATE_JOURNAL_DIR/identities" # Blocks mkdir: write fails.
+if awgStateRecordIdentityTombstone "$STAGE" "$D1" "$ROOT/work"; then exit 10; fi
+awgStateWarnIdentityTombstone
+rm "$AWG_STATE_JOURNAL_DIR/identities"
+awgStateRecordIdentityTombstone "$STAGE" "$D1" "$ROOT/work" || exit 11 # Retry succeeds.
+awgStateRecordIdentityTombstone "$STAGE" "$D2" "$ROOT/work" || exit 12 # Not newer: kept.
+grep -q " $D1\$" "$AWG_STATE_JOURNAL_DIR"/identities/* || exit 13
+# A verifier that prints plausible output but fails must not be trusted.
+awgStateArchive() { printf '%s 2026-01-01T00:00:00Z\n' "$D1"; return 1; }
+if awgStateCheckIdentityTombstone "$STAGE"; then exit 14; fi
+if awgStateRecordIdentityTombstone "$STAGE" "$D2" "$ROOT/work"; then exit 15; fi
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root), str(stage)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'older archives of this server are NOT blocked', result.stderr)
+        self.assertIn(b'rerun --activate-state', result.stderr)
+        # The finalized rerun path retries the write (outside --dry-run).
+        branch = SOURCE.split("Retry a server-identity tombstone write", 1)[1][:300]
+        self.assertIn('awgStateRecordIdentityTombstone', branch)
 
     def test_reset_on_unfinalized_journal_points_to_forced_purge(self):
         shell = r'''

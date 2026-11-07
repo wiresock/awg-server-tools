@@ -1140,6 +1140,9 @@ commit_staged_artifacts() {
 # directory lock. The panel's privileged helper runs that script inside the
 # service's ProtectSystem=strict view, where /var/lib is read-only, so create
 # the directory here (as root, outside the sandbox). Never replace a symlink.
+# Keep in sync with ensure_installer_lifecycle_lock_dir in amneziawg-web-install.sh and with
+# INSTALLER_LIFECYCLE_LOCK_DIR in amneziawg-install.sh (tests/test-state-archive.py
+# asserts the copies are identical).
 readonly INSTALLER_LIFECYCLE_LOCK_DIR="/var/lib/amneziawg-install/lifecycle"
 ensure_installer_lifecycle_lock_dir() {
     local parent="${INSTALLER_LIFECYCLE_LOCK_DIR%/*}"
