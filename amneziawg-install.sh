@@ -213,6 +213,7 @@ AMNEZIA_PPA_ARCHITECTURE=""
 _APT_IPV4_PREV_TRAP_EXIT=""
 _APT_IPV4_PREV_TRAP_INT=""
 _APT_IPV4_PREV_TRAP_TERM=""
+_APT_IPV4_PREV_TRAP_HUP=""
 # Return success when gai.conf has an active (uncommented) IPv4 precedence
 # rule for ::ffff:0:0/96 with value 100; commented defaults must not match.
 gai_conf_has_active_ipv4_rule() {
@@ -246,12 +247,14 @@ enable_apt_ipv4() {
 	_APT_IPV4_PREV_TRAP_EXIT="$(trap -p EXIT || true)"
 	_APT_IPV4_PREV_TRAP_INT="$(trap -p INT || true)"
 	_APT_IPV4_PREV_TRAP_TERM="$(trap -p TERM || true)"
+	_APT_IPV4_PREV_TRAP_HUP="$(trap -p HUP || true)"
 	# Install traps that clean up *and* invoke any prior handler, so
 	# pre-existing cleanup logic still runs even if the script exits
 	# while IPv4 forcing is active.
 	trap '_cleanup_apt_ipv4_and_chain EXIT' EXIT
 	trap '_cleanup_apt_ipv4_and_chain INT'  INT
 	trap '_cleanup_apt_ipv4_and_chain TERM' TERM
+	trap '_cleanup_apt_ipv4_and_chain HUP'  HUP
 }
 # Internal: remove the APT ForceIPv4 config and revert gai.conf changes.
 _remove_ipv4_overrides() {
@@ -295,16 +298,27 @@ _cleanup_apt_ipv4_and_chain() {
 	if [[ -n "${prev_trap}" ]]; then
 		# Re-install the previous trap (e.g. trap -- 'handler' EXIT).
 		eval "${prev_trap}"
-		# Re-deliver the signal so bash invokes the just-restored handler.
 		if [[ "${sig}" == "EXIT" ]]; then
-			# For EXIT: exiting re-fires the EXIT trap with the original status.
+			# Bash does not run a newly installed EXIT trap while it is already
+			# exiting, so invoke the previous handler directly, with $? set to
+			# the original status, then exit with that status. trap -p output
+			# is eval-safe: "trap -- 'body' EXIT"; $3 is the body.
+			local prev_body
+			eval "set -- ${prev_trap}"
+			prev_body="${3-}"
+			if [[ -n "${prev_body}" ]]; then
+				( exit "${_saved_status}" )
+				eval "${prev_body}"
+			fi
 			exit "${_saved_status}"
 		else
-			# For INT/TERM: re-raise the signal to invoke the restored handler.
-			kill -s "${sig}" "$$" 2>/dev/null || {
+			# For INT/TERM/HUP: re-raise the signal in THIS (sub)shell, not
+			# the top-level $$, so the restored handler runs where it belongs.
+			kill -s "${sig}" "${BASHPID}" 2>/dev/null || {
 				case "${sig}" in
 					INT)  exit 130 ;;  # 128 + SIGINT(2)
 					TERM) exit 143 ;;  # 128 + SIGTERM(15)
+					HUP)  exit 129 ;;  # 128 + SIGHUP(1)
 				esac
 			}
 		fi
@@ -313,12 +327,13 @@ _cleanup_apt_ipv4_and_chain() {
 		if [[ "${sig}" == "EXIT" ]]; then
 			# Preserve the original exit status when no prior handler exists.
 			exit "${_saved_status}"
-		elif [[ "${sig}" == INT || "${sig}" == TERM ]]; then
+		elif [[ "${sig}" == INT || "${sig}" == TERM || "${sig}" == HUP ]]; then
 			# Re-raise the signal so default termination semantics are preserved.
-			kill -s "${sig}" "$$" 2>/dev/null || {
+			kill -s "${sig}" "${BASHPID}" 2>/dev/null || {
 				case "${sig}" in
 					INT)  exit 130 ;;  # 128 + SIGINT(2)
 					TERM) exit 143 ;;  # 128 + SIGTERM(15)
+					HUP)  exit 129 ;;  # 128 + SIGHUP(1)
 				esac
 			}
 		fi
@@ -341,6 +356,11 @@ disable_apt_ipv4() {
 		eval "${_APT_IPV4_PREV_TRAP_TERM}"
 	else
 		trap - TERM
+	fi
+	if [[ -n "${_APT_IPV4_PREV_TRAP_HUP:-}" ]]; then
+		eval "${_APT_IPV4_PREV_TRAP_HUP}"
+	else
+		trap - HUP
 	fi
 }
 
@@ -4194,30 +4214,39 @@ function awgStateImportTransaction() (
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
 	trap 'exit 129' HUP
-	printf '%s\n' install-packages >>"${JOURNAL}/steps"
-	_AWG_STATE_IMPORT_DIR="${STAGE}"
-	# Run normally rather than under `if`/`!`: preserve failure propagation in the
-	# install functions. The outer transaction handles their exits and failures.
-	set -e
-	installAmneziaWG
-	printf '%s\n' validate-installed-protocol >>"${JOURNAL}/steps"
-	ensureAwgBackendReady 0
-	mkdir -p "${STAGE}/validate"
-	validateStagedAwgConfigs "${STAGE}/validate" --label imported-server "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
-	# Installation can take minutes; refresh expiration at import completion too.
-	awgStateArchive reconcile "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" "${STAGE}" "${STAGE}/post-install.conf"
-	replaceFileExactly "${STAGE}/post-install.conf" "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" 600
-	printf '%s\n' restore-complete-quarantined >>"${JOURNAL}/steps"
-	# The encrypted archive IS the recovery copy: never keep plaintext keys,
-	# panel DB/env or proxy config in the journal. Never source env.conf, start
-	# the panel, replay the mail queue or expose a proxy listener.
-	# Receipt includes the target NIC and archive identity, plus target file hashes.
-	printf '%s\n' "${SERVER_PUB_NIC}" >"${JOURNAL}/nic"
-	sha256sum "${AMNEZIAWG_DIR}/params" "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" >"${JOURNAL}/receipt"
-	for FILE in "${AMNEZIAWG_DIR}/clients/"*.conf; do
-		[[ ! -f "${FILE}" ]] || sha256sum "${FILE}" >>"${JOURNAL}/receipt"
-	done
-	printf '%s\n' committed >>"${JOURNAL}/steps"
+	# The install/validation work runs in its own subshell. Nested helpers
+	# (e.g. the APT IPv4 scope) may replace EXIT/INT/TERM/HUP traps there; they
+	# can never replace or bypass this transaction's rollback trap. Run it as a
+	# plain command (not under `if`/`!`) so errexit propagates inside it.
+	(
+		trap 'exit 130' INT
+		trap 'exit 143' TERM
+		trap 'exit 129' HUP
+		set -e
+		printf '%s\n' install-packages >>"${JOURNAL}/steps"
+		_AWG_STATE_IMPORT_DIR="${STAGE}"
+		installAmneziaWG
+		printf '%s\n' validate-installed-protocol >>"${JOURNAL}/steps"
+		ensureAwgBackendReady 0
+		mkdir -p "${STAGE}/validate"
+		validateStagedAwgConfigs "${STAGE}/validate" --label imported-server "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+		# Installation can take minutes; refresh expiration at import completion too.
+		awgStateArchive reconcile "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" "${STAGE}" "${STAGE}/post-install.conf"
+		replaceFileExactly "${STAGE}/post-install.conf" "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" 600
+		printf '%s\n' restore-complete-quarantined >>"${JOURNAL}/steps"
+		# The encrypted archive IS the recovery copy: never keep plaintext keys,
+		# panel DB/env or proxy config in the journal. Never source env.conf, start
+		# the panel, replay the mail queue or expose a proxy listener.
+		# Receipt includes the target NIC and archive identity, plus target file hashes.
+		printf '%s\n' "${SERVER_PUB_NIC}" >"${JOURNAL}/nic"
+		sha256sum "${AMNEZIAWG_DIR}/params" "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" >"${JOURNAL}/receipt"
+		for FILE in "${AMNEZIAWG_DIR}/clients/"*.conf; do
+			[[ ! -f "${FILE}" ]] || sha256sum "${FILE}" >>"${JOURNAL}/receipt"
+		done
+		printf '%s\n' committed >>"${JOURNAL}/steps"
+	)
+	FILE=$?
+	((FILE == 0)) || exit "${FILE}"
 	COMMITTED=1
 )
 
@@ -4517,19 +4546,37 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 	fi
 	# Config and receipt change together: on receipt failure restore the
 	# previous config, so the unchanged old receipt still verifies on retry.
-	local CONFIG_CHANGED=0
+	# INT/TERM/HUP are deferred (recorded, not lost) across this window, so
+	# an interruption can never separate the config from its receipt.
+	local CONFIG_CHANGED=0 PENDING_SIGNAL=""
+	trap 'PENDING_SIGNAL=130' INT
+	trap 'PENDING_SIGNAL=143' TERM
+	trap 'PENDING_SIGNAL=129' HUP
 	if ! cmp -s -- "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}"; then
-		cp -p -- "${SERVER_AWG_CONF}" "${WORK}/previous.conf" || return 1
-		replaceFileExactly "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}" 600 || return 1
+		if ! cp -p -- "${SERVER_AWG_CONF}" "${WORK}/previous.conf" ||
+			! replaceFileExactly "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}" 600; then
+			awgStateActivationDisarm
+			[[ -z "${PENDING_SIGNAL}" ]] || exit "${PENDING_SIGNAL}"
+			return 1
+		fi
 		CONFIG_CHANGED=1
 	fi
 	if ! awgStateWriteReceipt "${JOURNAL}" "${WORK}/receipt"; then
 		if ((CONFIG_CHANGED)) && ! replaceFileExactly "${WORK}/previous.conf" "${SERVER_AWG_CONF}" 600; then
 			echo "ERROR: receipt publication failed and the previous ${SERVER_AWG_CONF} could not be restored; restore it from the encrypted archive before retrying." >&2
-			return 1
+		else
+			echo 'ERROR: could not publish the import receipt; the previous config was kept. Fix the cause (e.g. free space) and rerun.' >&2
 		fi
-		echo 'ERROR: could not publish the import receipt; the previous config was kept. Fix the cause (e.g. free space) and rerun.' >&2
+		awgStateActivationDisarm
+		[[ -z "${PENDING_SIGNAL}" ]] || exit "${PENDING_SIGNAL}"
 		return 1
+	fi
+	# Config and receipt are committed together; now honour a deferred signal
+	# (before any service start).
+	awgStateActivationDisarm
+	if [[ -n "${PENDING_SIGNAL}" ]]; then
+		echo 'Interrupted after a consistent config/receipt update; the VPN was not started.' >&2
+		exit "${PENDING_SIGNAL}"
 	fi
 	awgStateJournalStep "${JOURNAL}" reconciled
 	if [[ "${MODE}" == --activate-state ]]; then

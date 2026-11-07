@@ -232,7 +232,11 @@ leaves the import quarantined; rerun `--activate-state` to retry. Rollback
 cleanup runs without errexit or re-entrant signals, attempts every step even if
 logging fails, and reports an incomplete rollback explicitly. Config and receipt
 change together: if the receipt cannot be published, the previous config is
-restored so a retry verifies and continues.
+restored so a retry verifies and continues. INT/TERM/HUP are deferred
+while the config and its receipt are published, then honoured (before any
+service start). Install and validation run in a nested subshell, so helper trap
+scopes (such as the APT IPv4 override, which now also chains EXIT/HUP to the
+previous handler) can never replace the import's rollback handler.
 On ordinary failure/INT/TERM, newly created VPN config/instance units are removed
 and previous sysctl/module-load/modprobe files restored. Packages, apt sources,
 verified binaries/helpers, module load side effects and empty directories may

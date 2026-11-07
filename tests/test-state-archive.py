@@ -1722,6 +1722,81 @@ awgStateReconcileImport "$ROOT/stage" "$ROOT/journal" "$ROOT/w2" --import-state 
         result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
 
+    APT_TX = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"; HOW="$3"
+AMNEZIAWG_DIR="$ROOT/vpn"; AWG_SYSTEMD_UNIT_DIR="$ROOT/units"; SERVER_AWG_NIC=awg0
+AWG_SYSCTL_FILE="$ROOT/sysctl"; AWG_MODULES_LOAD_FILE="$ROOT/modules"; AWG_BT_MODPROBE_OVERRIDE="$ROOT/modprobe"
+APT_FORCE_IPV4_CONF="$ROOT/force-ipv4"; GAI_CONF="$ROOT/gai.conf"
+mkdir -p "$ROOT/journal" "$AWG_SYSTEMD_UNIT_DIR"
+printf original >"$AWG_SYSCTL_FILE"
+mkdir() { [[ "$*" == '-p /etc/apt/apt.conf.d' ]] && return 0; command mkdir "$@"; }
+systemctl() { return 0; }
+installAmneziaWG() { mkdir -p "$AMNEZIAWG_DIR"; printf PRIVATE-KEY >"$AMNEZIAWG_DIR/awg0.conf"; printf mutated >"$AWG_SYSCTL_FILE"; }
+ensureAwgBackendReady() { enable_apt_ipv4; case "$HOW" in exit) exit 7 ;; *) kill -s "$HOW" "$BASHPID" ;; esac; }
+awgStateImportTransaction "$ROOT/stage" "$ROOT/journal"
+echo "rc=$? config=$([[ -e "$AMNEZIAWG_DIR/awg0.conf" ]] && echo yes || echo no) sysctl=$(<"$AWG_SYSCTL_FILE") ipv4=$([[ -e "$APT_FORCE_IPV4_CONF" ]] && echo yes || echo no)"
+"""
+
+    def test_nested_apt_traps_never_bypass_import_rollback(self):
+        for how, code in (('exit', 7), ('HUP', 129), ('TERM', 143), ('INT', 130)):
+            with self.subTest(how=how):
+                root = self.root / how
+                root.mkdir()
+                result = subprocess.run(['bash', '-c', self.APT_TX, 'test', str(SCRIPT), str(root), how], capture_output=True)
+                self.assertIn(f'rc={code} config=no sysctl=original ipv4=no', result.stdout.decode(), result.stderr.decode())
+                self.assertIn('rollback', (root / 'journal/steps').read_text())
+
+    def test_apt_ipv4_exit_trap_chains_to_previous_handler(self):
+        shell = r"""
+source "$1"
+APT_FORCE_IPV4_CONF="$2/force-ipv4"; GAI_CONF="$2/gai.conf"
+mkdir() { [[ "$*" == '-p /etc/apt/apt.conf.d' ]] && return 0; command mkdir "$@"; }
+( trap 'echo "previous-exit-handler status=$?"' EXIT; enable_apt_ipv4; exit 7 ); echo "rc=$?"
+( trap 'echo previous-hup; exit 129' HUP; enable_apt_ipv4; kill -HUP "$BASHPID"; echo not-reached ); echo "rc=$?"
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        out = result.stdout.decode()
+        self.assertIn('previous-exit-handler status=7\nrc=7', out, result.stderr.decode())
+        self.assertIn('previous-hup', out)
+        self.assertIn('rc=129', out)
+        self.assertNotIn('not-reached', out)
+        self.assertFalse((self.root / 'force-ipv4').exists())
+
+    def test_signal_between_config_and_receipt_keeps_them_consistent(self):
+        for mode in ('--import-state', '--activate-state'):
+            with self.subTest(mode=mode):
+                root = self.root / mode.strip('-')
+                root.mkdir()
+                shell = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"; MODE="$3"
+AMNEZIAWG_DIR="$ROOT/vpn"; SERVER_AWG_NIC=awg0; SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"
+mkdir -p "$AMNEZIAWG_DIR" "$ROOT/journal" "$ROOT/w1" "$ROOT/w2"
+printf original >"$SERVER_AWG_CONF"; printf params >"$AMNEZIAWG_DIR/params"; printf ens3 >"$ROOT/journal/nic"
+sha256sum "$AMNEZIAWG_DIR/params" "$SERVER_AWG_CONF" >"$ROOT/journal/receipt"
+acquireClientLifecycleLock() { return 0; }; awgStateTrustedPath() { return 0; }
+awgStateArchive() { printf filtered >"$4"; }
+systemctl() { case "$1" in is-active|is-enabled) return 1 ;; start) touch "$ROOT/running" ;; stop) rm -f "$ROOT/running" ;; esac; return 0; }
+ensureAwgBackendReady() { return 0; }; validateStagedAwgConfigs() { return 0; }; sysctl() { return 0; }
+eval "$(declare -f replaceFileExactly | sed 's/^replaceFileExactly/realReplaceFileExactly/')"
+replaceFileExactly() {
+    realReplaceFileExactly "$@" || return
+    [[ "$2" != "$SERVER_AWG_CONF" || "${SIGNAL_ONCE:-0}" != 1 ]] || kill -TERM "$BASHPID" # Real signal.
+}
+( trap 'exit 143' TERM; SIGNAL_ONCE=1; awgStateReconcileImport "$ROOT/stage" "$ROOT/journal" "$ROOT/w1" "$MODE" '' ens3 )
+echo "interrupted rc=$? running=$([[ -e $ROOT/running ]] && echo y || echo n)"
+sha256sum -c --status "$ROOT/journal/receipt" && echo receipt-ok
+awgStateReconcileImport "$ROOT/stage" "$ROOT/journal" "$ROOT/w2" "$MODE" '' ens3; echo "retry rc=$?"
+"""
+                result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(root), mode], capture_output=True)
+                out = result.stdout.decode()
+                self.assertIn('interrupted rc=143 running=n', out, result.stderr.decode())
+                self.assertIn('receipt-ok', out)
+                self.assertIn('retry rc=0', out, result.stderr.decode())
+
     def test_reset_on_unfinalized_journal_points_to_forced_purge(self):
         shell = r'''
 source "$1"
