@@ -246,9 +246,11 @@ anything else fails export/verify with an explicit port error. That check
 reads only `listen` and `backend` (double or single quotes). A `proxy.toml`
 outside the installer's flat subset — integer underscores, an unknown key the
 proxy would ignore — does not block VPN export, verify, prepare or reconcile.
-The proxy restore step still requires that subset and names the key it refused. On import the
-server config keeps the backend `ListenPort`, the regenerated firewall hooks
-open only `SERVER_PORT` (the proxy's public port, as on the old host; the
+`--inspect-state` and import `--dry-run` still show the VPN plan and warn
+`amneziawg-proxy: <reason>; proxy restore would be refused`. The proxy restore
+step still requires that subset and exits non-zero, naming the key it refused.
+On import the server config keeps the backend `ListenPort`, the regenerated
+firewall hooks open only `SERVER_PORT` (the proxy's public port, as on the old host; the
 backend port is not opened, and the proxy installer adds no firewall rules),
 and preflight checks that both UDP ports are free. Clients reach such a VPN
 only once the proxy runs: if the proxy step is refused or fails (or the

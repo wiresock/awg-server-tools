@@ -4056,7 +4056,12 @@ def proxy_plan(root, defaults=None):
     path = root / 'proxy/proxy.toml'
     if not path.exists():
         return dict(present=False)
-    values = proxy_toml(path.read_bytes())
+    try:
+        values = proxy_toml(path.read_bytes())
+    except StatePolicyError as error:
+        # The VPN archive is still valid. Inspect and dry-run show that plan
+        # and warn; only the proxy restore step refuses.
+        return dict(present=True, error=str(error), refusal='proxy restore would be refused')
     _, listen_port = socket_parts(values['listen'])
     backend_host, backend_port = socket_parts(values['backend'])
     awg_port = awg_listen_port((root / 'vpn/server.conf').read_bytes())
@@ -4076,6 +4081,8 @@ def proxy_prepare(root, out, awg_conf, approved=(), defaults=None):
     defaults = defaults or PROXY_DEFAULTS
     plan = proxy_plan(root, defaults)
     require(plan['present'], 'archive has no proxy config')
+    if plan.get('error'):
+        raise StatePolicyError(plan['error'])
     if not plan['awg_matches_backend']:
         raise StatePolicyError('archived server ListenPort (%s) is not the proxy backend port; restoring the proxy would '
                                'rewrite the VPN config, refused' % plan['awg_listen_port'])
@@ -4128,7 +4135,9 @@ def companion_warnings(panel, proxy):
     warnings = []
     if panel.get('listen_warning'):
         warnings.append(panel['listen_warning'])
-    if proxy.get('refusal'):
+    if proxy.get('error'):
+        warnings.append('amneziawg-proxy: %s; %s.' % (proxy['error'], proxy.get('refusal') or 'proxy restore would be refused'))
+    elif proxy.get('refusal'):
         warnings.append('amneziawg-proxy: ' + proxy['refusal'] + '.')
     if proxy.get('topology') == 'proxy':
         warnings.append('amneziawg-proxy topology: clients connect to UDP %d (the proxy) and AWG listens on backend UDP %d; '
