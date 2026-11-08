@@ -494,7 +494,8 @@ sudo ./amneziawg-web.sh install \
 | `--host HOST` | `127.0.0.1` | Bind host |
 | `--port PORT` | `8080` | Bind port |
 | `--username NAME` | `admin` | Admin username |
-| `--password-hash HASH` | *(required in non-interactive)* | Argon2id PHC hash |
+| `--password-hash HASH` | *(non-interactive: this or `--password-hash-file`)* | Argon2id PHC hash |
+| `--password-hash-file FILE` | — | Read the Argon2id hash from the first line of FILE (regular file, not a symlink) so it does not appear in the process list; excludes `--password-hash` |
 | `--poll-interval SECS` | `30` | Polling interval |
 | `--session-ttl SECS` | `86400` | Session lifetime |
 | `--no-enable` | — | Skip enabling service at boot |

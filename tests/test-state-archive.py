@@ -221,7 +221,7 @@ datetime = TestDatetime
             self.assertEqual((dest / name).stat().st_mode & 0o777, 0o600)
         view = self.run_helper('inspect').stdout
         self.assertNotIn(KEY.encode(), view)
-        self.assertEqual(json.loads(view)['schema_version'], 2)
+        self.assertEqual(json.loads(view)['schema_version'], 1)
         stamp = json.loads(view)['exported_at']
         self.assertRegex(stamp, r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
         self.assertLessEqual(datetime.fromisoformat(stamp.replace('Z', '+00:00')), datetime.now(timezone.utc))
@@ -2095,6 +2095,7 @@ if awgStateImportTransaction "$ROOT/stage" "$ROOT/journal"; then exit 12; fi
         installer.parent.mkdir(parents=True)
         installer.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >>"$PANEL_ROOT/installer.args"\n'
                              'echo run >>"$PANEL_ROOT/installer.runs"\n[[ -z "${FAIL_INSTALLER:-}" ]] || exit 1\n'
+                             'while (($#)); do [[ "$1" == --password-hash-file ]] && { stat -c %a "$2" >"$PANEL_ROOT/hash.mode"; cat "$2" >"$PANEL_ROOT/hash.seen"; }; shift; done\n'
                              'mkdir -p "$PANEL_ROOT/data"; touch "$PANEL_ROOT/unit"\n')
         return stage
 
@@ -2108,6 +2109,7 @@ awgStatePanelInstaller() { printf '%s\n' "$ROOT/checkout/amneziawg-web/scripts/a
 install() { local a=(); while (($#)); do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; command install "${a[@]}"; }
 systemctl() { printf '%s\n' "$*" >>"$ROOT/systemctl.log"; [[ "$1 ${FAIL_START:-}" != 'start 1' ]]; }
 awgStatePanelHealthy() { [[ -z "${UNHEALTHY:-}" ]]; }
+AWG_STATE_PANEL_DEFAULT_DB="$ROOT/data/awg-web.db"
 """
 
     def run_panel(self, root, body, **env):
@@ -2129,8 +2131,13 @@ awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 11
         self.assertIn('Panel already restored', out)
         self.assertEqual((root / 'installer.runs').read_text(), 'run\n')
         args = (root / 'installer.args').read_text().splitlines()
-        for flag in ('--non-interactive', '--no-start', '--no-enable', '--password-hash', '--data-dir', '--env-file', '--config-dir'):
+        for flag in ('--non-interactive', '--no-start', '--no-enable', '--password-hash-file', '--data-dir', '--env-file', '--config-dir'):
             self.assertIn(flag, args)
+        # m2: the Argon2 hash never appears on the installer command line.
+        self.assertNotIn('--password-hash', args)
+        self.assertFalse(any('$argon2' in arg for arg in args))
+        self.assertEqual((root / 'hash.seen').read_text(), '$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA\n')
+        self.assertEqual((root / 'hash.mode').read_text(), '600\n')
         self.assertEqual(args[args.index('--data-dir') + 1], str(root / 'data'))
         self.assertEqual(args[args.index('--config-dir') + 1], str(root / 'vpn/clients'))
         env = (root / 'etc/env.conf').read_text()
@@ -2257,7 +2264,14 @@ echo "rc=$? running=$([[ -e $ROOT/running ]] && echo y) enabled=$([[ -e $ROOT/en
         stage = root / 'stage'
         (stage / 'vpn').mkdir(parents=True, exist_ok=True)
         (stage / 'proxy').mkdir(parents=True, exist_ok=True)
-        (stage / 'vpn/server.conf').write_text(f'[Interface]\nPrivateKey = {KEY}\nListenPort = {listen_port}\n')
+        # Realistic default topology: params keep SERVER_PORT (the proxy's public
+        # port), the proxy installer moved AWG's ListenPort to the backend.
+        files = state_fixture()
+        (stage / 'vpn/params').write_bytes(files['vpn/params'])
+        (stage / 'vpn/server.conf').write_bytes(files['vpn/server.conf'].replace(b'ListenPort = 51820', b'ListenPort = %d' % listen_port))
+        if meta is not None:
+            (root / 'defaults.sh').write_text('AWG_STATE_PROXY_CONFIG=%s\nAWG_STATE_PROXY_DEFAULT_DATA=%s\nAWG_STATE_PROXY_DEFAULT_INSTALL=%s\n'
+                                              % (meta['config_path'], meta['data_dir'], meta['install_dir']))
         (stage / 'proxy/proxy.toml').write_text(toml if toml is not None else self.PROXY_TOML)
         if meta is not None:
             (stage / 'proxy/install.json').write_text(json.dumps(meta))
@@ -2279,6 +2293,7 @@ awgStateProxyInstaller() { printf '%s\n' "$ROOT/checkout/amneziawg-proxy/scripts
 install() { local a=(); while (($#)); do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; command install "${a[@]}"; }
 systemctl() { printf '%s\n' "$*" >>"$ROOT/systemctl.log"; [[ "$1 ${FAIL_START:-}" != 'start 1' ]]; }
 awgStateProxyHealthy() { [[ -z "${UNHEALTHY:-}" ]]; }
+[[ ! -f "$ROOT/defaults.sh" ]] || source "$ROOT/defaults.sh"
 """
 
     def run_proxy(self, root, body, **env):
@@ -2366,8 +2381,8 @@ if awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10
 source "$1"
 awgStateRestorePanel() { echo panel; return 1; }
 awgStateRestoreProxy() { echo proxy; return 0; }
-awgStateRestoreCompanions a b c; echo "rc=$?"
-""", 'test', str(SCRIPT)], capture_output=True)
+awgStateRestoreCompanions a "$2" c; echo "rc=$?"
+""", 'test', str(SCRIPT), str(self.root)], capture_output=True)
         self.assertEqual(result.stdout.decode(), 'panel\nproxy\nrc=1\n')
 
     def test_proxy_install_paths_from_unit(self):
@@ -2434,6 +2449,278 @@ awgStateExport "$ROOT/export.tar.gz" "$ROOT/work"
         meta1['schema_version'] = 2
         make_tar(self.tar, self.files, meta1)
         self.run_helper('verify')
+
+    EXPORT_SHELL = r"""
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/source"; AWG_STATE_PROXY_UNIT="$ROOT/proxy.service"; AWG_STATE_PROXY_CONFIG="$ROOT/etc-proxy/proxy.toml"
+acquireClientLifecycleLock() { CLIENT_LIFECYCLE_LOCK_FD=held; }
+releaseClientLifecycleLock() { CLIENT_LIFECYCLE_LOCK_FD=""; }
+awgStateTrustedPath() { return 0; }
+isWebPanelInstalled() { return 1; }
+collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=(); }
+awg() { printf 'fixture-tools\n'; }
+age() { cat >"$3"; }
+rm -rf "$ROOT/work"; mkdir "$ROOT/work"
+awgStateExport "$ROOT/export.tar.gz" "$ROOT/work"
+"""
+
+    def installer_proxy_toml(self, path, awg_conf):
+        # The real proxy installer's write_proxy_config with its defaults
+        # (listen = detected AWG port 51820, backend 127.0.0.1:51821).
+        installer = ROOT / 'amneziawg-proxy/scripts/amneziawg-proxy-install.sh'
+        shell = r"""
+set -eo pipefail
+eval "$(sed -n '/^readonly DEFAULT_/p' "$1")"
+eval "$(sed -n '/^write_proxy_config() {/,/^}/p' "$1")"
+step() { :; }; info() { :; }; warn() { :; }; chown() { :; }; _has_toml_unsafe_chars() { return 1; }
+CONFIG_FILE="$2" AWG_CONF_FILE="$3" FORCE=false NON_INTERACTIVE=true SERVICE_NAME=amneziawg-proxy
+LISTEN_HOST="$DEFAULT_LISTEN_HOST" LISTEN_PORT=51820 BACKEND_HOST="$DEFAULT_BACKEND_HOST" BACKEND_PORT="$DEFAULT_BACKEND_PORT"
+PROTOCOL="$DEFAULT_PROTOCOL" SESSION_TTL="$DEFAULT_SESSION_TTL" RATE_LIMIT="$DEFAULT_RATE_LIMIT"
+PROBE_REPLY_BYTES="$DEFAULT_PROBE_REPLY_BYTES" DNS_FORWARD_ENABLED=false QUIC_HANDSHAKE_ENABLED=false
+write_proxy_config
+"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(['bash', '-c', shell, 'gen', str(installer), str(path), awg_conf], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        text = path.read_text()
+        self.assertIn('listen = "0.0.0.0:51820"', text)
+        self.assertIn('backend = "127.0.0.1:51821"', text)
+        return text
+
+    def export_source(self, listen_port, proxy=True):
+        source = self.root / 'source'
+        (source / 'clients').mkdir(parents=True, exist_ok=True)
+        (source / 'params').write_bytes(self.files['vpn/params'])  # SERVER_PORT=51820, never edited by the proxy installer
+        (source / 'awg0.conf').write_bytes(self.files['vpn/server.conf'].replace(b'ListenPort = 51820', b'ListenPort = %d' % listen_port))
+        if proxy:
+            self.installer_proxy_toml(self.root / 'etc-proxy/proxy.toml', str(source / 'awg0.conf'))
+        return subprocess.run(['bash', '-c', self.EXPORT_SHELL, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+
+    def test_export_import_default_proxy_topology(self):
+        # M1: proxy installer default topology. Full export path, then verify,
+        # inspect, prepare and proxy-prepare from the produced archive.
+        result = self.export_source(51821)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        archive = self.root / 'export.tar.gz'
+        self.run_helper('verify', archive)
+        inspect = self.run_helper('inspect', archive)
+        plan = json.loads(inspect.stdout)['proxy_plan']
+        self.assertEqual((plan['topology'], plan['awg_matches_backend'], plan['server_port'], plan['awg_listen_port']),
+                         ('proxy', True, 51820, 51821))
+        self.assertIsNone(plan['refusal'])
+        self.assertIn(b'clients cannot reach the VPN', inspect.stderr)
+        self.assertEqual(json.loads(inspect.stdout)['schema_version'], 2)
+        stage = self.root / 'stage'
+        self.run_helper('unpack', archive, stage)
+        self.run_helper('prepare', stage)
+        self.assertIn('ListenPort = 51821', (stage / 'interface.conf').read_text())
+        self.assertEqual(self.run_helper('awg-port', stage).stdout, b'51821\n')
+        out = self.root / 'proxy-out'
+        fields = self.run_helper('proxy-prepare', stage, out, '/etc/amnezia/amneziawg/awg0.conf', '',
+                                 self.root / 'etc-proxy/proxy.toml', '/var/lib/amneziawg-proxy', '/usr/local/bin').stdout.split(b'\0')
+        self.assertEqual(fields[3], b'51820')
+        self.assertEqual(fields[fields.index(b'--listen-port') + 1], b'51820')
+        self.assertEqual(fields[fields.index(b'--backend-port') + 1], b'51821')
+        # Reconcile on the finalized host keeps the backend ListenPort.
+        local = self.root / 'local.conf'
+        local.write_bytes((stage / 'vpn/server.conf').read_bytes())
+        self.run_helper('reconcile', local, stage, self.root / 'clean.conf')
+
+    def test_export_topology_errors_are_explicit(self):
+        # ListenPort moved but no proxy config explains it (e.g. proxy removed).
+        result = self.export_source(51821, proxy=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'differs from SERVER_PORT (51820) in params and no amneziawg-proxy', result.stderr)
+        # Proxy present, but neither direct nor proxy topology.
+        result = self.export_source(51999)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'match neither a direct setup nor the amneziawg-proxy topology', result.stderr)
+        # A crafted archive is rejected the same way at verify.
+        files = dict(self.files)
+        files['vpn/server.conf'] = files['vpn/server.conf'].replace(b'ListenPort = 51820', b'ListenPort = 51821')
+        make_tar(self.tar, files)
+        self.assertIn(b'no amneziawg-proxy config explains it', self.run_helper('verify', ok=False).stderr)
+
+    def test_direct_export_without_proxy_is_schema_1(self):
+        result = self.export_source(51820, proxy=False)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        with tarfile.open(self.root / 'export.tar.gz') as archive:
+            meta = json.load(archive.extractfile('manifest.json'))
+        self.assertEqual(meta['schema_version'], 1)
+        self.assertFalse(any(name.startswith('proxy/') for name in meta['files']))
+
+    def test_import_preflight_checks_proxy_backend_port(self):
+        result = subprocess.run(['bash', '-c', r"""
+source "$1"; ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/none"; SERVER_AWG_NIC=awg0; SERVER_PORT=51820; AWG_STATE_AWG_PORT=51821
+awgStateTrustedPath() { return 0; }
+systemctl() { return 1; }
+ip() { [[ "$*" != *awg0* ]]; }
+ss() { [[ "$*" == *':51821'* ]] && echo busy; return 0; }
+awgStateImportPreflight eth0 "$ROOT"; echo "rc=$?"
+""", 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertIn(b'rc=1', result.stdout, result.stderr)
+        self.assertIn(b'UDP port 51821 (AWG behind amneziawg-proxy) is already in use', result.stderr)
+
+    def test_target_path_policy(self):
+        # m1: archive-controlled install paths.
+        code = CODE.split('\ntry:\n    main()', 1)[0]
+        (self.root / 'real').mkdir()
+        (self.root / 'link').symlink_to(self.root / 'real')
+        result = subprocess.run(['python3', '-c', code + r"""
+def outcome(path, default, kind, retry=False):
+    try:
+        target_dir_ok(path, default, kind, retry)
+        return 'ok'
+    except StatePolicyError as error:
+        return str(error)
+import json
+print(json.dumps([outcome(*case) for case in json.loads(sys.argv[2])]))
+""", KEYS, json.dumps([
+            ['/var/lib/amneziawg-web', '/var/lib/amneziawg-web', 'data', False],
+            ['/var/lib/awg-test-new-%d' % os.getpid(), '/var/lib/amneziawg-web', 'data', False],
+            ['/etc', '/var/lib/amneziawg-web', 'data', False],
+            ['/var/lib', '/var/lib/amneziawg-web', 'data', False],
+            ['/usr/bin', '/var/lib/amneziawg-web', 'data', False],
+            ['/root/x', '/var/lib/amneziawg-web', 'data', False],
+            ['/var/lib/dpkg', '/var/lib/amneziawg-web', 'data', False],
+            ['/var/lib/../etc', '/var/lib/amneziawg-web', 'data', False],
+            ['/tmp/x', '/var/lib/amneziawg-web', 'data', False],
+            ['/etc', '/etc/amneziawg-proxy', 'config', False],
+            ['/etc/awg-test-new-%d' % os.getpid(), '/etc/amneziawg-proxy', 'config', False],
+            ['/usr/bin', '/usr/local/bin', 'install', False],
+            ['/usr/local/bin', '/usr/local/bin', 'install', False],
+            ['/opt/awg-test-new-%d/bin' % os.getpid(), '/usr/local/bin', 'install', False],
+            [str(self.root / 'link/x'), str(self.root / 'link/x'), 'data', False],
+            ['/var/lib/dpkg', '/var/lib/amneziawg-web', 'data', True],
+        ])], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        got = json.loads(result.stdout)
+        ok = [o == 'ok' for o in got]
+        self.assertEqual(ok, [True, True, False, False, False, False, False, False, False, False, True, False, True, True, False, True], got)
+        self.assertIn('already exists', got[6])
+        self.assertIn('unsafe', got[7])
+        self.assertIn('symlink', got[14])
+
+    def test_custom_existing_proxy_paths_refused_at_restore(self):
+        root = self.root / 'proxy-paths'
+        root.mkdir()
+        self.proxy_stage(root, meta=dict(config_path='/etc/proxy.toml', data_dir='/var/lib', install_dir='/usr/bin'))
+        (root / 'defaults.sh').unlink()
+        result = self.run_proxy(root, r"""
+if awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ ! -e "$ROOT/installer.runs" ]] || exit 11
+""")
+        out = (result.stdout + result.stderr).decode()
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn('config path /etc is not the default', out)
+
+    def test_custom_existing_panel_db_dir_refused(self):
+        root = self.root / 'panel-etc'
+        root.mkdir()
+        self.panel_stage(root, env='AUTH_PASSWORD_HASH=$argon2id$v=19$x\nAWG_WEB_DB=/etc/awg-web.db\n')
+        result = self.run_panel(root, r"""
+if awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ ! -e "$ROOT/installer.runs" ]] || exit 11
+""")
+        out = (result.stdout + result.stderr).decode()
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn('data path /etc is not the default', out)
+
+    def test_dry_run_warnings_for_refused_proxy_and_bound_listen(self):
+        root = self.root / 'warn'
+        root.mkdir()
+        self.proxy_stage(root, listen_port=51820, meta=dict(config_path=str(root / 'p/proxy.toml'), data_dir=str(root / 'd'),
+                                                            install_dir=str(root / 'b')))
+        result = self.run_proxy(root, 'awgStateProxyPlan "$ROOT/stage"')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn(b'WARNING: amneziawg-proxy: archived server ListenPort is not the proxy backend port', result.stderr)
+        panel = self.root / 'warn-panel'
+        panel.mkdir()
+        self.panel_stage(panel, env='AUTH_PASSWORD_HASH=$argon2id$v=19$x\nAWG_WEB_LISTEN=203.0.113.7:8080\n')
+        result = self.run_panel(panel, 'awgStatePanelPlan "$ROOT/stage"')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn(b'WARNING: AWG_WEB_LISTEN binds the old host address 203.0.113.7', result.stderr)
+        for listen in ('127.0.0.1:8080', '0.0.0.0:8080', '[::]:8080', '[::1]:8080'):
+            (panel / 'stage/web/env.conf').write_text('AUTH_PASSWORD_HASH=$argon2id$v=19$x\nAWG_WEB_LISTEN=%s\n' % listen)
+            result = self.run_panel(panel, 'awgStatePanelPlan "$ROOT/stage"')
+            self.assertNotIn(b'AWG_WEB_LISTEN binds', result.stderr, listen)
+
+    def test_panel_health_ignores_http_proxy_env(self):
+        # m3: an http_proxy pointing at a dead port must not break the local check.
+        import http.server, threading
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200 if self.path == '/api/health' else 404)
+                self.end_headers()
+            def log_message(self, *a):
+                pass
+        server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        env_file = self.root / 'health.env'
+        env_file.write_text('AWG_WEB_LISTEN=127.0.0.1:%d\n' % server.server_address[1])
+        result = subprocess.run(['bash', '-c', 'source "$1"; awgStatePanelHealthy "$2"', 'test', str(SCRIPT), str(env_file)],
+                                capture_output=True, timeout=60,
+                                env=dict(os.environ, http_proxy='http://127.0.0.1:9', HTTP_PROXY='http://127.0.0.1:9', no_proxy='', NO_PROXY=''))
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+
+    def test_companion_lock_refuses_concurrent_runs_and_purge(self):
+        # m4: second companion run and purge refuse while one holds the lock.
+        journal = self.root / 'journal'
+        journal.mkdir()
+        result = subprocess.run(['bash', '-c', r"""
+source "$1"; J="$2"
+exec 9>>"$J/companions.lock"; flock -x 9
+awgStateRestorePanel() { echo panel-ran; }
+awgStateRestoreProxy() { echo proxy-ran; }
+( awgStateRestoreCompanions s "$J" w; echo "companions rc=$?" )
+AWG_STATE_JOURNAL_DIR="${J%/*}"
+isRoot() { return 0; }
+acquireClientLifecycleLock() { :; }; releaseClientLifecycleLock() { :; }
+awgStateTrustedPath() { return 0; }
+D=$(printf '%064d' 0); mkdir -p "$AWG_STATE_JOURNAL_DIR/$D"; exec 8>>"$AWG_STATE_JOURNAL_DIR/$D/companions.lock"; flock -x 8
+( awgStatePurgeJournal "$D" --force ); echo "purge rc=$?"
+[[ -d "$AWG_STATE_JOURNAL_DIR/$D" ]] && echo kept
+exec 9>&- 8>&-
+( awgStateRestoreCompanions s "$J" w; echo "companions rc=$?" )
+( awgStatePurgeJournal "$D" --force >/dev/null ); echo "purge rc=$?"
+[[ ! -e "$AWG_STATE_JOURNAL_DIR/$D" ]] && echo purged
+""", 'test', str(SCRIPT), str(journal)], capture_output=True, text=True)
+        self.assertEqual(result.stdout, 'companions rc=1\npurge rc=1\nkept\npanel-ran\nproxy-ran\ncompanions rc=0\npurge rc=0\npurged\n',
+                         result.stderr)
+        self.assertEqual(result.stderr.count('another panel/proxy restore'), 2)
+
+    def test_activation_takes_companion_lock_before_releasing_lifecycle_lock(self):
+        text = SCRIPT.read_text()
+        self.assertEqual(text.count('awgStateAcquireCompanionLock "${JOURNAL}" || return 1\n\t\t\treleaseClientLifecycleLock\n'
+                                    '\t\t\tawgStateRestoreCompanions'), 2)
+        self.assertEqual(text.count('releaseClientLifecycleLock\n\t\t\tawgStateRestoreCompanions'), 2)
+
+    def test_web_installer_password_hash_file(self):
+        # m2: --password-hash-file keeps the hash out of argv; --password-hash stays.
+        web = ROOT / 'amneziawg-web/scripts/amneziawg-web-install.sh'
+        shell = r"""
+eval "$(sed -n '/^parse_args() {/,/^}/p;/^load_password_hash_file() {/,/^}/p' "$1")"
+die() { echo "DIE $*"; exit 1; }; error() { echo "ERR $*"; }; usage() { :; }
+PASSWORD_HASH="" PASSWORD_HASH_FILE="" BINARY_SRC="" SOURCE_DIR=""
+shift; parse_args "$@"; printf 'hash=%s\n' "$PASSWORD_HASH"
+"""
+        good = self.root / 'hash'
+        good.write_text('$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA\n')
+        (self.root / 'hash-link').symlink_to(good)
+        (self.root / 'bad').write_text('plain\n')
+        def run(*args):
+            return subprocess.run(['bash', '-c', shell, 'x', str(web), *args], capture_output=True, text=True).stdout
+        self.assertEqual(run('--password-hash-file', str(good)), 'hash=$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA\n')
+        self.assertEqual(run('--password-hash', '$argon2id$x'), 'hash=$argon2id$x\n')
+        self.assertIn('mutually exclusive', run('--password-hash', '$argon2id$x', '--password-hash-file', str(good)))
+        self.assertIn('regular file', run('--password-hash-file', str(self.root / 'hash-link')))
+        self.assertIn('regular file', run('--password-hash-file', str(self.root / 'missing')))
+        self.assertIn('Argon2 PHC hash', run('--password-hash-file', str(self.root / 'bad')))
+        self.assertIn('--password-hash-file FILE', web.read_text())
 
     def test_proxy_plan_in_dry_run(self):
         root = self.root / 'proxy-plan'

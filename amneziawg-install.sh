@@ -3376,13 +3376,15 @@ AWG_PARAMS_BORINGTUN_KEYS="AWG_BORINGTUN_IMITATE_PROTOCOL AWG_BORINGTUN_IMITATE_
 _AWG_STATE_IMPORT_DIR=""
 AWG_STATE_JOURNAL_DIR="/var/lib/amneziawg-install/state-imports"
 AWG_STATE_PROXY_CONFIG="/etc/amneziawg-proxy/proxy.toml"
+AWG_STATE_PROXY_DEFAULT_DATA="/var/lib/amneziawg-proxy"
+AWG_STATE_PROXY_DEFAULT_INSTALL="/usr/local/bin"
 AWG_STATE_PROXY_UNIT="/etc/systemd/system/amneziawg-proxy.service"
 
 # The proxy installer writes `ExecStart=<install-dir>/amneziawg-proxy <config>`
 # and `WorkingDirectory=<data-dir>`; read the real paths from that unit (the
 # same tokens the proxy installer itself compares), else the defaults.
 function awgStateProxyInstallPaths() { # prints config, data dir, install dir
-	local LINE EXEC CONFIG REST WORKDIR=/var/lib/amneziawg-proxy INSTALL=/usr/local/bin
+	local LINE EXEC CONFIG REST WORKDIR="${AWG_STATE_PROXY_DEFAULT_DATA}" INSTALL="${AWG_STATE_PROXY_DEFAULT_INSTALL}"
 	CONFIG="${AWG_STATE_PROXY_CONFIG}"
 	if [[ -f "${AWG_STATE_PROXY_UNIT}" && ! -L "${AWG_STATE_PROXY_UNIT}" ]]; then
 		LINE="$(grep -m1 '^ExecStart=' "${AWG_STATE_PROXY_UNIT}" || true)"
@@ -3493,7 +3495,7 @@ PEER = set('PublicKey PresharedKey AllowedIPs Endpoint PersistentKeepalive'.spli
 HOOKS = set('PreUp PostUp PreDown PostDown'.split())
 
 
-def config(data, state=None, blocked=frozenset(), preserve_hooks=False):
+def config(data, state=None, blocked=frozenset(), preserve_hooks=False, proxy=None):
     text = data.decode('utf-8')
     require('\x00' not in text and '\r' not in text, 'invalid config encoding')
     # Carry leading peer-name comments with THAT peer when reconciling policy.
@@ -3562,8 +3564,8 @@ def config(data, state=None, blocked=frozenset(), preserve_hooks=False):
     require(sections and sections[0] == 'Interface' and sections.count('Interface') == 1,
             'single interface required')
     if state is not None:
-        require(fields.get('PrivateKey') == state['SERVER_PRIV_KEY'] and
-                fields.get('ListenPort') == state['SERVER_PORT'], 'params/config mismatch')
+        require(fields.get('PrivateKey') == state['SERVER_PRIV_KEY'], 'params/config mismatch')
+        listen_port_matches(fields.get('ListenPort'), state['SERVER_PORT'], proxy)
         addresses = [ipaddress.ip_interface(v.strip()) for v in fields.get('Address', '').split(',')]
         ipv4 = [v for v in addresses if v.version == 4]
         ipv6 = [v for v in addresses if v.version == 6]
@@ -3583,6 +3585,29 @@ def config(data, state=None, blocked=frozenset(), preserve_hooks=False):
             expected = state.get(name, '')
             require(fields.get(field, '') == expected, 'protocol fields mismatch')
     return ''.join(output).encode()
+
+
+def proxy_ports(data):
+    # (public listen port, backend port) of an archived/staged proxy.toml.
+    if data is None:
+        return None
+    values = proxy_toml(data)
+    return socket_parts(values['listen'])[1], socket_parts(values['backend'])[1]
+
+
+def listen_port_matches(listen, server_port, proxy):
+    # Direct: AWG listens on SERVER_PORT (clients' Endpoint port). Default
+    # amneziawg-proxy topology: the proxy installer moves AWG's ListenPort to the
+    # backend port and the proxy listens on SERVER_PORT, which it never edits.
+    if listen == server_port:
+        return 'direct'
+    if proxy is not None and listen == str(proxy[1]) and server_port == str(proxy[0]):
+        return 'proxy'
+    if proxy is None:
+        raise StatePolicyError('server ListenPort (%s) differs from SERVER_PORT (%s) in params and no amneziawg-proxy '
+                               'config explains it; fix the server config or params first' % (listen, server_port))
+    raise StatePolicyError('server ListenPort (%s) / SERVER_PORT (%s) match neither a direct setup nor the '
+                           'amneziawg-proxy topology (proxy listen %d, backend %d)' % (listen, server_port, proxy[0], proxy[1]))
 
 
 def member_name(name):
@@ -3616,7 +3641,7 @@ def validate_manifest(manifest, files):
     require(manifest.get('backend') == state['AWG_BACKEND'] and
             manifest.get('protocol') == state['AWG_PROTOCOL_VERSION'] and
             manifest.get('interface') == state['SERVER_AWG_NIC'], 'manifest/params mismatch')
-    config(files['vpn/server.conf'], state)
+    config(files['vpn/server.conf'], state, proxy=proxy_ports(files.get('proxy/proxy.toml')))
     for name in files:
         if name.startswith('clients/'):
             config(files[name])
@@ -3789,10 +3814,27 @@ def panel_plan(root, migrations_dir=None):
                 panel_schema=known[-1] if known else None,
                 queued_mail_to_cancel=pending.get('queued', 0), sending_mail_to_mark_unknown=pending.get('sending', 0))
     plan['schema_newer_than_panel'] = bool(known and applied and applied[-1] > known[-1])
+    plan['listen'] = (env or {}).get('AWG_WEB_LISTEN')
+    plan['listen_warning'] = listen_warning(plan['listen'])
     return plan
 
 
-def panel_prepare(root, out, clients_dir, default_db, migrations_dir):
+def listen_warning(listen):
+    # AWG_WEB_LISTEN is restored verbatim: a specific old-host address fails to bind.
+    if not listen:
+        return None
+    host = listen.rpartition(':')[0].strip('[]')
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if address.is_loopback or address.is_unspecified:
+        return None
+    return ('AWG_WEB_LISTEN binds the old host address %s; the restored panel fails to start unless this host has it. '
+            'Edit the panel env after restore or use 127.0.0.1/0.0.0.0 on the old host before export.' % host)
+
+
+def panel_prepare(root, out, clients_dir, default_db, migrations_dir, retry=False):
     # Builds the live-ready panel DB/env in private staging. Bash installs them.
     plan = panel_plan(root, migrations_dir)
     require(plan['present'], 'archive has no panel database')
@@ -3809,6 +3851,8 @@ def panel_prepare(root, out, clients_dir, default_db, migrations_dir):
     db_value = env.get('AWG_WEB_DB', '')
     db_live = db_value if (db_value.startswith('/') and re.fullmatch(r'/[A-Za-z0-9._/-]+', db_value) and '/../' not in db_value + '/'
                            and not db_value.endswith('/')) else default_db
+    # The installer gets the DB directory as --data-dir and chowns it to awg-web 0700.
+    target_dir_ok(db_live.rsplit('/', 1)[0], default_db.rsplit('/', 1)[0], 'data', retry)
     out.mkdir(mode=0o700)
     lines = []
     seen = set()
@@ -3846,7 +3890,12 @@ def panel_prepare(root, out, clients_dir, default_db, migrations_dir):
     db_out.chmod(0o600)
     for suffix in ('-wal', '-shm', '-journal'):
         require(not Path(str(db_out) + suffix).exists(), 'unexpected SQLite sidecar after panel prepare')
-    sys.stdout.buffer.write(b'\0'.join(v.encode() for v in (username, env['AUTH_PASSWORD_HASH'], db_live)) + b'\0')
+    # The hash goes to the installer through a private file, never its argv.
+    hash_out = out / 'password-hash'
+    with hash_out.open('x') as handle:
+        handle.write(env['AUTH_PASSWORD_HASH'] + '\n')
+    hash_out.chmod(0o600)
+    sys.stdout.buffer.write(b'\0'.join(v.encode() for v in (username, db_live)) + b'\0')
 
 
 SAFE_PATH = re.compile(r'/[A-Za-z0-9._/-]+')
@@ -3862,6 +3911,32 @@ PROXY_KEYS = {'listen': str, 'backend': str, 'session_ttl_secs': int, 'cleanup_i
 def safe_path(value):
     return (isinstance(value, str) and SAFE_PATH.fullmatch(value) is not None and len(value) <= 255 and
             not any(part in ('', '.', '..') for part in value[1:].split('/')))
+
+
+# Archive-controlled install paths are only accepted as the installers'
+# defaults or as a NEW directory below a root meant for service data/config/
+# binaries: the installers chown/chmod these directories (and write files
+# there), so an existing system directory such as /etc or /usr is refused.
+TARGET_ROOTS = dict(data=('/var/lib/', '/srv/', '/opt/'), config=('/etc/', '/srv/', '/opt/'),
+                    install=('/opt/', '/usr/local/'))
+
+
+def target_dir_ok(path, default, kind, retry):
+    if not safe_path(path):
+        raise StatePolicyError('unsafe %s path in the archive' % kind)
+    parts = path.split('/')
+    for depth in range(2, len(parts) + 1):
+        if os.path.islink('/'.join(parts[:depth])):
+            raise StatePolicyError('%s path %s has a symlink component; refused' % (kind, path))
+    if path == default:
+        return
+    roots = TARGET_ROOTS[kind]
+    if not any(path.startswith(root) and len(path) > len(root) for root in roots):
+        raise StatePolicyError('%s path %s is not the default and not below %s; refused' % (kind, path, ', '.join(roots)))
+    # A retry of this migration finds the directory its first attempt created.
+    if not retry and os.path.lexists(path):
+        raise StatePolicyError('%s path %s already exists on this host and is not the default; refused '
+                               '(the installer would change its owner/mode)' % (kind, path))
 
 
 def proxy_toml(data):
@@ -3901,9 +3976,9 @@ def awg_listen_port(data):
     return port
 
 
-def proxy_install(root):
+def proxy_install(root, defaults=None):
     meta_path = root / 'proxy/install.json'
-    meta = dict(PROXY_DEFAULTS)
+    meta = dict(defaults or PROXY_DEFAULTS)
     if meta_path.exists():
         loaded = json.loads(meta_path.read_bytes(), object_pairs_hook=unique_json)
         require(type(loaded) is dict and set(loaded) == set(PROXY_DEFAULTS) and all(map(safe_path, loaded.values())),
@@ -3912,7 +3987,7 @@ def proxy_install(root):
     return meta
 
 
-def proxy_plan(root):
+def proxy_plan(root, defaults=None):
     path = root / 'proxy/proxy.toml'
     if not path.exists():
         return dict(present=False)
@@ -3920,14 +3995,21 @@ def proxy_plan(root):
     _, listen_port = socket_parts(values['listen'])
     backend_host, backend_port = socket_parts(values['backend'])
     awg_port = awg_listen_port((root / 'vpn/server.conf').read_bytes())
-    return dict(present=True, listen=values['listen'], backend=values['backend'],
+    state = params((root / 'vpn/params').read_bytes())
+    plan = dict(present=True, listen=values['listen'], backend=values['backend'],
                 imitate_protocol=values.get('imitate_protocol', 'quic'),
                 awg_listen_port=awg_port, awg_matches_backend=awg_port == backend_port,
-                install_paths=proxy_install(root), https='not managed by this repository (not archived)')
+                server_port=int(state['SERVER_PORT']),
+                topology='proxy' if awg_port == backend_port and str(awg_port) != state['SERVER_PORT'] else 'direct',
+                install_paths=proxy_install(root, defaults), https='not managed by this repository (not archived)')
+    plan['refusal'] = None if plan['awg_matches_backend'] else (
+        'archived server ListenPort is not the proxy backend port; proxy restore would be refused')
+    return plan
 
 
-def proxy_prepare(root, out, awg_conf):
-    plan = proxy_plan(root)
+def proxy_prepare(root, out, awg_conf, retry=False, defaults=None):
+    defaults = defaults or PROXY_DEFAULTS
+    plan = proxy_plan(root, defaults)
     require(plan['present'], 'archive has no proxy config')
     if not plan['awg_matches_backend']:
         raise StatePolicyError('archived server ListenPort (%s) is not the proxy backend port; restoring the proxy would '
@@ -3935,6 +4017,11 @@ def proxy_prepare(root, out, awg_conf):
     require(safe_path(awg_conf), 'unsafe AWG config path')
     values = proxy_toml((root / 'proxy/proxy.toml').read_bytes())
     meta = plan['install_paths']
+    # The proxy installer chowns/chmods the config file's directory and the data
+    # dir, and writes the binary into the install dir.
+    target_dir_ok(meta['config_path'].rsplit('/', 1)[0], defaults['config_path'].rsplit('/', 1)[0], 'config', retry)
+    target_dir_ok(meta['data_dir'], defaults['data_dir'], 'data', retry)
+    target_dir_ok(meta['install_dir'], defaults['install_dir'], 'install', retry)
     listen_host, listen_port = socket_parts(values['listen'])
     backend_host, backend_port = socket_parts(values['backend'])
     flags = ['--listen-host', listen_host, '--listen-port', str(listen_port),
@@ -3969,6 +4056,20 @@ def proxy_prepare(root, out, awg_conf):
     target.chmod(0o600)
     fields = [meta['config_path'], meta['data_dir'], meta['install_dir'], str(listen_port)] + flags
     sys.stdout.buffer.write(b'\0'.join(v.encode() for v in fields) + b'\0')
+
+
+def companion_warnings(panel, proxy):
+    warnings = []
+    if panel.get('listen_warning'):
+        warnings.append(panel['listen_warning'])
+    if proxy.get('refusal'):
+        warnings.append('amneziawg-proxy: ' + proxy['refusal'] + '.')
+    if proxy.get('topology') == 'proxy':
+        warnings.append('amneziawg-proxy topology: clients connect to UDP %d (the proxy) and AWG listens on backend UDP %d; '
+                        'until the proxy step succeeds after --activate-state, clients cannot reach the VPN.'
+                        % (proxy['server_port'], proxy['awg_listen_port']))
+    for warning in warnings:
+        print('WARNING: ' + warning, file=sys.stderr)
 
 
 def migration_plan(manifest, files, data, policy, phase):
@@ -4027,6 +4128,11 @@ def emit_plan(report):
     print(json.dumps(report, sort_keys=True, indent=2))
 
 
+def staged_proxy_ports(root):
+    path = root / 'proxy/proxy.toml'
+    return proxy_ports(path.read_bytes()) if path.exists() else None
+
+
 def staged_plan(root, data, phase):
     manifest = json.loads((root / 'manifest.json').read_bytes(), object_pairs_hook=unique_json)
     files = {'vpn/server.conf': (root / 'vpn/server.conf').read_bytes()}
@@ -4076,7 +4182,7 @@ def main():
         root = Path(path)
         state = params((root / 'vpn/params').read_bytes())
         data = (root / 'vpn/server.conf').read_bytes()
-        config(data, state, set())
+        config(data, state, set(), proxy=staged_proxy_ports(root))
         stamp = utc_text(utc_now().replace(microsecond=0))
         migration_plan(dict(exported_at=stamp), {'vpn/server.conf': data}, data, peer_policy(root), 'export')
     elif mode == 'identity':
@@ -4102,7 +4208,8 @@ def main():
                 require(sum(map(len, files.values())) <= MAX_TOTAL, 'oversized staging tree')
         state = params(files['vpn/params'])
         peer_policy(root)  # Same schema gate as export-check; never pack an unimportable DB.
-        manifest = dict(schema_version=2, exported_at=utc_text(utc_now().replace(microsecond=0)), backend=state['AWG_BACKEND'],
+        # Schema 2 only when the archive needs it (proxy/install.json).
+        manifest = dict(schema_version=2 if 'proxy/install.json' in files else 1, exported_at=utc_text(utc_now().replace(microsecond=0)), backend=state['AWG_BACKEND'],
                         protocol=state['AWG_PROTOCOL_VERSION'], interface=state['SERVER_AWG_NIC'],
                         versions={'installer_format': 'state-v1', 'installer_sha256': args[2] if len(args) > 2 and re.fullmatch(r'[0-9a-f]{64}', args[2]) else 'unknown', 'awg_tools': args[1],
                                   'panel': 'not-probed'},
@@ -4137,21 +4244,29 @@ def main():
                     _, report = staged_plan(root, files['vpn/server.conf'], 'inspect')
                     for warning in report['warnings']:
                         print('WARNING: ' + warning, file=sys.stderr)
-                    print(json.dumps(dict(manifest, peer_plan=report, panel_plan=panel_plan(root, args[1] if len(args) > 1 else None),
-                                          proxy_plan=proxy_plan(root)), sort_keys=True, indent=2))
+                    panel, proxy = panel_plan(root, args[1] if len(args) > 1 else None), proxy_plan(root)
+                    companion_warnings(panel, proxy)
+                    print(json.dumps(dict(manifest, peer_plan=report, panel_plan=panel, proxy_plan=proxy), sort_keys=True, indent=2))
     elif mode == 'panel-plan':
-        print(json.dumps(panel_plan(Path(path), args[0] if args else None), sort_keys=True))
+        plan = panel_plan(Path(path), args[0] if args else None)
+        companion_warnings(plan, {})
+        print(json.dumps(plan, sort_keys=True))
+    elif mode == 'awg-port':
+        print(awg_listen_port((Path(path) / 'vpn/server.conf').read_bytes()) or '')
     elif mode == 'proxy-plan':
-        print(json.dumps(proxy_plan(Path(path)), sort_keys=True))
+        plan = proxy_plan(Path(path))
+        companion_warnings({}, plan)
+        print(json.dumps(plan, sort_keys=True))
     elif mode == 'proxy-prepare':
-        proxy_prepare(Path(path), Path(args[0]), args[1])
+        defaults = dict(zip(('config_path', 'data_dir', 'install_dir'), args[3:6])) if len(args) >= 6 else None
+        proxy_prepare(Path(path), Path(args[0]), args[1], args[2] == 'retry', defaults)
     elif mode == 'proxy-meta':
         # Export: install paths discovered from the real proxy unit.
         meta = dict(zip(('config_path', 'data_dir', 'install_dir'), [path] + args[:2]))
         require(all(map(safe_path, meta.values())), 'unsafe proxy install path')
         print(json.dumps(meta, sort_keys=True))
     elif mode == 'panel-prepare':
-        panel_prepare(Path(path), Path(args[0]), args[1], args[2], args[3] if len(args) > 3 else None)
+        panel_prepare(Path(path), Path(args[0]), args[1], args[2], args[3] or None, len(args) > 4 and args[4] == 'retry')
     elif mode == 'reconcile':
         # Bash provides only freshly generated transaction state or a local file
         # whose receipt it verified before reconciliation.
@@ -4160,7 +4275,7 @@ def main():
         state = params((root / 'vpn/params').read_bytes())
         data = Path(path).read_bytes()
         blocked, report = staged_plan(root, data, 'reconcile')
-        clean = config(data, state, blocked, preserve_hooks=True)
+        clean = config(data, state, blocked, preserve_hooks=True, proxy=staged_proxy_ports(root))
         emit_plan(report)
         with Path(args[1]).open('xb') as handle:
             handle.write(clean)
@@ -4171,7 +4286,7 @@ def main():
         blocked, report = staged_plan(root, data, 'import')
         emit_plan(report)
         # Hooks must remain in Interface, not be appended below the last Peer.
-        clean = config(data, state, blocked).decode()
+        clean = config(data, state, blocked, proxy=staged_proxy_ports(root)).decode()
         match = re.search(r'(?m)^\s*\[Peer\]\s*$', clean)
         position = match.start() if match else len(clean)
         if match:
@@ -4446,6 +4561,11 @@ function awgStateImportPreflight() {
 	command -v ss >/dev/null 2>&1 || { echo 'ERROR: iproute2 (ss) is required.' >&2; return 1; }
 	ss -H -lun "sport = :${SERVER_PORT}" >"${WORK}/ports" || return 1
 	[[ ! -s "${WORK}/ports" ]] || { echo 'ERROR: target UDP port is already in use.' >&2; return 1; }
+	# amneziawg-proxy topology: AWG itself listens on the proxy backend port.
+	if [[ -n "${AWG_STATE_AWG_PORT:-}" && "${AWG_STATE_AWG_PORT}" != "${SERVER_PORT}" ]]; then
+		ss -H -lun "sport = :${AWG_STATE_AWG_PORT}" >"${WORK}/ports" || return 1
+		[[ ! -s "${WORK}/ports" ]] || { echo "ERROR: target UDP port ${AWG_STATE_AWG_PORT} (AWG behind amneziawg-proxy) is already in use." >&2; return 1; }
+	fi
 	# A pre-existing unit/drop-in could run arbitrary local commands on activation.
 	for FILE in "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service" "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service.d"; do
 		[[ ! -e "${FILE}" && ! -L "${FILE}" ]] || {
@@ -4809,6 +4929,8 @@ function awgStatePanelPlan() { # <stage>; human-readable plan for dry-run
 function awgStatePanelHealthy() { # <env file>; waits for GET /api/health
 	python3 -I - "$1" <<'AWG_PANEL_HEALTH'
 import re, sys, time, urllib.request
+# Local health check: never through http_proxy/https_proxy from the environment.
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 values = {}
 for line in open(sys.argv[1], encoding='utf-8'):
     m = re.fullmatch(r'\s*([A-Za-z_][A-Za-z0-9_]*)=(.*?)\s*', line.rstrip('\n'))
@@ -4822,7 +4944,7 @@ base = values.get('AWG_WEB_BASE_PATH', '').rstrip('/')
 url = 'http://%s:%s%s/api/health' % (host, port, base)
 for _ in range(30):
     try:
-        with urllib.request.urlopen(url, timeout=2) as response:
+        with opener.open(url, timeout=2) as response:
             if response.status == 200:
                 sys.exit(0)
     except OSError:
@@ -4842,7 +4964,7 @@ function awgStatePanelFail() { # <journal> <message>
 }
 
 function awgStateRestorePanel() { # <stage> <journal> <work>
-	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER MIGRATIONS DB DATA_DIR SIDECAR
+	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER MIGRATIONS DB DATA_DIR SIDECAR RETRY
 	local CLIENTS="${AMNEZIAWG_DIR}/clients"
 	local -a FIELDS=() ARGS=()
 	[[ -f "${STAGE}/web/database.sqlite" ]] || return 0
@@ -4860,14 +4982,16 @@ function awgStateRestorePanel() { # <stage> <journal> <work>
 		return 1
 	fi
 	MIGRATIONS="${INSTALLER%/scripts/*}/migrations"
+	RETRY=''
+	[[ ! -e "${JOURNAL}/panel-installing" ]] || RETRY=retry
 	: >"${JOURNAL}/panel-installing" || { echo 'ERROR: cannot write the panel journal marker.' >&2; return 1; }
 	awgStateJournalStep "${JOURNAL}" panel-restore-started
 	rm -rf -- "${WORK}/panel" "${WORK}/panel.fields"
-	awgStateArchive panel-prepare "${STAGE}" "${WORK}/panel" "${CLIENTS}" "${AWG_STATE_PANEL_DEFAULT_DB}" "${MIGRATIONS}" >"${WORK}/panel.fields" ||
+	awgStateArchive panel-prepare "${STAGE}" "${WORK}/panel" "${CLIENTS}" "${AWG_STATE_PANEL_DEFAULT_DB}" "${MIGRATIONS}" "${RETRY}" >"${WORK}/panel.fields" ||
 		{ awgStatePanelFail "${JOURNAL}" 'archived panel data was refused (see above).'; return 1; }
 	mapfile -d '' FIELDS <"${WORK}/panel.fields"
-	[[ ${#FIELDS[@]} -eq 3 ]] || { awgStatePanelFail "${JOURNAL}" 'internal panel prepare error.'; return 1; }
-	DB="${FIELDS[2]}"
+	[[ ${#FIELDS[@]} -eq 2 ]] || { awgStatePanelFail "${JOURNAL}" 'internal panel prepare error.'; return 1; }
+	DB="${FIELDS[1]}"
 	DATA_DIR="${DB%/*}"
 	# Retry: never run the installer against a running half-restored panel.
 	systemctl stop "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
@@ -4878,7 +5002,7 @@ function awgStateRestorePanel() { # <stage> <journal> <work>
 		awgStatePanelFail "${JOURNAL}" "cannot install ${WEB_PANEL_ENV_FILE}."
 		return 1
 	fi
-	ARGS=(--non-interactive --username "${FIELDS[0]}" --password-hash "${FIELDS[1]}" --data-dir "${DATA_DIR}"
+	ARGS=(--non-interactive --username "${FIELDS[0]}" --password-hash-file "${WORK}/panel/password-hash" --data-dir "${DATA_DIR}"
 		--env-file "${WEB_PANEL_ENV_FILE}" --config-dir "${CLIENTS}" --no-start --no-enable)
 	[[ -z "${AWG_STATE_PANEL_BINARY:-}" ]] || ARGS+=(--binary-src "${AWG_STATE_PANEL_BINARY}")
 	awgStateJournalStep "${JOURNAL}" panel-install
@@ -4955,7 +5079,7 @@ function awgStateProxyFail() { # <journal> <message>
 }
 
 function awgStateRestoreProxy() { # <stage> <journal> <work>
-	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER CONFIG DATA_DIR INSTALL_DIR PORT
+	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER CONFIG DATA_DIR INSTALL_DIR PORT RETRY=''
 	local -a FIELDS=() ARGS=()
 	[[ -f "${STAGE}/proxy/proxy.toml" ]] || return 0
 	if [[ -e "${JOURNAL}/proxy-restored" ]]; then
@@ -4967,7 +5091,9 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 		return 1
 	}
 	rm -rf -- "${WORK}/proxy" "${WORK}/proxy.fields"
-	awgStateArchive proxy-prepare "${STAGE}" "${WORK}/proxy" "${SERVER_AWG_CONF}" >"${WORK}/proxy.fields" || {
+	[[ ! -e "${JOURNAL}/proxy-installing" ]] || RETRY=retry
+	awgStateArchive proxy-prepare "${STAGE}" "${WORK}/proxy" "${SERVER_AWG_CONF}" "${RETRY}" \
+		"${AWG_STATE_PROXY_CONFIG}" "${AWG_STATE_PROXY_DEFAULT_DATA}" "${AWG_STATE_PROXY_DEFAULT_INSTALL}" >"${WORK}/proxy.fields" || {
 		echo 'ERROR: archived proxy config was refused (see above); the VPN and panel are unaffected.' >&2
 		return 1
 	}
@@ -5010,12 +5136,43 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 	echo "Proxy restored (${AWG_STATE_PROXY_SERVICE}, UDP ${PORT}, config ${CONFIG})."
 }
 
+# Companion steps run after the VPN lifecycle lock is released (the panel
+# installer and the panel itself take that lock). A separate non-blocking
+# per-journal lock, taken BEFORE that release, serializes concurrent
+# --activate-state reruns and --purge-state-journal/--reset-state-journal.
+AWG_STATE_COMPANION_LOCK_FD=""
+
+function awgStateAcquireCompanionLock() { # <journal>
+	local FILE="$1/companions.lock"
+	[[ -z "${AWG_STATE_COMPANION_LOCK_FD}" ]] || return 0
+	if [[ -L "${FILE}" ]] || { [[ -e "${FILE}" ]] && [[ ! -f "${FILE}" ]]; }; then
+		echo 'ERROR: unsafe companion lock in the migration journal.' >&2
+		return 1
+	fi
+	command -v flock >/dev/null 2>&1 || { echo 'ERROR: flock is required for companion restore.' >&2; return 1; }
+	exec {AWG_STATE_COMPANION_LOCK_FD}>>"${FILE}" || { AWG_STATE_COMPANION_LOCK_FD=""; echo 'ERROR: cannot open the companion lock.' >&2; return 1; }
+	if ! flock -xn "${AWG_STATE_COMPANION_LOCK_FD}"; then
+		exec {AWG_STATE_COMPANION_LOCK_FD}>&-
+		AWG_STATE_COMPANION_LOCK_FD=""
+		echo 'ERROR: another panel/proxy restore (--activate-state) or journal purge for this archive is in progress; wait for it to finish, then rerun.' >&2
+		return 1
+	fi
+}
+
+function awgStateReleaseCompanionLock() {
+	[[ -n "${AWG_STATE_COMPANION_LOCK_FD}" ]] || return 0
+	exec {AWG_STATE_COMPANION_LOCK_FD}>&- || true
+	AWG_STATE_COMPANION_LOCK_FD=""
+}
+
 # Post-finalization companions: panel, then proxy. Each is independent and
 # retried on rerun; a failure of one never undoes the VPN or the other.
 function awgStateRestoreCompanions() { # <stage> <journal> <work>
 	local STATUS=0
+	awgStateAcquireCompanionLock "$2" || return 1
 	awgStateRestorePanel "$@" || STATUS=1
 	awgStateRestoreProxy "$@" || STATUS=1
+	awgStateReleaseCompanionLock
 	return "${STATUS}"
 }
 
@@ -5048,6 +5205,8 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 	trap releaseClientLifecycleLock EXIT
 	JOURNAL="${AWG_STATE_JOURNAL_DIR}/${DIGEST}"
 	awgStateTrustedPath "${JOURNAL}" && [[ -d "${JOURNAL}" && ! -L "${JOURNAL}" ]] || exit 1
+	# Never purge/reset under a running panel/proxy restore of this journal.
+	awgStateAcquireCompanionLock "${JOURNAL}" || exit 1
 	if [[ -f "${JOURNAL}/finalized" && ! -L "${JOURNAL}/finalized" ]] &&
 		awgStateTrustedPath "${JOURNAL}/finalized" && [[ -s "${JOURNAL}/finalized" ]]; then
 		FINALIZED=1
@@ -5090,11 +5249,11 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 	shopt -s nullglob dotglob
 	for ENTRY in "${JOURNAL}/"*; do
 		case "${ENTRY##*/}" in
-			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete|panel-installing|panel-restored|proxy-installing|proxy-restored) ;;
+			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete|panel-installing|panel-restored|proxy-installing|proxy-restored|companions.lock) ;;
 			*) echo 'ERROR: unexpected journal entry; refusing purge.' >&2; exit 1 ;;
 		esac
 	done
-	for ENTRY in before before.new before.old recovery receipt nic steps rollback-incomplete panel-installing proxy-installing; do
+	for ENTRY in before before.new before.old recovery receipt nic steps rollback-incomplete panel-installing proxy-installing companions.lock; do
 		rm -rf --one-file-system -- "${JOURNAL:?}/${ENTRY:?}" || exit 1
 	done
 	if (( FINALIZED )) && [[ "${OPTION}" != --reset-finalized ]]; then
@@ -5135,6 +5294,7 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 			awgStatePanelPlan "${STAGE}"
 			awgStateProxyPlan "${STAGE}"
 		elif [[ "${MODE}" == --activate-state ]]; then
+			awgStateAcquireCompanionLock "${JOURNAL}" || return 1
 			releaseClientLifecycleLock
 			awgStateRestoreCompanions "${STAGE}" "${JOURNAL}" "${WORK}" || return 1
 		fi
@@ -5270,6 +5430,7 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 				awgStateWarnIdentityTombstone
 			echo "Journal ${JOURNAL} holds no keys (the encrypted archive is the recovery copy). Optional cleanup: --purge-state-journal ${JOURNAL##*/}."
 			# The VPN is final; the panel never runs under the VPN lifecycle lock.
+			awgStateAcquireCompanionLock "${JOURNAL}" || return 1
 			releaseClientLifecycleLock
 			awgStateRestoreCompanions "${STAGE}" "${JOURNAL}" "${WORK}" || return 1
 		else
@@ -5318,6 +5479,7 @@ function awgStateCommand() (
 	fi
 	awgStateArchive unpack "${WORK}/state.tar.gz" "${WORK}/stage" || exit 1
 	awgStateReadParams "${WORK}/stage/vpn/params" "${WORK}/records" || exit 1
+	AWG_STATE_AWG_PORT="$(awgStateArchive awg-port "${WORK}/stage")" || exit 1
 	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
 	SERVER_AWG_IPV6="$(normalizeIPv6 "${SERVER_AWG_IPV6}")" || exit 1
 	# Derive IPv6 routing from the exact server config rather than stale params.
@@ -5362,6 +5524,9 @@ function awgStateCommand() (
 	SERVER_PUB_NIC="${NIC}"
 	awgStateWarnMtuBudget "${WORK}/stage/vpn/server.conf"
 	printf 'Plan: install %s backend, AWG %s, interface %s, UDP %s, uplink %s.\n' "${AWG_BACKEND}" "${AWG_PROTOCOL_VERSION}" "${SERVER_AWG_NIC}" "${SERVER_PORT}" "${NIC}"
+	if [[ -n "${AWG_STATE_AWG_PORT}" && "${AWG_STATE_AWG_PORT}" != "${SERVER_PORT}" ]]; then
+		echo "amneziawg-proxy topology: AWG listens on UDP ${AWG_STATE_AWG_PORT} (proxy backend); the firewall hooks open the public UDP ${SERVER_PORT} for the proxy, as on the old host. Clients reach the VPN only after the proxy step of --activate-state succeeds."
+	fi
 	echo 'Restore original keys/profiles; replace host hooks; migrate future-expiry peers and exclude already-expired/disabled/archived/removal-pending peers.'
 	echo 'Leave VPN stopped/disabled. The panel and amneziawg-proxy (if archived) are restored only after finalization by --activate-state --enable-at-boot.'
 	if [[ "${OPTION}" == --dry-run ]]; then

@@ -94,6 +94,7 @@ SNAPSHOT_RETENTION_DAYS="${DEFAULT_SNAPSHOT_RETENTION_DAYS}"
 SESSION_TTL="${DEFAULT_SESSION_TTL}"
 USERNAME="${DEFAULT_USERNAME}"
 PASSWORD_HASH=""          # pre-hashed; takes precedence over PASSWORD
+PASSWORD_HASH_FILE=""     # file holding the pre-hashed password (keeps it out of argv)
 PASSWORD=""               # plaintext; only accepted interactively or with explicit flag
 ENABLE_SERVICE=true
 START_SERVICE=true
@@ -236,6 +237,9 @@ Options:
   --password-hash HASH      Argon2id PHC hash of the admin password
                             Generate with:
                               python3 -c "import argon2; print(argon2.PasswordHasher().hash('pw'))"
+  --password-hash-file FILE Read the Argon2id PHC hash from FILE (first line;
+                            a regular file, not a symlink), so it does not
+                            appear in the process list. Excludes --password-hash.
   --poll-interval SECS      Polling interval in seconds (default: ${DEFAULT_POLL_INTERVAL})
   --snapshot-retention-days DAYS
                             Retention window for historical traffic snapshots in days
@@ -300,6 +304,8 @@ parse_args() {
                 USERNAME="$2"; shift 2 ;;
             --password-hash)
                 PASSWORD_HASH="$2"; shift 2 ;;
+            --password-hash-file)
+                PASSWORD_HASH_FILE="$2"; shift 2 ;;
             --poll-interval)
                 POLL_INTERVAL="$2"; shift 2 ;;
             --snapshot-retention-days)
@@ -325,11 +331,31 @@ parse_args() {
         esac
     done
 
+    load_password_hash_file
+
     # --binary-src and --source-dir are mutually exclusive
     if [[ -n "${BINARY_SRC}" ]] && [[ -n "${SOURCE_DIR}" ]]; then
         die "--binary-src and --source-dir are mutually exclusive.
 Use --binary-src to provide a pre-built binary, or --source-dir to build from source."
     fi
+}
+
+# --password-hash-file: read the hash without putting it on a command line.
+load_password_hash_file() {
+    [[ -n "${PASSWORD_HASH_FILE}" ]] || return 0
+    if [[ -n "${PASSWORD_HASH}" ]]; then
+        die "--password-hash and --password-hash-file are mutually exclusive."
+    fi
+    if [[ -L "${PASSWORD_HASH_FILE}" || ! -f "${PASSWORD_HASH_FILE}" ]]; then
+        die "--password-hash-file must be a regular file (not a symlink): ${PASSWORD_HASH_FILE}"
+    fi
+    local line=""
+    IFS= read -r line <"${PASSWORD_HASH_FILE}" || [[ -n "${line}" ]] \
+        || die "Could not read --password-hash-file: ${PASSWORD_HASH_FILE}"
+    if [[ "${line}" != '$argon2'* ]]; then
+        die "--password-hash-file must contain an Argon2 PHC hash on its first line."
+    fi
+    PASSWORD_HASH="${line}"
 }
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
@@ -854,7 +880,7 @@ detect_awg_config_dir() {
 non_interactive_validate() {
     # In non-interactive mode, a password hash is required.
     if [[ -z "${PASSWORD_HASH}" ]]; then
-        die "Non-interactive mode requires --password-hash.
+        die "Non-interactive mode requires --password-hash or --password-hash-file.
 Generate with:
   python3 -c \"import argon2; print(argon2.PasswordHasher().hash('yourpassword'))\""
     fi

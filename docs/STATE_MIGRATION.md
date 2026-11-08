@@ -87,8 +87,8 @@ No deadline is extended by the age of the archive or time spent quarantined.
 
 The encrypted payload is a gzip tar containing only regular files:
 
-- `manifest.json`: schema version 2 (schema 1 archives, which cannot carry
-  `proxy/install.json`, remain importable), protocol, backend, interface, installer
+- `manifest.json`: schema version 1, or 2 only when the archive carries
+  `proxy/install.json` (both are importable; schema 1 may not carry it), protocol, backend, interface, installer
   SHA-256, AWG tools version, per-file SHA-256 inventory, and mandatory
   `exported_at` (UTC ISO 8601, `YYYY-MM-DDTHH:MM:SSZ`, at snapshot packaging). The panel version is
   currently recorded as `not-probed`, not guessed. `installer_sha256` is
@@ -196,7 +196,7 @@ Flow: after `--activate-state <archive> --enable-at-boot` has finalized the VPN
    (`state='cancelled'`, `invalidation_code='state_migration'`) and mark
    in-flight `sending` jobs `unknown`, so no mail from the old host is replayed.
 3. Install the env (root 0600), run the panel installer with
-   `--non-interactive --username --password-hash --data-dir --env-file
+   `--non-interactive --username --password-hash-file --data-dir --env-file
    --config-dir --no-start --no-enable` (plus `--binary-src` when
    `AWG_STATE_PANEL_BINARY` is set; otherwise it builds from source and needs
    `cargo`), then install the DB as `awg-web` 0600 (stale `-wal/-shm/-journal`
@@ -209,8 +209,14 @@ Flow: after `--activate-state <archive> --enable-at-boot` has finalized the VPN
    panel; a completed restore is a no-op.
 
 `AWG_STATE_PANEL_BINARY=/path/to/amneziawg-web` is the only new input (an
-environment variable, like `SERVER_PUB_IP`). The password hash is passed to the
-panel installer on its command line (it is a hash, not the password). Saved
+environment variable, like `SERVER_PUB_IP`). The Argon2 hash reaches the panel
+installer through `--password-hash-file` (a 0600 file in the RAM-backed work
+directory), never on its command line; `--password-hash HASH` remains for
+compatibility. `AWG_WEB_LISTEN` is restored verbatim: if it binds a specific
+old-host address (not loopback or a wildcard), the panel cannot bind on the
+new host and the restore fails its health check; dry-run and `--inspect-state`
+warn about this, so change it on the old host before export or edit the
+restored env.conf and rerun. Saved
 SMTP settings travel inside the DB. Remaining TODO: merging multiple env files
 or systemd `Environment=` directives, and restoring without the repository
 checkout (the only checkout-less path, `amneziawg-web.sh`/`amneziawg-proxy.sh`,
@@ -228,6 +234,30 @@ port only if it is not already there, installs `amneziawg-proxy.service`
 `WorkingDirectory=<data-dir>`), and keeps an existing config without `--force`.
 The proxy has no certificate or key files (`quic_certificate_domain` is only an
 SNI name).
+
+**Topology.** With the proxy installer's defaults, the proxy listens on the
+AWG port it detected (`SERVER_PORT` in params, the clients' Endpoint port) and
+moves AWG's `ListenPort` to the backend port (51821); params are never edited.
+The archive verifier therefore accepts either a direct setup (`ListenPort ==
+SERVER_PORT`) or this proxy topology (archive has `proxy/proxy.toml`,
+`ListenPort` == proxy backend port and `SERVER_PORT` == proxy listen port);
+anything else fails export/verify with an explicit port error. On import the
+server config keeps the backend `ListenPort`, the regenerated firewall hooks
+open only `SERVER_PORT` (the proxy's public port, as on the old host; the
+backend port is not opened, and the proxy installer adds no firewall rules),
+and preflight checks that both UDP ports are free. Clients reach such a VPN
+only once the proxy runs: if the proxy step is refused or fails (or the
+archive is restored without its proxy), the VPN is up on the backend port but
+unreachable on `SERVER_PORT` until the proxy is restored. Dry-run,
+`--inspect-state` and the import plan warn about this.
+
+**Install paths.** `proxy/install.json` paths and the panel's `AWG_WEB_DB`
+directory are archive-controlled, and the installers chown/chmod those
+directories. Restore accepts only the defaults, or a path that does not exist
+yet below `/var/lib/`, `/srv/`, `/opt/` (data), `/etc/`, `/srv/`, `/opt/`
+(proxy config directory) or `/opt/`, `/usr/local/` (proxy binary directory),
+with no `..` components and no symlink anywhere on the path. A retry may find
+the directory its first attempt created.
 
 After the panel step (independently of its outcome), when the archive has
 `proxy/proxy.toml`:
@@ -252,6 +282,12 @@ After the panel step (independently of its outcome), when the archive has
    enables it, leaves the VPN and panel untouched, exits non-zero, and a rerun
    of `--activate-state <archive> --enable-at-boot` retries only the unfinished
    companion steps.
+
+Companion lock: the panel and proxy steps run after the VPN lifecycle lock is
+released (the panel installer and the panel take it themselves). Before that
+release, activation takes a separate non-blocking `companions.lock` in the
+journal; a concurrent `--activate-state` rerun, `--purge-state-journal` or
+`--reset-state-journal` for the same archive refuses with a clear error.
 
 Panel access to proxy status: the panel only reads
 `AWG_PROXY_SESSIONS_FILE` (default `/var/lib/amneziawg-proxy/sessions.json`)
@@ -422,7 +458,9 @@ bash amneziawg-install.sh --purge-state-journal MANIFEST_SHA256 --force
 No archive/passphrase or age/sqlite dependency is needed for purge. It refuses
 unfinalized journals without `--force` (and `--reset-state-journal` on an
 unfinalized journal points to `--purge-state-journal <digest> --force`), validates the digest and trusted journal
-path, takes the lifecycle lock, and rejects unexpected top-level entries. It
+path, takes the lifecycle lock and the journal's companion lock (refusing
+while a panel/proxy restore of that archive runs), and rejects unexpected
+top-level entries. It
 removes recovery/rollback files and receipts without following symlinks or
 crossing filesystem boundaries. A finalized journal retains **only the non-secret
 `finalized` interface-name tombstone**, so old archives cannot resurrect policy
