@@ -3528,6 +3528,16 @@ def config(data, state=None, blocked=frozenset(), preserve_hooks=False, proxy=No
             name, sep, value = stripped.partition('=')
             name, value = name.strip(), value.strip()
             require(kind and sep, 'invalid config line')
+            # amneziawg-tools config.c accepts ListenPort, not ListenAddr.
+            # awg setconf prints "Line unrecognized" and awg-quick then fails
+            # to bring the interface up. Carrying the line would make the
+            # restored VPN unable to start. The proxy installer rewrites an
+            # existing ListenAddr but does not add one, and the tools this
+            # repository installs still reject it.
+            if name == 'ListenAddr':
+                raise StatePolicyError('ListenAddr is not accepted by amneziawg-tools (awg setconf reports '
+                                       '"Line unrecognized: ListenAddr"); remove it before export. These tools '
+                                       'listen on all addresses, and the proxy installer does not add ListenAddr.')
             if name in HOOKS:
                 require(kind == 'Interface' and state is not None, 'client/peer hooks unsupported')
                 if preserve_hooks:
@@ -4062,8 +4072,14 @@ def proxy_plan(root, defaults=None):
         # The VPN archive is still valid. Inspect and dry-run show that plan
         # and warn; only the proxy restore step refuses.
         return dict(present=True, error=str(error), refusal='proxy restore would be refused')
+    for name in ('listen', 'backend'):
+        try:
+            socket_parts(values[name])
+        except ValueError:
+            return dict(present=True, error='unsupported proxy.toml address for key %s' % name,
+                        refusal='proxy restore would be refused')
     _, listen_port = socket_parts(values['listen'])
-    backend_host, backend_port = socket_parts(values['backend'])
+    _, backend_port = socket_parts(values['backend'])
     awg_port = awg_listen_port((root / 'vpn/server.conf').read_bytes())
     state = params((root / 'vpn/params').read_bytes())
     plan = dict(present=True, listen=values['listen'], backend=values['backend'],
@@ -4197,6 +4213,81 @@ def migration_plan(manifest, files, data, policy, phase):
     return blocked, report
 
 
+def endpoint_host(value):
+    # Endpoint is host:port or [ipv6]:port. A literal address (v4 or v6) is
+    # what a ban strands; a hostname can follow DNS.
+    value = value.strip()
+    if value.startswith('['):
+        match = re.fullmatch(r'\[([0-9A-Fa-f:.]+)\]:([0-9]{1,5})', value)
+        if match is None or not 1 <= int(match.group(2)) <= 65535:
+            return None
+        try:
+            ipaddress.ip_address(match.group(1))
+        except ValueError:
+            return None
+        return match.group(1), 'ip_literal'
+    host, sep, port = value.rpartition(':')
+    if not sep or not re.fullmatch(r'[0-9]{1,5}', port) or not 1 <= int(port) <= 65535:
+        return None
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        if (len(host) <= 253 and re.fullmatch(
+                r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*', host)):
+            return host, 'hostname'
+        return None
+    return host, 'ip_literal'
+
+
+def endpoint_audit(files):
+    counts = {'hostname': 0, 'ip_literal': 0}
+    clients = []
+    for name in sorted(files):
+        if not (name.startswith('clients/') and name.endswith('.conf')):
+            continue
+        try:
+            text = files[name].decode('utf-8')
+        except UnicodeError:
+            continue
+        in_peer = False
+        found = None
+        for line in text.splitlines():
+            stripped = line.split('#', 1)[0].strip()
+            if stripped.startswith('['):
+                in_peer = stripped == '[Peer]'
+                continue
+            if not in_peer:
+                continue
+            match = re.fullmatch(r'Endpoint\s*=\s*(.+)', stripped)
+            if match is None:
+                continue
+            found = endpoint_host(match.group(1).strip())
+            break
+        if not found:
+            continue
+        host, kind = found
+        counts[kind] += 1
+        clients.append(dict(name=name[len('clients/'):-len('.conf')], host=host, kind=kind))
+    audit = dict(hostname=counts['hostname'], ip_literal=counts['ip_literal'], clients=clients)
+    if audit['ip_literal']:
+        listed = ', '.join('%s (%s)' % (item['name'], item['host']) for item in clients if item['kind'] == 'ip_literal')
+        audit['warning'] = ('%d client profile(s) use a literal IP in Endpoint and will need a new profile after an IP ban: %s'
+                            % (audit['ip_literal'], listed))
+    else:
+        audit['warning'] = None
+    return audit
+
+
+def endpoint_audit_dir(root):
+    files = {}
+    directory = root / 'clients'
+    if directory.is_dir():
+        for path in sorted(directory.iterdir()):
+            if path.is_file() and not path.is_symlink() and path.name.endswith('.conf'):
+                files['clients/' + path.name] = path.read_bytes()
+    return endpoint_audit(files)
+
+
 def emit_plan(report):
     for warning in report['warnings']:
         print('WARNING: ' + warning, file=sys.stderr)
@@ -4321,11 +4412,21 @@ def main():
                         print('WARNING: ' + warning, file=sys.stderr)
                     panel, proxy = panel_plan(root, args[1] if len(args) > 1 else None), proxy_plan(root)
                     companion_warnings(panel, proxy)
-                    print(json.dumps(dict(manifest, peer_plan=report, panel_plan=panel, proxy_plan=proxy), sort_keys=True, indent=2))
+                    audit = endpoint_audit(files)
+                    if audit.get('warning'):
+                        print('WARNING: ' + audit['warning'], file=sys.stderr)
+                    print(json.dumps(dict(manifest, peer_plan=report, panel_plan=panel, proxy_plan=proxy,
+                                          endpoint_audit=dict(hostname=audit['hostname'], ip_literal=audit['ip_literal'],
+                                                              clients=audit['clients'])), sort_keys=True, indent=2))
     elif mode == 'panel-plan':
         plan = panel_plan(Path(path), args[0] if args else None)
         companion_warnings(plan, {})
         print(json.dumps(plan, sort_keys=True))
+    elif mode == 'endpoint-summary':
+        audit = endpoint_audit_dir(Path(path))
+        print(audit['hostname'])
+        print(audit['ip_literal'])
+        print(audit['warning'] or '')
     elif mode == 'awg-port':
         print(awg_listen_port((Path(path) / 'vpn/server.conf').read_bytes()) or '')
     elif mode == 'proxy-plan':
@@ -4362,6 +4463,9 @@ def main():
         state = params((root / 'vpn/params').read_bytes())
         data = (root / 'vpn/server.conf').read_bytes()
         blocked, report = staged_plan(root, data, 'import')
+        audit = endpoint_audit_dir(root)
+        if audit.get('warning'):
+            report['warnings'].append(audit['warning'])
         emit_plan(report)
         # Hooks must remain in Interface, not be appended below the last Peer.
         clean = config(data, state, blocked, proxy=staged_proxy_ports(root)).decode()
@@ -4501,7 +4605,7 @@ function awgStateSnapshotPanel() {
 	if [[ -n "${ENV_FILE}" && -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]]; then
 		install -m 600 -- "${ENV_FILE}" "${STAGE}/web/env.conf" || return 1
 	fi
-	echo 'NOTE: panel DB/env are kept only inside the encrypted archive; automatic panel/mail restore is TODO.' >&2
+	echo 'NOTE: panel DB/env and the proxy config stay inside the encrypted archive. --activate-state --enable-at-boot restores them when this checkout has the installers; queued mail is not replayed.' >&2
 }
 
 function awgStateExport() { # <destination> <private work directory>
@@ -4573,6 +4677,18 @@ function awgStateExport() { # <destination> <private work directory>
 		return 1
 	fi
 	rm -f -- "${PUBLISH}"
+	local ENDPOINT_AUDIT_TEXT
+	local -a ENDPOINT_AUDIT=()
+	ENDPOINT_AUDIT_TEXT="$(awgStateArchive endpoint-summary "${WORK}/stage")" || return 1
+	mapfile -t ENDPOINT_AUDIT <<<"${ENDPOINT_AUDIT_TEXT}"
+	[[ ${#ENDPOINT_AUDIT[@]} -ge 2 && "${ENDPOINT_AUDIT[0]}" =~ ^[0-9]+$ && "${ENDPOINT_AUDIT[1]}" =~ ^[0-9]+$ ]] || {
+		echo 'ERROR: could not count client endpoints.' >&2
+		return 1
+	}
+	echo "Client endpoints in this archive: ${ENDPOINT_AUDIT[0]} hostname, ${ENDPOINT_AUDIT[1]} literal IP."
+	if [[ -n "${ENDPOINT_AUDIT[2]:-}" ]]; then
+		echo "WARNING: ${ENDPOINT_AUDIT[2]}" >&2
+	fi
 	echo 'Encrypted state archive created. Keep it offline; it grants full VPN access.'
 }
 

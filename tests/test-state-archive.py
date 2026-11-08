@@ -1268,38 +1268,65 @@ fi
     def test_age_passphrase_roundtrip_and_wrong_passphrase(self):
         """Real age and controlling TTY; the secret is never in argv or env."""
         def run_age(args, responses, program='age'):
+            # age 1.1.1 reads the passphrase from /dev/tty and has no
+            # non-interactive switch. Answer the prompt word only: the
+            # exporter prints a NOTE line that contains a colon before age
+            # starts, and a rejected passphrase prints "age: error:" plus
+            # "incorrect passphrase" on that same terminal. Count occurrences
+            # so two prompts in one read both get a response, and so the
+            # error text cannot consume one. A hangup on the pty master can
+            # arrive while age is still exiting; that is not a timeout.
             pid, fd = pty.fork()
             if pid == 0:
-                settings = termios.tcgetattr(0)
-                settings[3] &= ~termios.ECHO
-                termios.tcsetattr(0, termios.TCSANOW, settings)
+                try:
+                    settings = termios.tcgetattr(0)
+                    settings[3] &= ~termios.ECHO
+                    termios.tcsetattr(0, termios.TCSANOW, settings)
+                except termios.error:
+                    os._exit(1)
                 os.execvp(program, [program, *args])
             output = b''
             deadline = time.monotonic() + 25
-            index = 0
+            sent = 0
+            hangup = False
             try:
                 while time.monotonic() < deadline:
-                    ready, _, _ = select.select([fd], [], [], 0.2)
-                    if ready:
+                    if not hangup:
                         try:
-                            data = os.read(fd, 4096)
-                        except OSError:
-                            break
-                        if not data:
-                            break
-                        output += data
-                        if b':' in data and index < len(responses):
-                            os.write(fd, responses[index].encode() + b'\n')
-                            index += 1
+                            ready, _, _ = select.select([fd], [], [], 0.2)
+                        except (OSError, ValueError):
+                            hangup = True
+                            ready = []
+                        if ready:
+                            try:
+                                data = os.read(fd, 4096)
+                            except OSError:
+                                data = b''
+                            if not data:
+                                hangup = True
+                            else:
+                                output += data
+                                while sent < len(responses) and output.lower().count(b'passphrase') > sent:
+                                    try:
+                                        os.write(fd, responses[sent].encode() + b'\n')
+                                    except OSError:
+                                        hangup = True
+                                        break
+                                    sent += 1
                     ended, status = os.waitpid(pid, os.WNOHANG)
                     if ended:
                         return os.waitstatus_to_exitcode(status), output
+                    if hangup:
+                        time.sleep(0.05)
                 ended, status = os.waitpid(pid, os.WNOHANG)
                 if ended:
                     return os.waitstatus_to_exitcode(status), output
                 os.kill(pid, 9)
                 os.waitpid(pid, 0)
-                self.fail('age TTY interaction timed out')
+                shown = output[-800:]
+                for item in responses:
+                    shown = shown.replace(item.encode(), b'<redacted>')
+                self.fail('age TTY interaction timed out: %r' % shown)
             finally:
                 os.close(fd)
         encrypted = self.root / 'backup.awgx'
@@ -2653,6 +2680,84 @@ if awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10
         refused = self.run_helper('export-check', stage, ok=False)
         self.assertIn(b'no amneziawg-proxy config explains it', refused.stderr)
         self.assertNotIn(b'invalid or unsupported', refused.stderr)
+
+    def test_unusable_proxy_address_is_a_named_warning_on_inspect(self):
+        # A subset-valid proxy.toml with an unusable listen/backend must not
+        # hide the VPN plan behind the generic archive error.
+        cases = {
+            'backend': ('listen = "0.0.0.0:51820"\nbackend = "localhost:51821"\n', b'key backend'),
+            'listen': ('listen = "0.0.0.0:99999"\nbackend = "127.0.0.1:51821"\n', b'key listen'),
+        }
+        for name, (toml, needle) in cases.items():
+            with self.subTest(name=name):
+                files = dict(self.files)
+                files['proxy/proxy.toml'] = toml.encode()
+                packed = self.root / (name + '-addr.tar.gz')
+                make_tar(packed, files)
+                inspected = self.run_helper('inspect', packed)
+                view = json.loads(inspected.stdout)
+                self.assertIn('peer_plan', view)
+                self.assertIn(needle, view['proxy_plan']['error'].encode())
+                self.assertEqual(view['proxy_plan']['refusal'], 'proxy restore would be refused')
+                self.assertIn(b'WARNING: amneziawg-proxy: ', inspected.stderr)
+                self.assertIn(needle, inspected.stderr)
+                self.assertNotIn(b'invalid or unsupported', inspected.stderr)
+                stage = self.root / (name + '-addr-stage')
+                self.run_helper('unpack', packed, stage)
+                refused = self.run_helper('proxy-prepare', stage, self.root / (name + '-out'),
+                                          '/etc/amnezia/amneziawg/awg0.conf', '', ok=False)
+                self.assertIn(needle, refused.stderr)
+                self.assertNotIn(b'invalid or unsupported', refused.stderr)
+
+    def test_listen_addr_is_refused_with_an_explicit_message(self):
+        # amneziawg-tools awg setconf rejects ListenAddr. Carrying it would
+        # make the restored interface fail to start.
+        stage = self.root / 'listen-addr'
+        (stage / 'vpn').mkdir(parents=True)
+        (stage / 'vpn/params').write_bytes(self.files['vpn/params'])
+        conf = self.files['vpn/server.conf'].replace(
+            b'ListenPort = 51820\n', b'ListenPort = 51820\nListenAddr = 127.0.0.1\n')
+        (stage / 'vpn/server.conf').write_bytes(conf)
+        refused = self.run_helper('export-check', stage, ok=False)
+        self.assertIn(b'ListenAddr is not accepted by amneziawg-tools', refused.stderr)
+        self.assertNotIn(b'invalid or unsupported', refused.stderr)
+        files = dict(self.files)
+        files['vpn/server.conf'] = conf
+        make_tar(self.tar, files)
+        verified = self.run_helper('verify', ok=False)
+        self.assertIn(b'ListenAddr is not accepted by amneziawg-tools', verified.stderr)
+        self.assertNotIn(b'invalid or unsupported', verified.stderr)
+
+    def test_endpoint_audit_counts_literal_ip_profiles(self):
+        files = dict(self.files)
+        files['clients/awg0-client-literal.conf'] = (
+            '[Interface]\nPrivateKey = %s\nAddress = 10.66.66.3/32\n'
+            '# Endpoint = 198.51.100.9:51820\n'
+            '[Peer]\nPublicKey = %s\nEndpoint = 203.0.113.7:51820\nAllowedIPs = 0.0.0.0/0\n' % (KEY, PUB)
+        ).encode()
+        files['clients/awg0-client-v6.conf'] = (
+            '[Interface]\nPrivateKey = %s\nAddress = 10.66.66.4/32\n'
+            '[Peer]\nPublicKey = %s\nEndpoint = [2001:db8::5]:51820\nAllowedIPs = 0.0.0.0/0\n' % (KEY, PUB)
+        ).encode()
+        make_tar(self.tar, files)
+        inspected = self.run_helper('inspect')
+        audit = json.loads(inspected.stdout)['endpoint_audit']
+        self.assertEqual(audit['hostname'], 1)
+        self.assertEqual(audit['ip_literal'], 2)
+        kinds = {item['name']: item['kind'] for item in audit['clients']}
+        self.assertEqual(kinds['awg0-client-phone'], 'hostname')
+        self.assertEqual(kinds['awg0-client-literal'], 'ip_literal')
+        self.assertEqual(next(item['host'] for item in audit['clients'] if item['name'] == 'awg0-client-literal'), '203.0.113.7')
+        self.assertIn(b'203.0.113.7', inspected.stderr)
+        self.assertIn(b'2001:db8::5', inspected.stderr)
+        self.assertIn(b'will need a new profile after an IP ban', inspected.stderr)
+        self.assertNotIn(KEY.encode(), inspected.stdout)
+        stage = self.root / 'audit-stage'
+        self.run_helper('unpack', self.tar, stage)
+        prepared = self.run_helper('prepare', stage)
+        self.assertIn(b'will need a new profile after an IP ban', prepared.stderr)
+        summary = self.run_helper('endpoint-summary', stage)
+        self.assertEqual(summary.stdout.splitlines()[:2], [b'1', b'2'])
 
     def test_direct_export_without_proxy_is_schema_1(self):
         result = self.export_source(51820, proxy=False)
