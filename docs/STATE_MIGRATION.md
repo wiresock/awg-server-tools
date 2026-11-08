@@ -256,8 +256,11 @@ directory are archive-controlled, and the installers chown/chmod those
 directories. Restore accepts only the defaults, or a path that does not exist
 yet below `/var/lib/`, `/srv/`, `/opt/` (data), `/etc/`, `/srv/`, `/opt/`
 (proxy config directory) or `/opt/`, `/usr/local/` (proxy binary directory),
-with no `..` components and no symlink anywhere on the path. A retry may find
-the directory its first attempt created.
+with no `..` components and no symlink anywhere on the path. A rerun accepts
+an existing non-default directory only when the journal recorded that exact
+path after an earlier check saw it absent (the installer may have created it
+before failing). A directory that already existed stays refused, including
+after `panel-installing` or `proxy-installing` is left behind.
 
 After the panel step (independently of its outcome), when the archive has
 `proxy/proxy.toml`:
@@ -285,9 +288,11 @@ After the panel step (independently of its outcome), when the archive has
 
 Companion lock: the panel and proxy steps run after the VPN lifecycle lock is
 released (the panel installer and the panel take it themselves). Before that
-release, activation takes a separate non-blocking `companions.lock` in the
-journal; a concurrent `--activate-state` rerun, `--purge-state-journal` or
-`--reset-state-journal` for the same archive refuses with a clear error.
+release, activation takes a separate non-blocking flock on the journal
+directory itself. Purge and reset take the same lock, so deleting a leftover
+`companions.lock` file cannot drop it. A concurrent `--activate-state` rerun,
+`--purge-state-journal` or `--reset-state-journal` for the same archive
+refuses with a clear error.
 
 Panel access to proxy status: the panel only reads
 `AWG_PROXY_SESSIONS_FILE` (default `/var/lib/amneziawg-proxy/sessions.json`)
@@ -458,7 +463,7 @@ bash amneziawg-install.sh --purge-state-journal MANIFEST_SHA256 --force
 No archive/passphrase or age/sqlite dependency is needed for purge. It refuses
 unfinalized journals without `--force` (and `--reset-state-journal` on an
 unfinalized journal points to `--purge-state-journal <digest> --force`), validates the digest and trusted journal
-path, takes the lifecycle lock and the journal's companion lock (refusing
+path, takes the lifecycle lock and the journal-directory companion lock (refusing
 while a panel/proxy restore of that archive runs), and rejects unexpected
 top-level entries. It
 removes recovery/rollback files and receipts without following symlinks or

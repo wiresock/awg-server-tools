@@ -3834,7 +3834,7 @@ def listen_warning(listen):
             'Edit the panel env after restore or use 127.0.0.1/0.0.0.0 on the old host before export.' % host)
 
 
-def panel_prepare(root, out, clients_dir, default_db, migrations_dir, retry=False):
+def panel_prepare(root, out, clients_dir, default_db, migrations_dir, approved=''):
     # Builds the live-ready panel DB/env in private staging. Bash installs them.
     plan = panel_plan(root, migrations_dir)
     require(plan['present'], 'archive has no panel database')
@@ -3852,7 +3852,7 @@ def panel_prepare(root, out, clients_dir, default_db, migrations_dir, retry=Fals
     db_live = db_value if (db_value.startswith('/') and re.fullmatch(r'/[A-Za-z0-9._/-]+', db_value) and '/../' not in db_value + '/'
                            and not db_value.endswith('/')) else default_db
     # The installer gets the DB directory as --data-dir and chowns it to awg-web 0700.
-    target_dir_ok(db_live.rsplit('/', 1)[0], default_db.rsplit('/', 1)[0], 'data', retry)
+    target_dir_ok(db_live.rsplit('/', 1)[0], default_db.rsplit('/', 1)[0], 'data', [approved] if approved else [])
     out.mkdir(mode=0o700)
     lines = []
     seen = set()
@@ -3921,7 +3921,7 @@ TARGET_ROOTS = dict(data=('/var/lib/', '/srv/', '/opt/'), config=('/etc/', '/srv
                     install=('/opt/', '/usr/local/'))
 
 
-def target_dir_ok(path, default, kind, retry):
+def target_dir_ok(path, default, kind, approved=()):
     if not safe_path(path):
         raise StatePolicyError('unsafe %s path in the archive' % kind)
     parts = path.split('/')
@@ -3933,8 +3933,11 @@ def target_dir_ok(path, default, kind, retry):
     roots = TARGET_ROOTS[kind]
     if not any(path.startswith(root) and len(path) > len(root) for root in roots):
         raise StatePolicyError('%s path %s is not the default and not below %s; refused' % (kind, path, ', '.join(roots)))
-    # A retry of this migration finds the directory its first attempt created.
-    if not retry and os.path.lexists(path):
+    # An existing directory is accepted only when this migration recorded that
+    # exact path after an earlier check saw it absent (the installer may then
+    # have created it). A directory that already existed stays refused on rerun;
+    # `panel-installing` / `proxy-installing` alone do not approve it.
+    if os.path.lexists(path) and path not in set(approved or ()):
         raise StatePolicyError('%s path %s already exists on this host and is not the default; refused '
                                '(the installer would change its owner/mode)' % (kind, path))
 
@@ -4007,7 +4010,7 @@ def proxy_plan(root, defaults=None):
     return plan
 
 
-def proxy_prepare(root, out, awg_conf, retry=False, defaults=None):
+def proxy_prepare(root, out, awg_conf, approved=(), defaults=None):
     defaults = defaults or PROXY_DEFAULTS
     plan = proxy_plan(root, defaults)
     require(plan['present'], 'archive has no proxy config')
@@ -4019,9 +4022,10 @@ def proxy_prepare(root, out, awg_conf, retry=False, defaults=None):
     meta = plan['install_paths']
     # The proxy installer chowns/chmods the config file's directory and the data
     # dir, and writes the binary into the install dir.
-    target_dir_ok(meta['config_path'].rsplit('/', 1)[0], defaults['config_path'].rsplit('/', 1)[0], 'config', retry)
-    target_dir_ok(meta['data_dir'], defaults['data_dir'], 'data', retry)
-    target_dir_ok(meta['install_dir'], defaults['install_dir'], 'install', retry)
+    approved = set(approved or ())
+    target_dir_ok(meta['config_path'].rsplit('/', 1)[0], defaults['config_path'].rsplit('/', 1)[0], 'config', approved)
+    target_dir_ok(meta['data_dir'], defaults['data_dir'], 'data', approved)
+    target_dir_ok(meta['install_dir'], defaults['install_dir'], 'install', approved)
     listen_host, listen_port = socket_parts(values['listen'])
     backend_host, backend_port = socket_parts(values['backend'])
     flags = ['--listen-host', listen_host, '--listen-port', str(listen_port),
@@ -4259,14 +4263,17 @@ def main():
         print(json.dumps(plan, sort_keys=True))
     elif mode == 'proxy-prepare':
         defaults = dict(zip(('config_path', 'data_dir', 'install_dir'), args[3:6])) if len(args) >= 6 else None
-        proxy_prepare(Path(path), Path(args[0]), args[1], args[2] == 'retry', defaults)
+        # args[2] is the journal's approved-directory record (one path per line),
+        # empty on the first attempt. It is not a blanket retry flag.
+        approved = [line for line in (args[2].split('\n') if len(args) > 2 else []) if line]
+        proxy_prepare(Path(path), Path(args[0]), args[1], approved, defaults)
     elif mode == 'proxy-meta':
         # Export: install paths discovered from the real proxy unit.
         meta = dict(zip(('config_path', 'data_dir', 'install_dir'), [path] + args[:2]))
         require(all(map(safe_path, meta.values())), 'unsafe proxy install path')
         print(json.dumps(meta, sort_keys=True))
     elif mode == 'panel-prepare':
-        panel_prepare(Path(path), Path(args[0]), args[1], args[2], args[3] or None, len(args) > 4 and args[4] == 'retry')
+        panel_prepare(Path(path), Path(args[0]), args[1], args[2], args[3] or None, args[4] if len(args) > 4 else '')
     elif mode == 'reconcile':
         # Bash provides only freshly generated transaction state or a local file
         # whose receipt it verified before reconciliation.
@@ -4964,7 +4971,7 @@ function awgStatePanelFail() { # <journal> <message>
 }
 
 function awgStateRestorePanel() { # <stage> <journal> <work>
-	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER MIGRATIONS DB DATA_DIR SIDECAR RETRY
+	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER MIGRATIONS DB DATA_DIR SIDECAR APPROVED=""
 	local CLIENTS="${AMNEZIAWG_DIR}/clients"
 	local -a FIELDS=() ARGS=()
 	[[ -f "${STAGE}/web/database.sqlite" ]] || return 0
@@ -4982,17 +4989,36 @@ function awgStateRestorePanel() { # <stage> <journal> <work>
 		return 1
 	fi
 	MIGRATIONS="${INSTALLER%/scripts/*}/migrations"
-	RETRY=''
-	[[ ! -e "${JOURNAL}/panel-installing" ]] || RETRY=retry
+	# panel-installing means "our attempt", not "approve whatever directory
+	# exists". Only a path recorded after it passed the absent-directory check
+	# may exist on a rerun.
+	if [[ -L "${JOURNAL}/panel-approved-dir" ]]; then
+		echo 'ERROR: unsafe panel path record in the journal.' >&2
+		return 1
+	fi
+	if [[ -f "${JOURNAL}/panel-approved-dir" ]]; then
+		IFS= read -r APPROVED <"${JOURNAL}/panel-approved-dir" || true
+	fi
 	: >"${JOURNAL}/panel-installing" || { echo 'ERROR: cannot write the panel journal marker.' >&2; return 1; }
 	awgStateJournalStep "${JOURNAL}" panel-restore-started
 	rm -rf -- "${WORK}/panel" "${WORK}/panel.fields"
-	awgStateArchive panel-prepare "${STAGE}" "${WORK}/panel" "${CLIENTS}" "${AWG_STATE_PANEL_DEFAULT_DB}" "${MIGRATIONS}" "${RETRY}" >"${WORK}/panel.fields" ||
+	awgStateArchive panel-prepare "${STAGE}" "${WORK}/panel" "${CLIENTS}" "${AWG_STATE_PANEL_DEFAULT_DB}" "${MIGRATIONS}" "${APPROVED}" >"${WORK}/panel.fields" ||
 		{ awgStatePanelFail "${JOURNAL}" 'archived panel data was refused (see above).'; return 1; }
 	mapfile -d '' FIELDS <"${WORK}/panel.fields"
 	[[ ${#FIELDS[@]} -eq 2 ]] || { awgStatePanelFail "${JOURNAL}" 'internal panel prepare error.'; return 1; }
 	DB="${FIELDS[1]}"
 	DATA_DIR="${DB%/*}"
+	if [[ -L "${JOURNAL}/panel-approved-dir" ]]; then
+		awgStatePanelFail "${JOURNAL}" 'unsafe panel path record in the journal.'
+		return 1
+	fi
+	if [[ ! -e "${JOURNAL}/panel-approved-dir" ]]; then
+		printf '%s\n' "${DATA_DIR}" >"${WORK}/panel-approved-dir" &&
+			install -m 600 -- "${WORK}/panel-approved-dir" "${JOURNAL}/panel-approved-dir" || {
+			awgStatePanelFail "${JOURNAL}" 'cannot record the approved panel data directory.'
+			return 1
+		}
+	fi
 	# Retry: never run the installer against a running half-restored panel.
 	systemctl stop "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
 	# The archived env is installed first, so the panel installer keeps it
@@ -5079,7 +5105,7 @@ function awgStateProxyFail() { # <journal> <message>
 }
 
 function awgStateRestoreProxy() { # <stage> <journal> <work>
-	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER CONFIG DATA_DIR INSTALL_DIR PORT RETRY=''
+	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER CONFIG CONFIG_DIR DATA_DIR INSTALL_DIR PORT APPROVED=""
 	local -a FIELDS=() ARGS=()
 	[[ -f "${STAGE}/proxy/proxy.toml" ]] || return 0
 	if [[ -e "${JOURNAL}/proxy-restored" ]]; then
@@ -5091,8 +5117,14 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 		return 1
 	}
 	rm -rf -- "${WORK}/proxy" "${WORK}/proxy.fields"
-	[[ ! -e "${JOURNAL}/proxy-installing" ]] || RETRY=retry
-	awgStateArchive proxy-prepare "${STAGE}" "${WORK}/proxy" "${SERVER_AWG_CONF}" "${RETRY}" \
+	if [[ -L "${JOURNAL}/proxy-approved-dirs" ]]; then
+		echo 'ERROR: unsafe proxy path record in the journal.' >&2
+		return 1
+	fi
+	if [[ -f "${JOURNAL}/proxy-approved-dirs" ]]; then
+		APPROVED="$(<"${JOURNAL}/proxy-approved-dirs")"
+	fi
+	awgStateArchive proxy-prepare "${STAGE}" "${WORK}/proxy" "${SERVER_AWG_CONF}" "${APPROVED}" \
 		"${AWG_STATE_PROXY_CONFIG}" "${AWG_STATE_PROXY_DEFAULT_DATA}" "${AWG_STATE_PROXY_DEFAULT_INSTALL}" >"${WORK}/proxy.fields" || {
 		echo 'ERROR: archived proxy config was refused (see above); the VPN and panel are unaffected.' >&2
 		return 1
@@ -5100,6 +5132,7 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 	mapfile -d '' FIELDS <"${WORK}/proxy.fields"
 	[[ ${#FIELDS[@]} -gt 4 ]] || { echo 'ERROR: internal proxy prepare error.' >&2; return 1; }
 	CONFIG="${FIELDS[0]}" DATA_DIR="${FIELDS[1]}" INSTALL_DIR="${FIELDS[2]}" PORT="${FIELDS[3]}"
+	CONFIG_DIR="${CONFIG%/*}"
 	if [[ ! -e "${JOURNAL}/proxy-installing" ]] &&
 		[[ -e "${CONFIG}" || -e "${AWG_STATE_PROXY_UNIT}" ]]; then
 		echo "ERROR: an amneziawg-proxy is already installed on this host (${CONFIG} or ${AWG_STATE_PROXY_UNIT} exists); not overwriting it. The VPN and panel are unaffected." >&2
@@ -5107,6 +5140,19 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 	fi
 	: >"${JOURNAL}/proxy-installing" || { echo 'ERROR: cannot write the proxy journal marker.' >&2; return 1; }
 	awgStateJournalStep "${JOURNAL}" proxy-restore-started
+	if [[ -L "${JOURNAL}/proxy-approved-dirs" ]]; then
+		echo 'ERROR: unsafe proxy path record in the journal.' >&2
+		return 1
+	fi
+	# Record the directories prepare just accepted, before the installer creates
+	# them. A rerun accepts only these exact paths, not every existing directory.
+	if [[ ! -e "${JOURNAL}/proxy-approved-dirs" ]]; then
+		printf '%s\n' "${CONFIG_DIR}" "${DATA_DIR}" "${INSTALL_DIR}" >"${WORK}/proxy-approved-dirs" &&
+			install -m 600 -- "${WORK}/proxy-approved-dirs" "${JOURNAL}/proxy-approved-dirs" || {
+			echo 'ERROR: cannot record the approved proxy directories.' >&2
+			return 1
+		}
+	fi
 	systemctl stop "${AWG_STATE_PROXY_SERVICE}" >/dev/null 2>&1 || true
 	# A retry starts from a clean generated config (the installer keeps an
 	# existing one without --force and would then skip unit installation).
@@ -5138,19 +5184,21 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 
 # Companion steps run after the VPN lifecycle lock is released (the panel
 # installer and the panel itself take that lock). A separate non-blocking
-# per-journal lock, taken BEFORE that release, serializes concurrent
-# --activate-state reruns and --purge-state-journal/--reset-state-journal.
+# flock on the journal directory itself, taken BEFORE that release, serializes
+# concurrent --activate-state reruns and --purge-state-journal/--reset-state-journal.
+# The lock is the directory inode, so purge can delete a leftover
+# companions.lock file without releasing it.
 AWG_STATE_COMPANION_LOCK_FD=""
 
 function awgStateAcquireCompanionLock() { # <journal>
-	local FILE="$1/companions.lock"
+	local DIR="$1"
 	[[ -z "${AWG_STATE_COMPANION_LOCK_FD}" ]] || return 0
-	if [[ -L "${FILE}" ]] || { [[ -e "${FILE}" ]] && [[ ! -f "${FILE}" ]]; }; then
+	if [[ -L "${DIR}" || ! -d "${DIR}" ]]; then
 		echo 'ERROR: unsafe companion lock in the migration journal.' >&2
 		return 1
 	fi
 	command -v flock >/dev/null 2>&1 || { echo 'ERROR: flock is required for companion restore.' >&2; return 1; }
-	exec {AWG_STATE_COMPANION_LOCK_FD}>>"${FILE}" || { AWG_STATE_COMPANION_LOCK_FD=""; echo 'ERROR: cannot open the companion lock.' >&2; return 1; }
+	exec {AWG_STATE_COMPANION_LOCK_FD}<"${DIR}" || { AWG_STATE_COMPANION_LOCK_FD=""; echo 'ERROR: cannot open the companion lock.' >&2; return 1; }
 	if ! flock -xn "${AWG_STATE_COMPANION_LOCK_FD}"; then
 		exec {AWG_STATE_COMPANION_LOCK_FD}>&-
 		AWG_STATE_COMPANION_LOCK_FD=""
@@ -5249,11 +5297,11 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 	shopt -s nullglob dotglob
 	for ENTRY in "${JOURNAL}/"*; do
 		case "${ENTRY##*/}" in
-			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete|panel-installing|panel-restored|proxy-installing|proxy-restored|companions.lock) ;;
+			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete|panel-installing|panel-restored|panel-approved-dir|proxy-installing|proxy-restored|proxy-approved-dirs|companions.lock) ;;
 			*) echo 'ERROR: unexpected journal entry; refusing purge.' >&2; exit 1 ;;
 		esac
 	done
-	for ENTRY in before before.new before.old recovery receipt nic steps rollback-incomplete panel-installing proxy-installing companions.lock; do
+	for ENTRY in before before.new before.old recovery receipt nic steps rollback-incomplete panel-installing panel-approved-dir proxy-installing proxy-approved-dirs companions.lock; do
 		rm -rf --one-file-system -- "${JOURNAL:?}/${ENTRY:?}" || exit 1
 	done
 	if (( FINALIZED )) && [[ "${OPTION}" != --reset-finalized ]]; then

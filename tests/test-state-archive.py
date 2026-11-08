@@ -2164,6 +2164,7 @@ awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 11
         result = self.run_panel(root, r"""
 if UNHEALTHY=1 awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
 [[ -e "$ROOT/journal/panel-installing" && ! -e "$ROOT/journal/panel-restored" ]] || exit 11
+[[ "$(<"$ROOT/journal/panel-approved-dir")" == "$ROOT/data" ]] || exit 16
 grep -q '^stop amneziawg-web' "$ROOT/systemctl.log" || exit 12
 ! grep -q '^enable' "$ROOT/systemctl.log" || exit 13
 # The env/unit now exist, but the journal marker identifies our own attempt.
@@ -2175,6 +2176,41 @@ awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 14
         self.assertIn('finalized VPN is unaffected', out)
         self.assertIn('did not become healthy', out)
         self.assertEqual((root / 'installer.runs').read_text(), 'run\nrun\n')
+
+    def test_existing_panel_dir_stays_refused_after_installing_marker(self):
+        # m1: panel-installing is written before prepare. A refused existing
+        # directory must stay refused on the rerun the error message asks for.
+        # A recorded approval for a different directory must not unlock it.
+        if not os.path.isdir('/var/lib/dpkg'):
+            self.skipTest('needs the existing directory /var/lib/dpkg')
+        root = self.root / 'panel-dpkg-retry'
+        root.mkdir()
+        self.panel_stage(root, env='AUTH_PASSWORD_HASH=$argon2id$v=19$x\nAWG_WEB_DB=/var/lib/dpkg/awg-web.db\n')
+        result = self.run_panel(root, r"""
+if awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ -e "$ROOT/journal/panel-installing" && ! -e "$ROOT/journal/panel-approved-dir" ]] || exit 11
+[[ ! -e "$ROOT/installer.runs" ]] || exit 12
+printf '%s\n' /var/lib/amneziawg-web >"$ROOT/journal/panel-approved-dir"
+if awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 13; fi
+[[ ! -e "$ROOT/installer.runs" ]] || exit 14
+""")
+        out = (result.stdout + result.stderr).decode()
+        self.assertEqual(result.returncode, 0, out)
+        self.assertEqual(out.count('already exists'), 2, out)
+        self.assertNotIn('installer.runs', out)
+
+    def test_symlink_panel_path_record_is_refused(self):
+        root = self.root / 'panel-approved-link'
+        root.mkdir()
+        self.panel_stage(root)
+        result = self.run_panel(root, r"""
+ln -s "$ROOT/data" "$ROOT/journal/panel-approved-dir"
+if awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ ! -e "$ROOT/installer.runs" ]] || exit 11
+""")
+        out = (result.stdout + result.stderr).decode()
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn('unsafe panel path record', out)
 
     def test_panel_restore_refusals(self):
         cases = {
@@ -2344,6 +2380,7 @@ awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 11
         result = self.run_proxy(root, r"""
 if UNHEALTHY=1 awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
 [[ -e "$ROOT/journal/proxy-installing" && ! -e "$ROOT/journal/proxy-restored" ]] || exit 11
+[[ -f "$ROOT/journal/proxy-approved-dirs" && ! -L "$ROOT/journal/proxy-approved-dirs" ]] || exit 15
 ! grep -q '^enable' "$ROOT/systemctl.log" || exit 12
 awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 13
 [[ -e "$ROOT/journal/proxy-restored" ]] || exit 14
@@ -2570,9 +2607,9 @@ awgStateImportPreflight eth0 "$ROOT"; echo "rc=$?"
         (self.root / 'real').mkdir()
         (self.root / 'link').symlink_to(self.root / 'real')
         result = subprocess.run(['python3', '-c', code + r"""
-def outcome(path, default, kind, retry=False):
+def outcome(path, default, kind, approved=''):
     try:
-        target_dir_ok(path, default, kind, retry)
+        target_dir_ok(path, default, kind, [approved] if approved else [])
         return 'ok'
     except StatePolicyError as error:
         return str(error)
@@ -2594,13 +2631,15 @@ print(json.dumps([outcome(*case) for case in json.loads(sys.argv[2])]))
             ['/usr/local/bin', '/usr/local/bin', 'install', False],
             ['/opt/awg-test-new-%d/bin' % os.getpid(), '/usr/local/bin', 'install', False],
             [str(self.root / 'link/x'), str(self.root / 'link/x'), 'data', False],
-            ['/var/lib/dpkg', '/var/lib/amneziawg-web', 'data', True],
+            ['/var/lib/dpkg', '/var/lib/amneziawg-web', 'data', '/var/lib/dpkg'],
+            ['/var/lib/dpkg', '/var/lib/amneziawg-web', 'data', '/var/lib/amneziawg-web'],
         ])], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         got = json.loads(result.stdout)
         ok = [o == 'ok' for o in got]
-        self.assertEqual(ok, [True, True, False, False, False, False, False, False, False, False, True, False, True, True, False, True], got)
+        self.assertEqual(ok, [True, True, False, False, False, False, False, False, False, False, True, False, True, True, False, True, False], got)
         self.assertIn('already exists', got[6])
+        self.assertIn('already exists', got[16])
         self.assertIn('unsafe', got[7])
         self.assertIn('symlink', got[14])
 
@@ -2616,6 +2655,29 @@ if awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10
         out = (result.stdout + result.stderr).decode()
         self.assertEqual(result.returncode, 0, out)
         self.assertIn('config path /etc is not the default', out)
+
+    def test_existing_proxy_data_dir_stays_refused_when_installing_marker_is_left(self):
+        # A leftover proxy-installing marker must not approve an existing directory.
+        if not os.path.isdir('/var/lib/dpkg'):
+            self.skipTest('needs the existing directory /var/lib/dpkg')
+        root = self.root / 'proxy-dpkg-retry'
+        root.mkdir()
+        pid = os.getpid()
+        self.proxy_stage(root, meta=dict(config_path='/etc/awg-state-newproxy-%d/proxy.toml' % pid,
+                                          data_dir='/var/lib/dpkg',
+                                          install_dir='/opt/awg-state-newproxy-%d' % pid))
+        (root / 'defaults.sh').unlink()
+        result = self.run_proxy(root, r"""
+if awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ ! -e "$ROOT/journal/proxy-installing" && ! -e "$ROOT/journal/proxy-approved-dirs" ]] || exit 11
+[[ ! -e "$ROOT/installer.runs" ]] || exit 12
+: >"$ROOT/journal/proxy-installing"
+if awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 13; fi
+[[ ! -e "$ROOT/installer.runs" && ! -e "$ROOT/journal/proxy-approved-dirs" ]] || exit 14
+""")
+        out = (result.stdout + result.stderr).decode()
+        self.assertEqual(result.returncode, 0, out)
+        self.assertEqual(out.count('already exists'), 2, out)
 
     def test_custom_existing_panel_db_dir_refused(self):
         root = self.root / 'panel-etc'
@@ -2673,7 +2735,7 @@ if awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10
         journal.mkdir()
         result = subprocess.run(['bash', '-c', r"""
 source "$1"; J="$2"
-exec 9>>"$J/companions.lock"; flock -x 9
+exec 9<"$J"; flock -x 9
 awgStateRestorePanel() { echo panel-ran; }
 awgStateRestoreProxy() { echo proxy-ran; }
 ( awgStateRestoreCompanions s "$J" w; echo "companions rc=$?" )
@@ -2681,7 +2743,7 @@ AWG_STATE_JOURNAL_DIR="${J%/*}"
 isRoot() { return 0; }
 acquireClientLifecycleLock() { :; }; releaseClientLifecycleLock() { :; }
 awgStateTrustedPath() { return 0; }
-D=$(printf '%064d' 0); mkdir -p "$AWG_STATE_JOURNAL_DIR/$D"; exec 8>>"$AWG_STATE_JOURNAL_DIR/$D/companions.lock"; flock -x 8
+D=$(printf '%064d' 0); mkdir -p "$AWG_STATE_JOURNAL_DIR/$D"; exec 8<"$AWG_STATE_JOURNAL_DIR/$D"; flock -x 8
 ( awgStatePurgeJournal "$D" --force ); echo "purge rc=$?"
 [[ -d "$AWG_STATE_JOURNAL_DIR/$D" ]] && echo kept
 exec 9>&- 8>&-
@@ -2692,6 +2754,25 @@ exec 9>&- 8>&-
         self.assertEqual(result.stdout, 'companions rc=1\npurge rc=1\nkept\npanel-ran\nproxy-ran\ncompanions rc=0\npurge rc=0\npurged\n',
                          result.stderr)
         self.assertEqual(result.stderr.count('another panel/proxy restore'), 2)
+
+    def test_purge_removes_approved_path_records_and_leftover_lock_file(self):
+        journal = self.root / 'purge-approved'
+        digest = 'ab' * 32
+        jdir = journal / digest
+        jdir.mkdir(parents=True)
+        (jdir / 'panel-approved-dir').write_text('/var/lib/amneziawg-web\n')
+        (jdir / 'proxy-approved-dirs').write_text('/etc/amneziawg-proxy\n/var/lib/amneziawg-proxy\n/usr/local/bin\n')
+        (jdir / 'companions.lock').write_text('')
+        result = subprocess.run(['bash', '-c', r"""
+source "$1"
+AWG_STATE_JOURNAL_DIR="$2"
+isRoot() { return 0; }
+acquireClientLifecycleLock() { :; }; releaseClientLifecycleLock() { :; }
+awgStateTrustedPath() { return 0; }
+awgStatePurgeJournal "$3" --force
+""", 'test', str(SCRIPT), str(journal), digest], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(jdir.exists(), result.stdout)
 
     def test_activation_takes_companion_lock_before_releasing_lifecycle_lock(self):
         text = SCRIPT.read_text()
