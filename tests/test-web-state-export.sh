@@ -11,6 +11,25 @@ export TMPDIR="$WORK/tmp"
 source <(sed '/^main "\$@"$/d' "$ROOT/amneziawg-web/scripts/amneziawg-web-privileged")
 require_root() { :; }
 resolve_awg_install_script() { printf '%s\n' "$WORK/mock-installer.sh"; }
+# Export refuses to start unless age, python3 and sqlite3 resolve on the
+# helper PATH. The mock installer never executes them. When this machine does
+# not have one, report a trusted path so the other tests still reach the mock.
+if [[ -z "$(resolve_system_command age)" || -z "$(resolve_system_command python3)" || -z "$(resolve_system_command sqlite3)" ]]; then
+    eval "$(declare -f resolve_system_command | sed '1s/^resolve_system_command/_resolve_system_command_real/')"
+    resolve_system_command() {
+        local found
+        found="$(_resolve_system_command_real "$1")"
+        if [[ -z "${found}" ]]; then
+            case "$1" in
+                age|python3|sqlite3)
+                    printf '/usr/bin/%s\n' "$1"
+                    return 0
+                    ;;
+            esac
+        fi
+        printf '%s\n' "${found}"
+    }
+fi
 
 fail_test() {
     echo "FAIL: $1"
@@ -219,5 +238,129 @@ rc=0
 grep -q 'cannot summarize endpoints' "$WORK/summary-err" \
     || fail_test 'missing endpoint marker did not produce the fixed error'
 [[ ! -s "$WORK/summary-out" ]] || fail_test 'missing marker wrote stdout'
+
+# A missing age must fail before the installer starts. The installer is a
+# capable mock; the capability check must not hide the missing-tool error.
+# Command substitution strips the newline resolve_system_command prints
+# when the tool is absent.
+(
+    resolve_awg_install_script() { printf '%s\n' "$WORK/mock-installer.sh"; }
+    cat > "$WORK/mock-installer.sh" <<MOCK
+#!/bin/bash
+AWG_INSTALLER_CAPABILITY_STATE_EXPORT_STREAM="state-export-stream-v1"
+touch "$WORK/ran"
+printf '%s\n' "\$@" > "$WORK/argv"
+exit 0
+MOCK
+    chmod 0755 "$WORK/mock-installer.sh"
+    resolve_system_command() {
+        if [[ "$1" == age ]]; then
+            printf '\n'
+        else
+            printf '/usr/bin/%s\n' "$1"
+        fi
+    }
+    rm -f "$WORK/argv" "$WORK/ran"
+    rc=0
+    printf '%s' "$SECRET" | (trap cleanup EXIT; main export-state) \
+        >"$WORK/stdout" 2>"$WORK/stderr" || rc=$?
+    [[ "$rc" == 2 ]] || fail_test "missing age should exit 2, got $rc"
+    grep -q 'export-state requires age; rerun the panel upgrade' "$WORK/stderr" \
+        || fail_test 'missing age did not produce the fixed message'
+    [[ ! -e "$WORK/argv" && ! -e "$WORK/ran" ]] || fail_test 'missing age started the installer'
+    [[ ! -s "$WORK/stdout" ]] || fail_test 'missing age wrote stdout'
+)
+resolve_awg_install_script() { printf '%s\n' "$WORK/mock-installer.sh"; }
+
+cat > "$WORK/mock-installer.sh" <<MOCK
+#!/bin/bash
+AWG_INSTALLER_CAPABILITY_STATE_EXPORT_STREAM="state-export-stream-v1"
+printf '%s\\n' "\$\$" > "$WORK/installer.pid"
+sleep 60 &
+printf '%s\\n' "\$!" > "$WORK/sleep.pid"
+sleep 60
+MOCK
+chmod 0755 "$WORK/mock-installer.sh"
+rm -f "$WORK/installer.pid" "$WORK/sleep.pid"
+printf '%s' "$SECRET" | (trap cleanup EXIT; main export-state) \
+    >"$WORK/stdout" 2>"$WORK/stderr" &
+helper_pid=$!
+ready=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if [[ -s "$WORK/installer.pid" && -s "$WORK/sleep.pid" ]]; then
+        ready=1
+        break
+    fi
+    sleep 0.1
+done
+[[ "$ready" == 1 ]] || fail_test 'installer did not record its process group'
+kill -s TERM -- "$helper_pid" || true
+wait "$helper_pid" 2>/dev/null || true
+installer_pid="$(cat "$WORK/installer.pid")"
+sleep_pid="$(cat "$WORK/sleep.pid")"
+gone=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if ! kill -0 "$installer_pid" 2>/dev/null && ! kill -0 "$sleep_pid" 2>/dev/null; then
+        gone=1
+        break
+    fi
+    sleep 0.1
+done
+[[ "$gone" == 1 ]] || fail_test "SIGTERM left installer ${installer_pid} or sleep ${sleep_pid} running"
+
+install_sh="$ROOT/amneziawg-web/scripts/amneziawg-web-install.sh"
+upgrade_sh="$ROOT/amneziawg-web/scripts/amneziawg-web-upgrade.sh"
+diff -q <(sed -n '/^ensure_state_export_dependencies()/,/^}/p' "$install_sh") \
+    <(sed -n '/^ensure_state_export_dependencies()/,/^}/p' "$upgrade_sh") \
+    || fail_test 'install and upgrade state-export dependency functions differ'
+grep -q 'ensure_state_export_dependencies$' <(sed -n '/^main()/,/^}/p' "$install_sh") \
+    || fail_test 'panel install does not install age'
+grep -q 'ensure_state_export_dependencies$' <(sed -n '/^main()/,/^}/p' "$upgrade_sh") \
+    || fail_test 'panel upgrade does not install age'
+
+(
+    body="$(sed -n '/^ensure_state_export_dependencies()/,/^}/p' "$install_sh")"
+    body="${body//\/etc\/os-release/${WORK}/os-release}"
+    body="${body//\/etc\/apt\/apt.conf.d\/99amneziawg-force-ipv4/${WORK}/force-ipv4.conf}"
+    info() { printf 'INFO %s\n' "$*"; }
+    warn() { printf 'WARN %s\n' "$*" >&2; }
+    command() {
+        if [[ "$1" == -v ]]; then
+            case "${2:-}" in
+                apt-get) return 0 ;;
+                age|python3|sqlite3) return 1 ;;
+            esac
+            return 1
+        fi
+        builtin command "$@"
+    }
+    apt-get() {
+        printf '%s\n' "$*" >>"$WORK/apt-args"
+        if [[ "$1" == install ]]; then
+            grep -q 'Acquire::ForceIPv4 "true";' "$WORK/force-ipv4.conf" || return 9
+            printf 'APT-STDOUT\n'
+        fi
+        return 0
+    }
+    printf 'ID=debian\n' >"$WORK/os-release"
+    # shellcheck disable=SC1090
+    eval "$body"
+    ensure_state_export_dependencies >"$WORK/dep-out" 2>"$WORK/dep-err"
+    if grep -q APT-STDOUT "$WORK/dep-out"; then
+        fail_test 'apt stdout was not captured'
+    fi
+    grep -q 'install -y -qq age python3 sqlite3' "$WORK/apt-args" \
+        || fail_test 'age was not installed with apt-get'
+    [[ ! -e "$WORK/force-ipv4.conf" ]] || fail_test 'temporary ForceIPv4 config was left behind'
+    rm -f "$WORK/apt-args"
+    printf 'ID=linuxmint\nID_LIKE=ubuntu\n' >"$WORK/os-release"
+    ensure_state_export_dependencies >/dev/null
+    grep -q install "$WORK/apt-args" || fail_test 'Linux Mint did not install age'
+    rm -f "$WORK/apt-args" "$WORK/force-ipv4.conf"
+    printf 'ID=fedora\nID_LIKE=\n' >"$WORK/os-release"
+    ensure_state_export_dependencies >"$WORK/dep-out" 2>"$WORK/dep-err"
+    [[ ! -e "$WORK/apt-args" ]] || fail_test 'a non-Debian OS tried to install age'
+    grep -q 'Skipping age' "$WORK/dep-err" || fail_test 'non-Debian skip was not explained'
+)
 
 echo 'OK: export-state streams ciphertext and keeps the passphrase off argv, env, and stderr'

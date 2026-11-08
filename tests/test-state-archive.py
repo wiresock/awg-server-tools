@@ -16,6 +16,7 @@ from pathlib import Path
 import pty
 import re
 import select
+import signal
 import shutil
 import sqlite3
 import subprocess
@@ -3002,6 +3003,14 @@ grep -q APT-STDOUT-NOISE "$ROOT/dep.err" || exit 13
             'newline': b'abcdefghijklmnop\nmore',
             'cr': b'abcdefghijklmnop\rmore',
             'nul': b'abcdefghijklmnop\x00more',
+            'tab': b'0123456789abcdef\t',
+            'ctrl-u': b'0123456789abcdef\x15',
+            'ctrl-w': b'0123456789abcdef\x17',
+            'ctrl-h': b'0123456789abcdef\x08',
+            'del': b'0123456789abcdef\x7f',
+            'ctrl-c': b'0123456789abcdef\x03',
+            'ctrl-d': b'0123456789abcdef\x04',
+            'ctrl-v': b'0123456789abcdef\x16',
         }
         self.assertLess(len(cases['short']), 16)
         for name, secret in cases.items():
@@ -3016,6 +3025,256 @@ grep -q APT-STDOUT-NOISE "$ROOT/dep.err" || exit 13
                 if secret:
                     self.assertNotIn(secret, result.stdout + result.stderr)
                 self.assertNotIn(b'age-encryption.org', result.stdout)
+
+    def _age_decrypt(self, archive, plain, secret):
+        pid, fd = pty.fork()
+        if pid == 0:
+            try:
+                settings = termios.tcgetattr(0)
+                settings[3] &= ~termios.ECHO
+                termios.tcsetattr(0, termios.TCSANOW, settings)
+            except termios.error:
+                os._exit(1)
+            os.execvp('age', ['age', '--decrypt', '--output', str(plain), str(archive)])
+        deadline = time.monotonic() + 30
+        sent = False
+        pending = b''
+        transcript = b''
+        try:
+            while time.monotonic() < deadline:
+                try:
+                    ready, _, _ = select.select([fd], [], [], 0.2)
+                except OSError:
+                    ready = []
+                if ready:
+                    try:
+                        data = os.read(fd, 4096)
+                    except OSError as exc:
+                        if exc.errno != errno.EIO:
+                            raise
+                        data = b''
+                    if data:
+                        transcript += data
+                        pending = (pending + data)[-200:]
+                        if (not sent) and b'passphrase' in pending.lower():
+                            os.write(fd, secret + b'\n')
+                            sent = True
+                try:
+                    ended, status = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if ended:
+                    self.assertEqual(os.waitstatus_to_exitcode(status), 0,
+                                     transcript.decode(errors='replace'))
+                    break
+            else:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+                self.fail('age decrypt timed out: ' + transcript.decode(errors='replace'))
+        finally:
+            os.close(fd)
+        self.assertTrue(sent, transcript.decode(errors='replace'))
+
+    @unittest.skipUnless(shutil.which('age'), 'age not installed')
+    def test_sixteen_character_printable_passphrase_round_trips(self):
+        secret = b'0123456789abcdef'
+        self.assertEqual(len(secret), 16)
+        result = self._run_stream(secret)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        archive = self.root / 'out.awgx'
+        self.assertTrue(archive.read_bytes().startswith(b'age-encryption.org/v1\n'))
+        self.assertNotIn(secret, result.stdout + result.stderr + archive.read_bytes())
+        plain = self.root / 'plain-16.tar.gz'
+        self._age_decrypt(archive, plain, secret)
+        self.run_helper('verify', plain)
+
+    def test_stream_export_sigterm_kills_age_and_pack(self):
+        secret = b'0123456789abcdef-term'
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        age = bindir / 'age'
+        age.write_text(r'''#!/usr/bin/env python3
+import os, time
+root = __ROOT__
+
+def read_line(fd):
+    buf = b""
+    while b"\n" not in buf:
+        chunk = os.read(fd, 256)
+        if not chunk:
+            os._exit(3)
+        buf += chunk
+    return buf
+
+tty = os.open("/dev/tty", os.O_RDWR)
+os.write(tty, b"Enter passphrase (leave empty to autogenerate a secure one): ")
+read_line(tty)
+os.write(tty, b"\r\n\x1b[F\x1b[KConfirm passphrase: ")
+read_line(tty)
+os.write(tty, b"\r\n\x1b[F\x1b[K")
+with open(root + "/age.pid", "w") as handle:
+    handle.write(str(os.getpid()))
+with open(root + "/driver.pid", "w") as handle:
+    handle.write(str(os.getppid()))
+time.sleep(60)
+'''.replace('__ROOT__', repr(str(self.root))))
+        age.chmod(0o755)
+        env = os.environ.copy()
+        env['PATH'] = str(bindir) + os.pathsep + env.get('PATH', '')
+        process = subprocess.Popen(
+            ['bash', '-c', self._stream_source(), 'test', str(SCRIPT), str(self.root)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        age_pid = None
+        age_alive = True
+        pack_alive = True
+        stdout = b''
+        stderr = b''
+        try:
+            process.stdin.write(secret)
+            process.stdin.flush()
+            process.stdin.close()
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not (self.root / 'driver.pid').exists():
+                if process.poll() is not None:
+                    err = process.stderr.read().decode(errors='replace')
+                    self.fail('export exited before age was ready: ' + err)
+                time.sleep(0.05)
+            self.assertTrue((self.root / 'driver.pid').exists(), 'driver pid was not recorded')
+            driver = int((self.root / 'driver.pid').read_text())
+            age_pid = int((self.root / 'age.pid').read_text())
+            os.kill(driver, signal.SIGTERM)
+            # stdin is already closed. communicate() would flush it again.
+            process.wait(timeout=10)
+            stdout = process.stdout.read() if process.stdout is not None else b''
+            stderr = process.stderr.read() if process.stderr is not None else b''
+            age_alive = self._pid_alive(age_pid)
+            pack_alive = self._proc_cmdline_contains(b'awg-state-pack')
+        finally:
+            if process.poll() is None:
+                process.kill()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            if age_pid is not None and self._pid_alive(age_pid):
+                try:
+                    os.kill(age_pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            self._kill_cmdline(b'awg-state-pack')
+            for pipe in (process.stdout, process.stderr, process.stdin):
+                if pipe is not None and not pipe.closed:
+                    pipe.close()
+        self.assertNotEqual(process.returncode, 0)
+        self.assertFalse(age_alive)
+        self.assertFalse(pack_alive)
+        self.assertEqual((self.root / 'out.awgx').stat().st_size, 0)
+        self.assertNotIn(secret, stdout + stderr)
+
+    def _pid_alive(self, pid):
+        if pid is None:
+            return False
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        # A zombie still accepts kill 0. /proc/<pid>/stat state Z is not alive
+        # for this test: the driver must have reaped age.
+        try:
+            stat = Path('/proc/%s/stat' % pid).read_text()
+        except OSError:
+            return False
+        state = stat.rsplit(')', 1)[-1].split()
+        return bool(state) and state[0] != 'Z'
+
+    def _proc_cmdline_contains(self, needle):
+        return any(needle in cmd for _pid, cmd in self._proc_cmds())
+
+    def _kill_cmdline(self, needle):
+        for pid, cmd in self._proc_cmds():
+            if needle in cmd:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
+    def _proc_cmds(self):
+        found = []
+        proc = Path('/proc')
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                found.append((int(entry.name), (entry / 'cmdline').read_bytes()))
+            except (OSError, ValueError):
+                continue
+        return found
+
+    def test_dispatcher_stream_stdout_is_only_the_ciphertext(self):
+        if shutil.which('age') is None:
+            self.skipTest('age not installed')
+        secret = b'0123456789abcdef'
+        text = SCRIPT.read_text()
+        start = text.index('\t\t--export-state|--inspect-state|--import-state|--activate-state)')
+        block = text[start:text.index('\t\t--reset-state-journal)')]
+        shell = r'''
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/source"
+AWG_STATE_PROXY_CONFIG="$ROOT/not-installed-proxy"
+isRoot() { return 0; }
+checkOS() { OS=debian; }
+acquireClientLifecycleLock() { CLIENT_LIFECYCLE_LOCK_FD=held; }
+releaseClientLifecycleLock() { CLIENT_LIFECYCLE_LOCK_FD=""; }
+awgStateTrustedPath() { return 0; }
+isWebPanelInstalled() { return 1; }
+collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=("$ROOT/source/clients/awg0-client-phone.conf"); }
+awg() { printf 'fixture-tools\n'; }
+enable_apt_ipv4() { :; }
+disable_apt_ipv4() { :; }
+command() {
+    if [[ "$1" == -v && "${2:-}" == age ]]; then
+        return 1
+    fi
+    builtin command "$@"
+}
+apt-get() {
+    printf 'APT-STDOUT-NOISE\n'
+    printf 'APT-STDERR\n' >&2
+    if [[ "$1" == install ]]; then
+        unset -f command
+    fi
+    return 0
+}
+mkdir -p "$ROOT/source/clients"
+# The case arm below is the real dispatcher, not a reimplementation.
+set -- --export-state - --passphrase-fd 0
+case "$1" in
+''' + block + r'''
+esac
+'''
+        source = self.root / 'source'
+        (source / 'clients').mkdir(parents=True)
+        (source / 'params').write_bytes(self.files['vpn/params'])
+        (source / 'awg0.conf').write_bytes(self.files['vpn/server.conf'])
+        (source / 'clients/awg0-client-phone.conf').write_bytes(
+            self.files['clients/awg0-client-phone.conf'])
+        result = subprocess.run(
+            ['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)],
+            input=secret, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+        self.assertTrue(result.stdout.startswith(b'age-encryption.org/v1\n'), result.stdout[:80])
+        self.assertNotIn(b'APT-STDOUT-NOISE', result.stdout)
+        self.assertNotIn(b'APT-STDERR', result.stdout)
+        self.assertIn(b'APT-STDOUT-NOISE', result.stderr)
+        self.assertIn(b'APT-STDERR', result.stderr)
+        self.assertNotIn(secret, result.stdout + result.stderr)
+        archive = self.root / 'dispatcher.awgx'
+        archive.write_bytes(result.stdout)
+        plain = self.root / 'dispatcher-plain.tar.gz'
+        self._age_decrypt(archive, plain, secret)
+        self.run_helper('verify', plain)
 
     def test_stream_export_answers_tty_prompts_and_hides_the_passphrase(self):
         secret = b'stream-export-secret-value'

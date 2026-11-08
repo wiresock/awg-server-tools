@@ -4663,7 +4663,12 @@ function awgStateEndpointSummary() (
 		echo 'ERROR: state migration supports Debian/Ubuntu (and their supported derivatives) only.' >&2
 		exit 1
 	}
-	awgStateDependencies 0 || exit 1
+	# The count is a python3 read of staged profiles. It does not encrypt, so
+	# age and sqlite3 are not required and must not be installed from here.
+	command -v python3 >/dev/null 2>&1 || {
+		echo 'ERROR: python3 is required to count client endpoints.' >&2
+		exit 1
+	}
 	local WORK TEXT HOST_COUNT IP_COUNT
 	local -a LINES=()
 	WORK="$(awgStateWorkDir)" || exit 1
@@ -4904,6 +4909,13 @@ try:
     version = sys.argv[4]
     installer_sha = sys.argv[5]
     installer = sys.argv[6]
+    def on_stop(_signum, _frame):
+        # finally kills age and pack and unlinks a partial ciphertext file.
+        raise SystemExit(1)
+
+    signal.signal(signal.SIGTERM, on_stop)
+    signal.signal(signal.SIGHUP, on_stop)
+    signal.signal(signal.SIGINT, on_stop)
     info = os.fstat(pass_fd)
     if not stat.S_ISFIFO(info.st_mode):
         fail("passphrase descriptor must be a pipe, not a terminal or a file")
@@ -4927,8 +4939,10 @@ try:
         fail("passphrase is longer than 1024 bytes")
     if not passphrase:
         fail("passphrase is empty")
-    if b"\x00" in passphrase or b"\n" in passphrase or b"\r" in passphrase:
-        fail("passphrase contains a newline or NUL")
+    # Canonical tty processing would apply C0 controls and DEL before age
+    # saw the line (^U kills the line, ^W deletes a word, ^H/DEL erase).
+    if any(byte < 32 or byte == 127 for byte in passphrase):
+        fail("passphrase contains a control character")
     try:
         decoded = passphrase.decode("utf-8")
     except UnicodeError:

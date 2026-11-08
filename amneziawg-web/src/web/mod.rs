@@ -87,6 +87,10 @@ pub struct AppState {
     system_uptime_baseline: Option<SystemUptimeBaseline>,
     /// The last failed protocol migration, shown under the failure notice.
     protocol_failure: std::sync::Arc<tokio::sync::RwLock<Option<ProtocolFailure>>>,
+    /// Cached endpoint-summary counts. The status route does not touch this.
+    endpoint_summary: std::sync::Arc<state_export::EndpointSummaryCache>,
+    /// One state export at a time for this process.
+    export_gate: std::sync::Arc<state_export::ExportGate>,
 }
 
 #[derive(Clone)]
@@ -174,6 +178,8 @@ impl AppState {
             system_booted_at,
             system_uptime_baseline,
             protocol_failure: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            endpoint_summary: std::sync::Arc::new(state_export::EndpointSummaryCache::new()),
+            export_gate: state_export::ExportGate::new(),
         }
     }
 
@@ -1476,6 +1482,10 @@ fn build_router_state(state: AppState) -> Router {
         .route("/api/admin/users/:id/remove", post(api_remove_user))
         .route("/api/admin/protocol", get(api_protocol_status))
         .route("/api/admin/state-export", get(state_export::api_status))
+        .route(
+            "/api/admin/state-export/endpoints",
+            get(state_export::api_endpoints),
+        )
         .route("/api/admin/imitation", get(api_imitation_status))
         .route("/admin/imitation", post(post_imitation_form))
         .route("/admin/users/add", post(post_add_user_form))

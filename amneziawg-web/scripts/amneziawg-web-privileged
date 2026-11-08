@@ -757,6 +757,15 @@ run_export_state() {
     if ! grep -qxF 'AWG_INSTALLER_CAPABILITY_STATE_EXPORT_STREAM="state-export-stream-v1"' -- "${install_script}"; then
         fail "installed installer cannot stream a state archive"
     fi
+    # ProtectSystem=strict prevents apt-get inside the panel sandbox. The
+    # panel installer and upgrade install these tools. Do not start the
+    # installer (it would try apt) when one of them is missing.
+    local export_tool
+    for export_tool in age python3 sqlite3; do
+        if [[ -z "$(resolve_system_command "${export_tool}")" ]]; then
+            fail "export-state requires ${export_tool}; rerun the panel upgrade"
+        fi
+    done
 
     # DIAG[0] is the coprocess stdout. DIAG[1] is its stdin, which receives
     # only the installer's stderr. The coprocess does not see the passphrase.
@@ -788,10 +797,38 @@ run_export_state() {
         || fail "could not capture installer diagnostics"
     eval "exec ${orig_r}<&-"
     eval "exec ${orig_w}>&-"
+    # sudo relays TERM/HUP/INT to this process and cannot relay KILL.
+    # The installer is its own process group so this trap can stop it and
+    # the children that stayed in that group. age and pack call setsid; the
+    # installer's passphrase driver kills those on TERM.
+    installer_pid=""
+    stop_state_export_child() {
+        local sig="$1"
+        trap - TERM HUP INT
+        if [[ -n "${installer_pid}" ]]; then
+            kill -s TERM -- "-${installer_pid}" 2>/dev/null \
+                || kill -s TERM -- "${installer_pid}" 2>/dev/null \
+                || true
+            wait "${installer_pid}" 2>/dev/null || true
+            installer_pid=""
+        fi
+        exit "${sig}"
+    }
+    trap 'stop_state_export_child 143' TERM
+    trap 'stop_state_export_child 129' HUP
+    trap 'stop_state_export_child 130' INT
     set +e
-    "${install_script}" --export-state - --passphrase-fd 0 2>&"${err_w}"
+    set -m
+    "${install_script}" --export-state - --passphrase-fd 0 2>&"${err_w}" &
+    installer_pid=$!
+    set +m
+    wait "${installer_pid}"
     rc=$?
+    installer_pid=""
     set -e
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
     exec {err_w}>&-
     while IFS= read -r line || [[ -n "${line}" ]]; do
         diag_lines+=("${line}")

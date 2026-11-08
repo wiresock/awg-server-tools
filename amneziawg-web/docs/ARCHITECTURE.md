@@ -88,7 +88,8 @@ as an age ciphertext stream. The passphrase arrives on the helper's stdin pipe.
 migration control posts the current admin password and the archive passphrase
 to `POST /admin/state/export` and streams that ciphertext back as a download.
 It does not write an archive file of its own. `GET /api/admin/state-export`
-reports the last successful export and the literal-IP count.
+reports the last successful export. `GET /api/admin/state-export/endpoints`
+reports the literal-IP count and is fetched only when that section is opened.
 
 The web panel holds an advisory lock on its open persistent state directory
 (the parent of the SQLite database) across the complete managed-client

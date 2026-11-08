@@ -86,31 +86,70 @@ An administrator can download the same archive from the amneziawg-web peer
 page (Server → Server migration). The panel requires a signed-in admin session
 and the current admin password in that same request. A bearer token is not
 enough, and export is refused when panel authentication is disabled. The form
-also takes the archive passphrase twice. The panel enforces the same passphrase
-rules as `--passphrase-fd` and then streams the helper. It does not write a
-temporary archive file. If the browser disconnects, the helper process is
-killed. The passphrase is not stored and is not written to the audit log.
+also takes the archive passphrase twice. The passphrase must be 16 to 1024
+UTF-8 characters and must not contain a C0 control (U+0000 through U+001F,
+including tab) or DEL (U+007F). The panel and `--passphrase-fd` use that same
+rule and the same error. The panel then streams the helper. It does not write
+a temporary archive file. The passphrase is not stored and is not written to
+the audit log or the panel log.
+
+One export runs at a time in a panel process. A second request is refused
+with HTTP 409 until the first download finishes or the browser disconnects.
+
+If the browser disconnects, the panel sends SIGTERM to the sudo process that
+started the helper. sudo relays SIGTERM, SIGHUP and SIGINT to the helper both
+when `Defaults use_pty` is set and when it is not. sudo cannot relay SIGKILL.
+The helper's SIGTERM handler terminates the installer process group. The
+installer's passphrase driver then kills `age` and `pack`, unlinks a partial
+ciphertext file, and exits non-zero. The installer's EXIT trap removes the
+tmpfs staging directory. If the helper is still alive after 5 seconds, the
+panel sends SIGKILL to that sudo process and to its process group. The page
+shows a fixed failure text and points at the panel log. On failure the log
+receives at most the last 2 KiB and 20 lines of the helper's stderr, with
+the passphrase removed.
+
+`ProtectHome=yes` on the panel service also applies to the root helper that
+sudo starts. A panel export and the panel endpoint count therefore do not see
+client profiles stored under `/root` or `/home`. Use the CLI export when those
+profiles must be in the archive.
+
+A reverse proxy in front of the panel must wait more than 360 seconds for the
+first byte of the archive. nginx's default `proxy_read_timeout` is 60 seconds,
+which drops the download while the installer is still encrypting.
 
 Each attempt adds an `events` row. A completed download is `state.exported`.
 A refusal or a failed helper is `state.export_failed` with a reason code. The
 page shows the last successful export and a reminder when that was more than
 `AWG_STATE_EXPORT_STALE_DAYS` days ago (default 7, the same window as the
-stale-archive warning; values outside 1–3650 are treated as 7). Before the
-download it also warns when the page was opened over plain HTTP on a
-non-loopback address, and when client profiles use a literal IP in `Endpoint`.
+stale-archive warning; values outside 1–3650 are treated as 7). That status
+request does not take the lifecycle lock. Before the download the page also
+warns when it was opened over plain HTTP on a non-loopback address. The
+literal-IP count is requested when the Server migration section is opened,
+cached for 60 seconds, and only one count runs at a time. Concurrent opens
+wait for that result or use the cached one.
 
 `--endpoint-summary` is the read-only count behind that warning. It copies
 installer-managed client profiles into tmpfs, counts them with the archive's
 endpoint audit, and prints two integers: hostname endpoints, then literal-IP
 endpoints. It does not print keys, hostnames, or the profile list. The
 lifecycle lock is held only for the copy and is released before the counts are
-printed. It does not install packages and does not change the VPN. The panel
-turns a non-zero literal-IP count into "N profiles use an IP in Endpoint; they
-will need a new profile after a ban" (singular when N is 1).
+printed. It does not install packages and does not change the VPN. It needs
+`python3` only. The panel turns a non-zero literal-IP count into "N profiles
+use an IP in Endpoint; they will need a new profile after a ban" (singular
+when N is 1).
 
-Export/import install missing `age`, `python3`, and `sqlite3` with apt. Inspect,
-dry-run and activation require them to be installed already and never install
-packages.
+The panel install and upgrade scripts install `age`, `python3`, and `sqlite3`
+on Debian and Ubuntu (including the derivatives the installer already maps to
+them). The panel service's `ProtectSystem=strict` sandbox cannot run apt-get,
+so a missing tool is not installed at export time. If `age`, `python3`, or
+`sqlite3` is absent from `/usr/bin`, `/bin`, `/usr/sbin`, or `/sbin`, the
+helper refuses before starting the installer with
+`export-state requires <tool>; rerun the panel upgrade`, and the download
+button stays disabled with that reason.
+
+The CLI export and import still install missing `age`, `python3`, and `sqlite3`
+with apt. Inspect, dry-run and activation require them to be installed already
+and never install packages.
 The existing installer's distribution/version and signed AWG package handling
 is reused. age availability is required; there is no unverified binary download
 fallback.

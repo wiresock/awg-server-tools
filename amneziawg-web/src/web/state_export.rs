@@ -9,9 +9,9 @@
 
 use std::ffi::OsStr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::State;
@@ -36,8 +36,18 @@ use super::AppState;
 const PASS_MIN_CHARS: usize = 16;
 const PASS_MAX_BYTES: usize = 1024;
 const EXPORT_FIRST_BYTE: Duration = Duration::from_secs(360);
+const EXPORT_KILL_GRACE: Duration = Duration::from_secs(5);
+const EXPORT_STDERR_BYTES: usize = 2048;
+const EXPORT_STDERR_LINES: usize = 20;
+const ENDPOINT_CACHE_TTL: Duration = Duration::from_secs(60);
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_STALE_DAYS: i64 = 7;
+const EXPORT_FAILURE: &str =
+    "The encrypted archive was not created. See the panel log. The VPN was not changed.";
+const EXPORT_BUSY: &str = "Another state export is already running.";
+
+#[cfg(test)]
+static SUMMARY_SPAWNS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Deserialize)]
 pub(super) struct ExportForm {
@@ -55,6 +65,12 @@ struct ExportStatus {
     last_export: Option<String>,
     stale: bool,
     stale_days: i64,
+    export_block: Option<String>,
+}
+
+#[derive(Serialize)]
+struct EndpointStatus {
+    hostname: Option<u64>,
     ip_literal: Option<u64>,
     warning: Option<String>,
 }
@@ -68,12 +84,24 @@ pub(super) fn render_controls(base: &str, csrf_token: &str) -> String {
     )
 }
 
-/// `GET /api/admin/state-export` – last export, stale reminder, literal-IP count.
+/// `GET /api/admin/state-export` – last export and the stale reminder.
+///
+/// This does not count endpoints and does not take the lifecycle lock.
 pub(super) async fn api_status(State(state): State<AppState>) -> Response {
     let last = last_export_at(&state).await;
     let days = stale_after_days();
-    let summary = endpoint_counts().await;
-    json_status(last, Utc::now(), days, summary)
+    json_status(last, Utc::now(), days, export_tool_block().as_deref())
+}
+
+/// `GET /api/admin/state-export/endpoints` – cached literal-IP count.
+///
+/// The home page fetches this only after the migration section is opened.
+pub(super) async fn api_endpoints(State(state): State<AppState>) -> Response {
+    let summary = state
+        .endpoint_summary
+        .get_or_load(endpoint_counts_uncached)
+        .await;
+    json_endpoints(summary)
 }
 
 /// `POST /admin/state/export` – stream an encrypted archive.
@@ -109,7 +137,12 @@ pub(super) fn validate_archive_passphrase(value: &str) -> Result<(), &'static st
     if value.len() > PASS_MAX_BYTES {
         return Err("passphrase_too_long");
     }
-    if value.chars().any(|ch| ch == '\0' || ch == '\n' || ch == '\r') {
+    // C0 and DEL. A canonical tty would act on these before age saw the line.
+    // C1 (U+0080–U+009F) is not a line-discipline control and stays allowed.
+    if value
+        .chars()
+        .any(|ch| (ch as u32) <= 0x1f || ch == '\u{007f}')
+    {
         return Err("passphrase_forbidden");
     }
     if value.chars().count() < PASS_MIN_CHARS {
@@ -144,24 +177,47 @@ fn json_status(
     last: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
     stale_days: i64,
-    summary: Option<(u64, u64)>,
+    export_block: Option<&str>,
 ) -> Response {
     let stale = match last {
         None => true,
         Some(at) => now.signed_duration_since(at) >= chrono::Duration::days(stale_days),
     };
-    let (ip_literal, warning) = match summary {
-        Some((_, ip)) => (Some(ip), literal_ip_warning(ip)),
-        None => (None, None),
-    };
     let body = ExportStatus {
         last_export: last.map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string()),
         stale,
         stale_days,
+        export_block: export_block.map(str::to_string),
+    };
+    no_store(axum::Json(body).into_response())
+}
+
+fn json_endpoints(summary: Option<(u64, u64)>) -> Response {
+    let (hostname, ip_literal, warning) = match summary {
+        Some((hostname, ip)) => (Some(hostname), Some(ip), literal_ip_warning(ip)),
+        None => (None, None, None),
+    };
+    let body = EndpointStatus {
+        hostname,
         ip_literal,
         warning,
     };
     no_store(axum::Json(body).into_response())
+}
+
+/// Lock-free presence check. The panel sandbox cannot install a missing tool.
+fn export_tool_block() -> Option<String> {
+    for tool in ["age", "python3", "sqlite3"] {
+        let present = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            .iter()
+            .any(|dir| Path::new(dir).join(tool).is_file());
+        if !present {
+            return Some(format!(
+                "export-state requires {tool}; rerun the panel upgrade"
+            ));
+        }
+    }
+    None
 }
 
 fn export_command() -> tokio::process::Command {
@@ -176,7 +232,19 @@ fn summary_command() -> tokio::process::Command {
     command
 }
 
-async fn endpoint_counts() -> Option<(u64, u64)> {
+#[cfg_attr(test, allow(unreachable_code))]
+async fn endpoint_counts_uncached() -> Option<(u64, u64)> {
+    #[cfg(test)]
+    {
+        // Unit tests must not call sudo. Reaching this function is the
+        // regression the status route is not allowed to have.
+        SUMMARY_SPAWNS.fetch_add(1, Ordering::SeqCst);
+        return None;
+    }
+    endpoint_counts_spawn().await
+}
+
+async fn endpoint_counts_spawn() -> Option<(u64, u64)> {
     let mut command = summary_command();
     command
         .stdin(std::process::Stdio::null())
@@ -267,10 +335,27 @@ async fn export_with(
     }
     drop(confirm);
 
+    // After validation, so a rejected passphrase does not hold the gate.
+    let permit = match state.export_gate.try_acquire() {
+        Some(permit) => permit,
+        None => {
+            drop(passphrase);
+            audit(state, EVT_STATE_EXPORT_FAILED, Some("export_busy")).await;
+            return deny(StatusCode::CONFLICT, EXPORT_BUSY);
+        }
+    };
     let spawned = match program {
         Some((program, args, cwd)) => {
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            spawn_export(state, program, &arg_refs, passphrase.expose(), cwd.as_deref()).await
+            spawn_export(
+                state,
+                program,
+                &arg_refs,
+                passphrase.expose(),
+                cwd.as_deref(),
+                permit,
+            )
+            .await
         }
         None => {
             spawn_export(
@@ -279,6 +364,7 @@ async fn export_with(
                 &["-n", PRIVILEGED_HELPER_BIN, "export-state"],
                 passphrase.expose(),
                 None,
+                permit,
             )
             .await
         }
@@ -289,10 +375,7 @@ async fn export_with(
         Err(error) => {
             tracing::warn!(error = %error, "state export failed to start");
             audit(state, EVT_STATE_EXPORT_FAILED, Some("export_failed")).await;
-            return deny(
-                StatusCode::BAD_GATEWAY,
-                "The encrypted archive was not created. The VPN was not changed.",
-            );
+            return deny(StatusCode::BAD_GATEWAY, EXPORT_FAILURE);
         }
     };
 
@@ -308,10 +391,7 @@ async fn export_with(
                 "export_failed"
             };
             session.abort(reason).await;
-            return deny(
-                StatusCode::BAD_GATEWAY,
-                "The encrypted archive was not created. The VPN was not changed.",
-            );
+            return deny(StatusCode::BAD_GATEWAY, EXPORT_FAILURE);
         }
     };
     first.truncate(first_len);
@@ -323,7 +403,7 @@ fn passphrase_message(reason: &str) -> &'static str {
         "passphrase_empty" => "The archive passphrase was empty.",
         "passphrase_too_short" => "The archive passphrase must be at least 16 characters.",
         "passphrase_too_long" => "The archive passphrase is too long.",
-        "passphrase_forbidden" => "The archive passphrase cannot contain a newline.",
+        "passphrase_forbidden" => "The archive passphrase cannot contain a control character.",
         _ => "The archive passphrase was not accepted.",
     }
 }
@@ -396,6 +476,11 @@ struct ExportSession {
     stdout: ChildStdout,
     completed: AtomicBool,
     state: AppState,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
+    stderr_done: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Held until the session drops so a second export is refused with 409.
+    #[allow(dead_code)]
+    permit: ExportPermit,
 }
 
 impl Drop for ExportSession {
@@ -404,6 +489,7 @@ impl Drop for ExportSession {
             return;
         }
         kill_export(&mut self.child);
+        warn_export_stderr(&self.stderr_tail, "client_disconnected");
         let state = self.state.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
@@ -460,9 +546,11 @@ impl ExportSession {
             return;
         }
         let ok = matches!(self.child.wait().await, Ok(status) if status.success());
+        self.wait_for_stderr().await;
         if ok {
             audit(&self.state, EVT_STATE_EXPORTED, None).await;
         } else {
+            warn_export_stderr(&self.stderr_tail, "export_failed");
             audit(&self.state, EVT_STATE_EXPORT_FAILED, Some("export_failed")).await;
         }
     }
@@ -473,7 +561,15 @@ impl ExportSession {
         }
         kill_export(&mut self.child);
         let _ = self.child.wait().await;
+        self.wait_for_stderr().await;
+        warn_export_stderr(&self.stderr_tail, reason);
         audit(&self.state, EVT_STATE_EXPORT_FAILED, Some(reason)).await;
+    }
+
+    async fn wait_for_stderr(&mut self) {
+        if let Some(done) = self.stderr_done.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(2), done).await;
+        }
     }
 }
 
@@ -483,6 +579,7 @@ async fn spawn_export(
     args: &[&str],
     passphrase: &[u8],
     current_dir: Option<&Path>,
+    permit: ExportPermit,
 ) -> std::io::Result<ExportSession> {
     let mut command = tokio::process::Command::new(program);
     command
@@ -490,23 +587,42 @@ async fn spawn_export(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
+        // SIGKILL on drop is not relayed by sudo, so the grace task reaps.
+        .kill_on_drop(false);
     if let Some(dir) = current_dir {
         command.current_dir(dir);
     }
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command.spawn()?;
+    let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     if let Some(mut stderr) = child.stderr.take() {
+        let tail = Arc::clone(&stderr_tail);
+        let mut secret = passphrase.to_vec();
         tokio::spawn(async move {
-            let mut sink = [0u8; 1024];
+            let mut chunk = [0u8; 512];
             loop {
-                match stderr.read(&mut sink).await {
+                match stderr.read(&mut chunk).await {
                     Ok(0) | Err(_) => break,
-                    Ok(_) => {}
+                    Ok(n) => {
+                        let mut buf = tail.lock().unwrap_or_else(|poison| poison.into_inner());
+                        // Hold back the last secret-length bytes so a passphrase
+                        // split across reads is still removed before the trim.
+                        append_stderr_tail(&mut buf, &chunk[..n], &secret);
+                        wipe_bytes(&mut chunk[..n]);
+                    }
                 }
             }
+            {
+                let mut buf = tail.lock().unwrap_or_else(|poison| poison.into_inner());
+                seal_stderr_tail(&mut buf, &secret);
+            }
+            wipe_bytes(&mut secret);
+            let _ = done_tx.send(());
         });
+    } else {
+        let _ = done_tx.send(());
     }
     let mut stdin = child
         .stdin
@@ -523,20 +639,234 @@ async fn spawn_export(
         stdout,
         completed: AtomicBool::new(false),
         state: state.clone(),
+        stderr_tail,
+        stderr_done: Some(done_rx),
+        permit,
     })
 }
 
 fn kill_export(child: &mut Child) {
     #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        // The helper's pack/age children stay in this group until age's
-        // pseudo-terminal. Killing the group stops the helper; closing its
-        // pipes then hangs up age.
+    if let Some(raw) = child.id() {
+        let pid = raw as i32;
+        // sudo relays TERM to the helper and cannot relay KILL. The helper
+        // then stops the installer, which stops age and pack.
         unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
+            libc::kill(pid, libc::SIGTERM);
+        }
+        let reap = async move {
+            let deadline = tokio::time::Instant::now() + EXPORT_KILL_GRACE;
+            loop {
+                if reap_export(pid) {
+                    return;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                    for _ in 0..50 {
+                        if reap_export(pid) {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(reap);
+            return;
+        }
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+            libc::kill(pid, libc::SIGKILL);
         }
     }
     let _ = child.start_kill();
+}
+
+#[cfg(unix)]
+fn reap_export(pid: i32) -> bool {
+    let mut status = 0;
+    let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    reaped == pid || reaped == -1
+}
+
+fn append_stderr_tail(buf: &mut Vec<u8>, chunk: &[u8], secret: &[u8]) {
+    buf.extend_from_slice(chunk);
+    redact_secret(buf, secret);
+    let hold = secret.len().saturating_sub(1);
+    if hold == 0 || buf.len() <= hold {
+        trim_stderr_tail(buf);
+        return;
+    }
+    let mut head = buf[..buf.len() - hold].to_vec();
+    let pending = buf[buf.len() - hold..].to_vec();
+    trim_stderr_tail(&mut head);
+    head.extend_from_slice(&pending);
+    *buf = head;
+}
+
+fn seal_stderr_tail(buf: &mut Vec<u8>, secret: &[u8]) {
+    redact_secret(buf, secret);
+    trim_stderr_tail(buf);
+}
+
+fn push_stderr_tail(buf: &mut Vec<u8>, chunk: &[u8]) {
+    buf.extend_from_slice(chunk);
+    trim_stderr_tail(buf);
+}
+
+fn trim_stderr_tail(buf: &mut Vec<u8>) {
+    if buf.len() > EXPORT_STDERR_BYTES {
+        let drop_bytes = buf.len() - EXPORT_STDERR_BYTES;
+        buf.drain(..drop_bytes);
+    }
+    loop {
+        let newlines = buf.iter().filter(|byte| **byte == b'\n').count();
+        let lines = newlines + usize::from(!buf.is_empty() && !buf.ends_with(b"\n"));
+        if lines <= EXPORT_STDERR_LINES {
+            break;
+        }
+        let Some(pos) = buf.iter().position(|byte| *byte == b'\n') else {
+            break;
+        };
+        buf.drain(..=pos);
+    }
+}
+
+fn redact_secret(buf: &mut Vec<u8>, secret: &[u8]) {
+    if secret.is_empty() || secret.len() > buf.len() {
+        return;
+    }
+    let mut index = 0;
+    while index + secret.len() <= buf.len() {
+        if &buf[index..index + secret.len()] == secret {
+            buf.splice(index..index + secret.len(), b"[redacted]".iter().copied());
+            index += b"[redacted]".len();
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn wipe_bytes(bytes: &mut [u8]) {
+    for byte in bytes {
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(Ordering::SeqCst);
+}
+
+fn warn_export_stderr(tail: &Mutex<Vec<u8>>, reason: &str) {
+    let buf = tail
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let text = String::from_utf8_lossy(&buf);
+    tracing::warn!(reason, stderr = %text, "state export helper failed");
+    // The tracing callsite interest cache is process-global. A parallel test
+    // that emits this event with no subscriber can hide it from a subscriber
+    // installed on another thread, so tests also keep the line here.
+    #[cfg(test)]
+    TEST_EXPORT_LOG.with(|log| {
+        log.borrow_mut()
+            .extend_from_slice(format!("{reason} {text}\n").as_bytes());
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_EXPORT_LOG: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn take_test_export_log() -> String {
+    TEST_EXPORT_LOG.with(|log| String::from_utf8_lossy(&std::mem::take(&mut *log.borrow_mut())).into_owned())
+}
+
+pub(super) struct EndpointSummaryCache {
+    gate: tokio::sync::Mutex<()>,
+    slot: tokio::sync::RwLock<Option<(Instant, Option<(u64, u64)>)>>,
+}
+
+impl EndpointSummaryCache {
+    pub(super) fn new() -> Self {
+        Self {
+            gate: tokio::sync::Mutex::new(()),
+            slot: tokio::sync::RwLock::new(None),
+        }
+    }
+
+    /// One helper call at a time. A hit, including a cached failure, is returned
+    /// without starting another. Callers that arrive during the load wait for it.
+    pub(super) async fn get_or_load<F, Fut>(&self, load: F) -> Option<(u64, u64)>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Option<(u64, u64)>>,
+    {
+        if let Some(value) = self.fresh().await {
+            return value;
+        }
+        let _guard = self.gate.lock().await;
+        if let Some(value) = self.fresh().await {
+            return value;
+        }
+        let value = load().await;
+        *self.slot.write().await = Some((Instant::now(), value));
+        value
+    }
+
+    async fn fresh(&self) -> Option<Option<(u64, u64)>> {
+        let slot = self.slot.read().await;
+        match &*slot {
+            Some((at, value)) if at.elapsed() < ENDPOINT_CACHE_TTL => Some(*value),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    async fn expire(&self) {
+        let mut slot = self.slot.write().await;
+        if let Some((at, _)) = slot.as_mut() {
+            *at = Instant::now()
+                .checked_sub(ENDPOINT_CACHE_TTL + Duration::from_secs(1))
+                .unwrap_or_else(Instant::now);
+        }
+    }
+}
+
+pub(super) struct ExportGate {
+    busy: AtomicBool,
+}
+
+pub(super) struct ExportPermit {
+    gate: Arc<ExportGate>,
+}
+
+impl ExportGate {
+    pub(super) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            busy: AtomicBool::new(false),
+        })
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<ExportPermit> {
+        self.busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| ExportPermit {
+                gate: Arc::clone(self),
+            })
+    }
+}
+
+impl Drop for ExportPermit {
+    fn drop(&mut self) {
+        self.gate.busy.store(false, Ordering::SeqCst);
+    }
 }
 
 fn deny(status: StatusCode, message: &'static str) -> Response {
@@ -631,6 +961,28 @@ mod tests {
         assert_eq!(
             validate_archive_passphrase("sixteen-chars!!\n"),
             Err("passphrase_forbidden")
+        );
+        for control in [
+            '\u{0}', '\t', '\n', '\r', '\u{15}', '\u{17}', '\u{8}', '\u{7f}', '\u{3}', '\u{4}',
+            '\u{16}',
+        ] {
+            let mut value = "0123456789abcdef".to_string();
+            value.push(control);
+            assert_eq!(
+                validate_archive_passphrase(&value),
+                Err("passphrase_forbidden"),
+                "control U+{code:04X} was accepted",
+                code = control as u32
+            );
+        }
+        assert_eq!(validate_archive_passphrase("0123456789abcdef"), Ok(()));
+        assert_eq!(
+            validate_archive_passphrase("0123456789abcde\u{80}"),
+            Ok(())
+        );
+        assert_eq!(
+            passphrase_message("passphrase_forbidden"),
+            "The archive passphrase cannot contain a control character."
         );
         assert_eq!(
             validate_archive_passphrase(&"x".repeat(1025)),
@@ -755,6 +1107,8 @@ mod tests {
             ("", "", "passphrase_empty"),
             ("too-short", "too-short", "passphrase_too_short"),
             ("has-a-newline\nxxxx", "has-a-newline\nxxxx", "passphrase_forbidden"),
+            ("0123456789abcdef\t", "0123456789abcdef\t", "passphrase_forbidden"),
+            ("0123456789abc\u{15}ef", "0123456789abc\u{15}ef", "passphrase_forbidden"),
             (passphrase(), "different-passphrase", "passphrase_mismatch"),
         ] {
             let response = export_with(
@@ -924,6 +1278,7 @@ mod tests {
             .unwrap();
         assert!(!body.windows(passphrase().len()).any(|w| w == passphrase().as_bytes()));
         assert!(!body.starts_with(b"age-encryption.org/"));
+        assert!(body.windows(b"panel log".len()).any(|w| w == b"panel log"));
         assert!(reasons(&state).await.iter().any(|d| d.contains("export_failed")));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -972,20 +1327,39 @@ mod tests {
         let old = now - chrono::Duration::days(8);
         let parsed = parse_event_time("2026-11-08 12:00:00").unwrap();
         assert_eq!(parsed, now);
-        let response = json_status(Some(old), now, 7, Some((1, 2)));
+        let response = json_status(Some(old), now, 7, None);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("\"stale\":true"));
-        assert!(text.contains("2 profiles use an IP in Endpoint"));
+        assert!(!text.contains("ip_literal"), "{text}");
+        assert!(!text.contains("warning"), "{text}");
         assert!(text.contains("2026-10-31 12:00 UTC"), "{text}");
-        let fresh = json_status(Some(now), now, 7, Some((4, 0)));
+        assert!(text.contains("\"export_block\":null"));
+        let blocked = json_status(
+            Some(now),
+            now,
+            7,
+            Some("export-state requires age; rerun the panel upgrade"),
+        );
+        let body = axum::body::to_bytes(blocked.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("export-state requires age; rerun the panel upgrade"));
+        let endpoints = json_endpoints(Some((1, 2)));
+        let body = axum::body::to_bytes(endpoints.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("2 profiles use an IP in Endpoint"));
+        assert!(text.contains("\"ip_literal\":2"));
+        let fresh = json_endpoints(Some((4, 0)));
         let body = axum::body::to_bytes(fresh.into_body(), usize::MAX)
             .await
             .unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
-        assert!(text.contains("\"stale\":false"));
         assert!(text.contains("\"ip_literal\":0"));
         assert!(text.contains("\"warning\":null"));
         let never = json_status(None, now, 7, None);
@@ -995,7 +1369,26 @@ mod tests {
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("\"last_export\":null"));
         assert!(text.contains("\"stale\":true"));
+        let missing = json_endpoints(None);
+        let body = axum::body::to_bytes(missing.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("\"ip_literal\":null"));
+    }
+
+    #[tokio::test]
+    async fn status_request_does_not_spawn_the_summary_helper() {
+        let state = test_state(true).await;
+        let before = SUMMARY_SPAWNS.load(Ordering::SeqCst);
+        let response = api_status(State(state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(SUMMARY_SPAWNS.load(Ordering::SeqCst), before);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!text.contains("ip_literal"), "{text}");
     }
 
     #[tokio::test]
@@ -1083,6 +1476,187 @@ mod tests {
         assert!(page_html.contains("name=\"passphrase_confirm\""));
         assert!(!page_html.contains(passphrase()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn helper_stderr_is_logged_without_the_passphrase() {
+        let state = test_state(true).await;
+        let (headers, csrf) = session_headers(&state);
+        let root = std::env::temp_dir().join(format!("awg-export-log-{}", generate_session_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("helper.sh");
+        std::fs::write(&script, "#!/bin/bash\nset -eu\ncat >&2\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&script, perms).unwrap();
+        let _ = take_test_export_log();
+        let response = export_with(
+            &state,
+            &headers,
+            form(&csrf, "testpassword", passphrase(), passphrase()),
+            Some((script.as_os_str(), Vec::new(), Some(root.clone()))),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let logged = take_test_export_log();
+        assert!(logged.contains("[redacted]"), "{logged}");
+        assert!(!logged.contains(passphrase()), "{logged}");
+        assert!(std::str::from_utf8(&body).unwrap().contains("panel log"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_second_export_is_refused_until_the_first_finishes() {
+        let state = test_state(true).await;
+        let (headers, csrf) = session_headers(&state);
+        let root = std::env::temp_dir().join(format!("awg-export-gate-{}", generate_session_id()));
+        let cwd = root.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let script = root.join("helper.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/bash\nset -eu\nmode=\"${1:-ok}\"\nif [[ \"$mode\" == slow ]]; then sha256sum >/dev/null; printf 'age-encryption.org/v1\\n'; sleep 60; else sha256sum >/dev/null; printf 'age-encryption.org/v1\\n'; fi\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&script, perms).unwrap();
+        let first = export_with(
+            &state,
+            &headers,
+            form(&csrf, "testpassword", passphrase(), passphrase()),
+            Some((
+                script.as_os_str(),
+                vec!["slow".into()],
+                Some(cwd.clone()),
+            )),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = export_with(
+            &state,
+            &headers,
+            form(&csrf, "testpassword", passphrase(), passphrase()),
+            Some((
+                script.as_os_str(),
+                vec!["ok".into()],
+                Some(cwd.clone()),
+            )),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(std::str::from_utf8(&body)
+            .unwrap()
+            .contains("Another state export is already running."));
+        drop(first);
+        let third = export_with(
+            &state,
+            &headers,
+            form(&csrf, "testpassword", passphrase(), passphrase()),
+            Some((
+                script.as_os_str(),
+                vec!["ok".into()],
+                Some(cwd),
+            )),
+        )
+        .await;
+        assert_eq!(third.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(third.into_body(), usize::MAX).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stderr_tail_keeps_the_last_lines_and_bytes() {
+        let mut buf = Vec::new();
+        for index in 0..30 {
+            push_stderr_tail(&mut buf, format!("line {index:02}\n").as_bytes());
+        }
+        let text = String::from_utf8(buf.clone()).unwrap();
+        assert_eq!(text.lines().count(), 20);
+        assert!(text.contains("line 10"));
+        assert!(!text.contains("line 09"));
+        let mut wide = Vec::new();
+        push_stderr_tail(&mut wide, &vec![b'a'; 3000]);
+        assert!(wide.len() <= 2048);
+        let mut secret = b"state-export-panel-secret leaked".to_vec();
+        redact_secret(&mut secret, b"state-export-panel-secret");
+        assert_eq!(secret, b"[redacted] leaked");
+        let mut split = Vec::new();
+        let pass = b"state-export-panel-secret";
+        append_stderr_tail(&mut split, b"note state-export-panel-", pass);
+        append_stderr_tail(&mut split, b"secret end", pass);
+        seal_stderr_tail(&mut split, pass);
+        let text = String::from_utf8(split).unwrap();
+        assert!(text.contains("[redacted]"), "{text}");
+        assert!(!text.contains("state-export-panel-secret"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn endpoint_cache_runs_one_load_and_reuses_it() {
+        let cache = EndpointSummaryCache::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first = calls.clone();
+        let second = calls.clone();
+        let left = cache.get_or_load(|| async move {
+            first.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            Some((1, 2))
+        });
+        let right = cache.get_or_load(|| async move {
+            second.fetch_add(1, Ordering::SeqCst);
+            Some((9, 9))
+        });
+        let (left, right) = tokio::join!(left, right);
+        assert_eq!(left, Some((1, 2)));
+        assert_eq!(right, Some((1, 2)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let third = calls.clone();
+        let cached = cache
+            .get_or_load(|| async move {
+                third.fetch_add(1, Ordering::SeqCst);
+                Some((0, 0))
+            })
+            .await;
+        assert_eq!(cached, Some((1, 2)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        cache.expire().await;
+        let fourth = calls.clone();
+        let again = cache
+            .get_or_load(|| async move {
+                fourth.fetch_add(1, Ordering::SeqCst);
+                None
+            })
+            .await;
+        assert_eq!(again, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let fifth = calls.clone();
+        let held = cache
+            .get_or_load(|| async move {
+                fifth.fetch_add(1, Ordering::SeqCst);
+                Some((3, 3))
+            })
+            .await;
+        assert_eq!(held, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn export_gate_allows_one_holder() {
+        let gate = ExportGate::new();
+        let held = gate.try_acquire().expect("first");
+        assert!(gate.try_acquire().is_none());
+        drop(held);
+        assert!(gate.try_acquire().is_some());
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
