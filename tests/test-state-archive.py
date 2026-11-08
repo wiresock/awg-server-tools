@@ -2944,6 +2944,38 @@ exit $?
 '''
         return shell
 
+    def test_dependency_install_output_stays_off_stdout(self):
+        # Streaming export publishes ciphertext on stdout. apt must not prefix it.
+        shell = r'''
+set -uo pipefail
+source "$1"
+ROOT="$2"
+command() {
+    if [[ "$1" == -v && "${2:-}" == age ]]; then
+        return 1
+    fi
+    builtin command "$@"
+}
+apt-get() {
+    printf 'APT-STDOUT-NOISE\n'
+    printf 'APT-STDERR\n' >&2
+    return 0
+}
+enable_apt_ipv4() { :; }
+disable_apt_ipv4() { :; }
+awgStateDependencies 1 >"$ROOT/dep.out" 2>"$ROOT/dep.err"
+status=$?
+[[ "$status" -eq 0 ]] || exit 10
+[[ ! -s "$ROOT/dep.out" ]] || exit 11
+grep -q APT-STDERR "$ROOT/dep.err" || exit 12
+grep -q APT-STDOUT-NOISE "$ROOT/dep.err" || exit 13
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)],
+                                capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertFalse((self.root / 'dep.out').stat().st_size)
+        self.assertNotIn(b'APT-STDOUT-NOISE', (self.root / 'dep.out').read_bytes())
+
     def _run_stream(self, secret, path_prefix=None, delay=0):
         env = os.environ.copy()
         if path_prefix:

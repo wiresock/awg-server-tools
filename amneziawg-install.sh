@@ -4537,7 +4537,8 @@ function awgStateDependencies() { # <allow-install: 0|1>
 		return 1
 	fi
 	enable_apt_ipv4
-	apt-get update && apt-get install -y age python3 sqlite3
+	# stdout of a streaming export is the ciphertext. apt progress stays on stderr.
+	apt-get update >&2 && apt-get install -y age python3 sqlite3 >&2
 	local STATUS=$?
 	disable_apt_ipv4
 	return "${STATUS}"

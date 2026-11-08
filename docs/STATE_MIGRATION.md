@@ -59,7 +59,9 @@ bytes, UTF-8, with no NUL, CR, or LF. An empty passphrase is refused before
 on its terminal, and the archive would be unrecoverable. If no passphrase
 arrives within 30 seconds, export fails before `age` starts. The installer must be
 a regular file for this form (`bash <(curl ...)` cannot stream). Ciphertext is
-written to standard output only after encryption succeeds. Encryption that does
+written to standard output only after encryption succeeds. If age or sqlite3
+is missing, apt's messages go to standard error and cannot prefix that
+ciphertext. Encryption that does
 not finish within 5 minutes, or any failure of packing or `age`, writes nothing
 to standard output and leaves the VPN unchanged. There is still no passphrase
 flag, environment variable, or plaintext export mode. Store the passphrase
