@@ -65,10 +65,16 @@ fallback.
 install paths; panel DB present, env/hash present — never the hash
 itself —, archive vs. panel-source migration versions, mail jobs that would be
 cancelled) and an `endpoint_audit` (`hostname`, `ip_literal`, and per-client
-name/host/kind). `--dry-run` also prints the panel plan and how the panel would be
+name/host/kind). A profile is `ip_literal` when its Endpoint host is an IPv6
+address or any value `socket.inet_aton` accepts without asking DNS. That
+includes dotted quads and the short, hexadecimal and octal forms `123`,
+`1.2.3`, `0x7f.1` and `0177.0.0.1`. Other names that match the hostname label
+rules are `hostname`. `--dry-run` also prints the panel plan and how the panel would be
 installed. When `ip_literal` is greater than zero, both warn that those
 profiles will need a new profile after an IP ban. Export prints the same
-counts before the passphrase prompt. If the count cannot be produced, export
+counts before the passphrase prompt. Export also refuses, before the
+passphrase, a symlink anywhere in the staged client directory and any staged
+client entry whose archive name `pack` would reject. If the count cannot be produced, export
 warns and continues; a published archive is not failed because counting
 failed. Client names and Endpoint hosts are included; private keys and full
 configs are not. Staged `clients/*.conf` profiles are validated before the
@@ -714,8 +720,9 @@ of this checklist. Do not record it as passed until each step has been run.
    handshakes, and the backend port is not the client's Endpoint.
 7. DNS cutover with at least two client types (for example the official
    AmneziaWG client and WireSock): profiles that already use a hostname keep
-   working after the DNS record moves; profiles counted as `ip_literal` do
-   not, until they are given a new profile.
+   working after the DNS record moves; profiles counted as `ip_literal`
+   (including short, hexadecimal and octal forms `socket.inet_aton` accepts)
+   do not, until they are given a new profile.
 8. Power loss during import: kill the host after quarantine has started and
    before finalization. After boot the VPN must still be the old one or be
    stopped, and a rerun must refuse an incomplete rollback or finish the

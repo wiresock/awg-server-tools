@@ -3421,6 +3421,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import sqlite3
 import sys
 import tarfile
@@ -4218,7 +4219,10 @@ def migration_plan(manifest, files, data, policy, phase):
 
 def endpoint_host(value):
     # Endpoint is host:port or [ipv6]:port. A literal address (v4 or v6) is
-    # what a ban strands; a hostname can follow DNS.
+    # what a ban strands; a hostname can follow DNS. ipaddress rejects the
+    # short, hex and octal forms glibc inet_aton accepts without asking DNS
+    # (123 -> 0.0.0.123, 1.2.3 -> 1.2.0.3, 0x7f.1 -> 127.0.0.1). Those are
+    # literals too.
     value = value.strip()
     if value.startswith('['):
         match = re.fullmatch(r'\[([0-9A-Fa-f:.]+)\]:([0-9]{1,5})', value)
@@ -4235,10 +4239,13 @@ def endpoint_host(value):
     try:
         ipaddress.ip_address(host)
     except ValueError:
-        if (len(host) <= 253 and re.fullmatch(
-                r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*', host)):
-            return host, 'hostname'
-        return None
+        try:
+            socket.inet_aton(host)
+        except OSError:
+            if (len(host) <= 253 and re.fullmatch(
+                    r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*', host)):
+                return host, 'hostname'
+            return None
     return host, 'ip_literal'
 
 
@@ -4358,6 +4365,10 @@ def main():
             for client in sorted(client_dir.iterdir()):
                 if client.is_symlink():
                     raise StatePolicyError('symlink in staging tree')
+                # Same names pack accepts. A file pack would reject must fail
+                # here, before the passphrase prompt.
+                if not member_name('clients/' + client.name):
+                    raise StatePolicyError('unknown staging file')
                 if client.is_file() and client.name.endswith('.conf'):
                     config(client.read_bytes())
         stamp = utc_text(utc_now().replace(microsecond=0))

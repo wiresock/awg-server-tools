@@ -2742,25 +2742,47 @@ if awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10
             '[Interface]\nPrivateKey = %s\nAddress = 10.66.66.4/32\n'
             '[Peer]\nPublicKey = %s\nEndpoint = [2001:db8::5]:51820\nAllowedIPs = 0.0.0.0/0\n' % (KEY, PUB)
         ).encode()
+        # glibc inet_aton accepts these without DNS. They are literals, not names.
+        inet_aton_hosts = (
+            ('hex', '0x7f.1'),
+            ('short', '123'),
+            ('triple', '1.2.3'),
+            ('octal', '0177.0.0.1'),
+            ('wide', '4294967295'),
+        )
+        for label, host in inet_aton_hosts:
+            files['clients/awg0-client-%s.conf' % label] = (
+                '[Interface]\nPrivateKey = %s\nAddress = 10.66.66.5/32\n'
+                '[Peer]\nPublicKey = %s\nEndpoint = %s:51820\nAllowedIPs = 0.0.0.0/0\n' % (KEY, PUB, host)
+            ).encode()
+        files['clients/awg0-client-dns.conf'] = (
+            '[Interface]\nPrivateKey = %s\nAddress = 10.66.66.6/32\n'
+            '[Peer]\nPublicKey = %s\nEndpoint = 1e100.net:51820\nAllowedIPs = 0.0.0.0/0\n' % (KEY, PUB)
+        ).encode()
         make_tar(self.tar, files)
         inspected = self.run_helper('inspect')
         audit = json.loads(inspected.stdout)['endpoint_audit']
-        self.assertEqual(audit['hostname'], 1)
-        self.assertEqual(audit['ip_literal'], 2)
+        self.assertEqual(audit['hostname'], 2)
+        self.assertEqual(audit['ip_literal'], 7)
         kinds = {item['name']: item['kind'] for item in audit['clients']}
         self.assertEqual(kinds['awg0-client-phone'], 'hostname')
+        self.assertEqual(kinds['awg0-client-dns'], 'hostname')
         self.assertEqual(kinds['awg0-client-literal'], 'ip_literal')
+        for label, host in inet_aton_hosts:
+            self.assertEqual(kinds['awg0-client-%s' % label], 'ip_literal')
+            self.assertIn(('awg0-client-%s (%s)' % (label, host)).encode(), inspected.stderr)
         self.assertEqual(next(item['host'] for item in audit['clients'] if item['name'] == 'awg0-client-literal'), '203.0.113.7')
         self.assertIn(b'203.0.113.7', inspected.stderr)
         self.assertIn(b'2001:db8::5', inspected.stderr)
         self.assertIn(b'will need a new profile after an IP ban', inspected.stderr)
+        self.assertNotIn(b'1e100.net', inspected.stderr)
         self.assertNotIn(KEY.encode(), inspected.stdout)
         stage = self.root / 'audit-stage'
         self.run_helper('unpack', self.tar, stage)
         prepared = self.run_helper('prepare', stage)
         self.assertIn(b'will need a new profile after an IP ban', prepared.stderr)
         summary = self.run_helper('endpoint-summary', stage)
-        self.assertEqual(summary.stdout.splitlines()[:2], [b'1', b'2'])
+        self.assertEqual(summary.stdout.splitlines()[:2], [b'2', b'7'])
 
     def test_endpoint_warning_precedes_encryption_and_count_failure_still_exports(self):
         source = self.root / 'source'
@@ -2864,6 +2886,97 @@ status=$?
                 self.assertIn(needle, combined)
                 self.assertNotIn(b'touch /bad', combined)
                 self.assertNotIn(b'invalid or unsupported', combined)
+                self.assertNotIn(KEY.encode(), combined)
+
+    def test_staged_symlink_and_bad_client_name_refuse_before_passphrase(self):
+        # export-check runs before age. A symlink, and any clients entry pack
+        # would reject, must fail there rather than after the passphrase.
+        good = self.files['clients/awg0-client-phone.conf']
+        stage = self.root / 'check-stage'
+        (stage / 'vpn').mkdir(parents=True)
+        (stage / 'clients').mkdir()
+        (stage / 'vpn/params').write_bytes(self.files['vpn/params'])
+        (stage / 'vpn/server.conf').write_bytes(self.files['vpn/server.conf'])
+        (stage / 'clients/awg0-client-phone.conf').write_bytes(good)
+        link = stage / 'clients/awg0-client-x.conf'
+        link.symlink_to(stage / 'clients/awg0-client-phone.conf')
+        refused = self.run_helper('export-check', stage, ok=False)
+        self.assertIn(b'symlink in staging tree', refused.stderr)
+        self.assertNotIn(b'invalid or unsupported', refused.stderr)
+        link.unlink()
+        (stage / 'clients/bad name.conf').write_bytes(good)
+        refused = self.run_helper('export-check', stage, ok=False)
+        self.assertIn(b'unknown staging file', refused.stderr)
+        (stage / 'clients/bad name.conf').unlink()
+        (stage / 'clients/notes.txt').write_bytes(b'not a profile\n')
+        refused = self.run_helper('export-check', stage, ok=False)
+        self.assertIn(b'unknown staging file', refused.stderr)
+        (stage / 'clients/notes.txt').unlink()
+        self.run_helper('export-check', stage)
+
+        source = self.root / 'source'
+        (source / 'clients').mkdir(parents=True)
+        (source / 'params').write_bytes(self.files['vpn/params'])
+        (source / 'awg0.conf').write_bytes(self.files['vpn/server.conf'])
+        (source / 'clients/awg0-client-phone.conf').write_bytes(good)
+        (source / 'clients/bad name.conf').write_bytes(good)
+        (source / 'clients/notes.txt').write_bytes(b'not a profile\n')
+        shell = r'''
+set -uo pipefail
+source "$1"
+ROOT="$2"
+KIND="$3"
+AMNEZIAWG_DIR="$ROOT/source"
+AWG_STATE_PROXY_CONFIG="$ROOT/not-installed-proxy"
+acquireClientLifecycleLock() { return 0; }
+releaseClientLifecycleLock() { :; }
+awgStateTrustedPath() { return 0; }
+awg() { printf 'fixture-tools\n'; }
+age() { touch "$ROOT/age-ran"; cat >"$3"; }
+rm -f "$ROOT/age-ran"
+case "$KIND" in
+  symlink)
+    isWebPanelInstalled() { return 0; }
+    collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=("$ROOT/source/clients/awg0-client-phone.conf"); }
+    awgStateSnapshotPanel() {
+      ln -s "$ROOT/source/clients/awg0-client-phone.conf" "$1/clients/awg0-client-x.conf"
+    }
+    ;;
+  bad-name)
+    isWebPanelInstalled() { return 1; }
+    collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=("$ROOT/source/clients/bad name.conf"); }
+    ;;
+  notes)
+    isWebPanelInstalled() { return 1; }
+    collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=("$ROOT/source/clients/notes.txt"); }
+    ;;
+  *) exit 9 ;;
+esac
+mkdir -p "$ROOT/work/$KIND"
+awgStateExport "$ROOT/refused-$KIND" "$ROOT/work/$KIND" >"$ROOT/order-$KIND.log" 2>&1
+status=$?
+[[ "$status" -ne 0 && ! -e "$ROOT/age-ran" && ! -e "$ROOT/refused-$KIND" ]] || {
+  echo "export-did-not-stop-before-age status=$status" >&2
+  cat "$ROOT/order-$KIND.log" >&2
+  exit 10
+}
+grep -q 'Enter passphrase' "$ROOT/order-$KIND.log" && exit 11
+grep -q 'Encrypted state archive created' "$ROOT/order-$KIND.log" && exit 12
+exit 0
+'''
+        cases = {
+            'symlink': b'symlink in staging tree',
+            'bad-name': b'unknown staging file',
+            'notes': b'unknown staging file',
+        }
+        for kind, needle in cases.items():
+            with self.subTest(kind=kind):
+                result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root), kind],
+                                        capture_output=True)
+                combined = result.stdout + result.stderr + (self.root / ('order-%s.log' % kind)).read_bytes()
+                self.assertEqual(result.returncode, 0, combined.decode())
+                self.assertIn(needle, combined)
+                self.assertNotIn(b'Enter passphrase', combined)
                 self.assertNotIn(KEY.encode(), combined)
 
     def test_direct_export_without_proxy_is_schema_1(self):

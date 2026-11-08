@@ -5,7 +5,8 @@
 # checklist in docs/STATE_MIGRATION.md.
 #
 # source: install BoringTun, add one client, export to ${AWG_MIGRATION_OUT}.
-#         AWG_MIGRATION_PROTOCOL=3.1 runs --enable-awg31 before the export.
+#         AWG_MIGRATION_PROTOCOL is required and is 2.0 or 3.1.
+#         3.1 runs --enable-awg31 before the export.
 # target: rename the default-route NIC to migup0, import, activate with
 #         --enable-at-boot, compare material, handshake from a namespace.
 #
@@ -27,7 +28,8 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 ROLE="${1:-}"
 OUT="${AWG_MIGRATION_OUT:-}"
 PASSFILE="${AWG_MIGRATION_PASSPHRASE_FILE:-}"
-PROTOCOL="${AWG_MIGRATION_PROTOCOL:-2.0}"
+[[ -n "${AWG_MIGRATION_PROTOCOL:-}" ]] || die "AWG_MIGRATION_PROTOCOL is unset; set it to 2.0 or 3.1"
+PROTOCOL="${AWG_MIGRATION_PROTOCOL}"
 # The path is not a secret, but children do not need it. age must not see a
 # passphrase in the environment; this variable is only a path, and it is
 # dropped before any installer process starts.
@@ -196,6 +198,9 @@ if [[ "${ROLE}" == source ]]; then
 		bash "${INSTALLER}" --enable-awg31
 		grep -qx "AWG_PROTOCOL_VERSION='3.1'" /etc/amnezia/amneziawg/params \
 			|| die "AWG 3.1 enablement did not persist"
+	else
+		grep -qx "AWG_PROTOCOL_VERSION='2'" /etc/amnezia/amneziawg/params \
+			|| die "AWG 2.0 install did not persist"
 	fi
 	CLIENT="/etc/amnezia/amneziawg/clients/${IF}-client-migrate1.conf"
 	[[ -f "${CLIENT}" && ! -L "${CLIENT}" ]] || die "client profile was not written"
@@ -240,6 +245,9 @@ if [[ "${PROTOCOL}" == 3.1 ]]; then
 		|| die "restored server config has no HeaderProtectionKey"
 	grep -q '^RandomTrailers = ' "/etc/amnezia/amneziawg/${IF}.conf" \
 		|| die "restored server config has no RandomTrailers"
+else
+	grep -qx "AWG_PROTOCOL_VERSION='2'" /etc/amnezia/amneziawg/params \
+		|| die "restored params are not AWG 2.0"
 fi
 grep -q "^Endpoint = ${HOST_ADDR}:${PORT}\$" "${RESTORED}" || die "restored client profile Endpoint changed"
 grep -qx "SERVER_PUB_NIC='migup0'" /etc/amnezia/amneziawg/params || die "restored params did not record migup0"
