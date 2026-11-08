@@ -101,6 +101,11 @@ AWG_INSTALLER_CAPABILITY_BORINGTUN_IMITATION_AUTO="boringtun-imitation-auto-v1"
 # of that channel. Keep the marker unchanged for compatible installers.
 # shellcheck disable=SC2034
 AWG_INSTALLER_CAPABILITY_PROTOCOL_DIAGNOSTICS="protocol-diagnostics-v1"
+# The panel helper reads this marker before --export-state - --passphrase-fd.
+# An older installer has no streaming mode; executing that flag there can fall
+# through into the interactive menu. Keep the marker unchanged.
+# shellcheck disable=SC2034
+AWG_INSTALLER_CAPABILITY_STATE_EXPORT_STREAM="state-export-stream-v1"
 
 # The immutable public BoringTun release that fresh BoringTun installs download.
 # These values are the installer's only trust anchor for the binary: they are
@@ -4619,13 +4624,12 @@ function awgStateSnapshotPanel() {
 	echo 'NOTE: panel DB/env and the proxy config stay inside the encrypted archive. --activate-state --enable-at-boot restores them when this checkout has the installers; queued mail is not replayed.' >&2
 }
 
-function awgStateExport() { # <destination> <private work directory>
-	local DEST="$1" WORK="$2" FILE BASE VERSION INSTALLER_SHA256
+# Snapshot, validate and count. The lifecycle lock is released before return
+# so the caller can encrypt without holding it. Informative lines stay on
+# stdout; refusals and the literal-IP warning stay on stderr.
+function awgStatePrepareExport() { # <private work directory>
+	local WORK="$1" FILE BASE
 	local -a CANDIDATES=()
-	[[ ! -e "${DEST}" && ! -L "${DEST}" ]] || {
-		echo 'ERROR: export destination already exists.' >&2
-		return 1
-	}
 	acquireClientLifecycleLock || return 1
 	awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || { echo 'ERROR: unsafe source params path.' >&2; return 1; }
 	awgStateReadParams "${AMNEZIAWG_DIR}/params" "${WORK}/records" || return 1
@@ -4687,6 +4691,15 @@ function awgStateExport() { # <destination> <private work directory>
 	# The private staging copy is a complete, consistent snapshot. Do not hold
 	# the lifecycle locks (blocking panel/CLI operations) during the prompt.
 	releaseClientLifecycleLock
+}
+
+function awgStateExport() { # <destination> <private work directory>
+	local DEST="$1" WORK="$2" VERSION INSTALLER_SHA256
+	[[ ! -e "${DEST}" && ! -L "${DEST}" ]] || {
+		echo 'ERROR: export destination already exists.' >&2
+		return 1
+	}
+	awgStatePrepareExport "${WORK}" || return 1
 	VERSION="$(awg --version 2>/dev/null || printf unknown)"
 	INSTALLER_SHA256="$(awgStateInstallerSha256)"
 	# Stream plaintext tar directly into age. Its passphrase still comes only
@@ -4705,6 +4718,357 @@ function awgStateExport() { # <destination> <private work directory>
 	fi
 	rm -f -- "${PUBLISH}"
 	echo 'Encrypted state archive created. Keep it offline; it grants full VPN access.'
+}
+
+# Ciphertext on stdout, and only after pack and age both succeed. Bash never
+# reads the passphrase: python3 -I reads descriptor N once, then closes it.
+# age 1.1.1 (Debian 12; the same prompts on the Ubuntu targets that ship it)
+# treats an empty entry as a request to invent a passphrase and print it on
+# the terminal, so an empty value is refused before age is started. Interactive
+# --export-state <file> is unchanged and still uses the caller's terminal.
+function awgStateExportStream() { # <private work directory> <passphrase-fd>
+	local WORK="$1" PASSFD="$2" VERSION INSTALLER_SHA256 PASS_COPY
+	[[ "${PASSFD}" =~ ^[0-9]+$ ]] || { echo 'ERROR: --passphrase-fd must be a descriptor number.' >&2; return 1; }
+	[[ -f "${BASH_SOURCE[0]:-}" && -r "${BASH_SOURCE[0]}" ]] || {
+		echo 'ERROR: streaming export requires the installer to be a regular file.' >&2
+		return 1
+	}
+	# Counts and warnings are not part of the archive.
+	awgStatePrepareExport "${WORK}" >&2 || return 1
+	VERSION="$(awg --version 2>/dev/null || printf unknown)"
+	INSTALLER_SHA256="$(awgStateInstallerSha256)"
+	# Duplicate first so the driver's own program text can use stdin.
+	exec {PASS_COPY}<&"${PASSFD}" || { echo 'ERROR: --passphrase-fd is not open for reading.' >&2; return 1; }
+	if ! awgStatePassphraseAge "${PASS_COPY}" "${WORK}/encrypted" "${WORK}/stage" "${VERSION}" "${INSTALLER_SHA256}" >/dev/null; then
+		exec {PASS_COPY}>&- || true
+		rm -f -- "${WORK}/encrypted"
+		return 1
+	fi
+	exec {PASS_COPY}>&- || true
+	[[ -f "${WORK}/encrypted" && ! -L "${WORK}/encrypted" && -s "${WORK}/encrypted" ]] || {
+		rm -f -- "${WORK}/encrypted"
+		echo 'ERROR: state encryption produced no archive.' >&2
+		return 1
+	}
+	cat -- "${WORK}/encrypted"
+}
+
+function awgStatePassphraseAge() { # <fd> <outfile> <stage> <awg-version> <installer-sha256>
+	python3 -I - "$1" "$2" "$3" "$4" "$5" "${BASH_SOURCE[0]}" <<'AWG_STATE_AGE_PY'
+# Reads the passphrase from a pipe, answers age's two /dev/tty prompts, and
+# writes ciphertext to the outfile. Nothing from the terminal is logged.
+import os
+import select
+import signal
+import stat
+import subprocess
+import sys
+import time
+import traceback
+
+try:
+    import pty
+    import termios
+except ImportError:
+    sys.stderr.write("ERROR: python3 pty support is required for streaming export.\n")
+    raise SystemExit(1)
+
+PASS_MIN = 16
+PASS_MAX = 1024
+PASS_READ_S = 30
+DEADLINE_S = 300
+PROMPTS = (
+    b"Enter passphrase (leave empty to autogenerate a secure one): ",
+    b"Confirm passphrase: ",
+)
+passphrase = bytearray()
+children = []
+out_fd = None
+out_path = None
+pty_fd = None
+success = False
+
+
+def wipe(buf):
+    if isinstance(buf, bytearray):
+        for index in range(len(buf)):
+            buf[index] = 0
+
+
+def stop_children():
+    for kind, pid in children:
+        try:
+            if kind == "group":
+                os.killpg(pid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    for kind, pid in children:
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+    children.clear()
+
+
+def fail(message):
+    sys.stderr.write("ERROR: %s\n" % message)
+    raise SystemExit(1)
+
+
+def strip_controls(data):
+    out = bytearray()
+    index = 0
+    while index < len(data):
+        if data.startswith(b"\x1b[F", index) or data.startswith(b"\x1b[K", index):
+            index += 3
+            continue
+        if data[index] in (0x0d, 0x0a):
+            index += 1
+            continue
+        if data[index] == 0x1b:
+            return None
+        out.append(data[index])
+        index += 1
+    return bytes(out)
+
+
+def write_all(fd, data):
+    view = data
+    while view:
+        wrote = os.write(fd, view)
+        if wrote <= 0:
+            raise OSError("short write")
+        view = view[wrote:]
+
+
+try:
+    pass_fd = int(sys.argv[1])
+    out_path = sys.argv[2]
+    stage = sys.argv[3]
+    version = sys.argv[4]
+    installer_sha = sys.argv[5]
+    installer = sys.argv[6]
+    info = os.fstat(pass_fd)
+    if not stat.S_ISFIFO(info.st_mode):
+        fail("passphrase descriptor must be a pipe, not a terminal or a file")
+    # Stop waiting if the caller never sends the passphrase. This is before
+    # age, and before any ciphertext exists.
+    read_deadline = time.monotonic() + PASS_READ_S
+    while len(passphrase) <= PASS_MAX:
+        remaining = read_deadline - time.monotonic()
+        if remaining <= 0:
+            fail("timed out waiting for the passphrase")
+        ready, _, _ = select.select([pass_fd], [], [], min(remaining, 1.0))
+        if not ready:
+            continue
+        chunk = os.read(pass_fd, PASS_MAX + 1 - len(passphrase))
+        if not chunk:
+            break
+        passphrase += chunk
+    os.close(pass_fd)
+    pass_fd = -1
+    if len(passphrase) > PASS_MAX:
+        fail("passphrase is longer than 1024 bytes")
+    if not passphrase:
+        fail("passphrase is empty")
+    if b"\x00" in passphrase or b"\n" in passphrase or b"\r" in passphrase:
+        fail("passphrase contains a newline or NUL")
+    try:
+        decoded = passphrase.decode("utf-8")
+    except UnicodeError:
+        fail("passphrase is not valid UTF-8")
+    if len(decoded) < PASS_MIN:
+        fail("passphrase is shorter than 16 characters")
+    del decoded
+
+    # RDWR so the header can be read back. O_WRONLY makes that read fail with EBADF.
+    out_fd = os.open(out_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    tar_r, tar_w = os.pipe()
+    pack_err_r, pack_err_w = os.pipe()
+    pack_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C", "LANG": "C"}
+    pack = subprocess.Popen(
+        ["bash", "-c", 'source "$1" || exit 97; shift; awgStateArchive "$@"',
+         "awg-state-pack", installer, "pack", stage, "-", version, installer_sha],
+        stdin=subprocess.DEVNULL, stdout=tar_w, stderr=pack_err_w,
+        env=pack_env, start_new_session=True, close_fds=True)
+    os.close(tar_w)
+    os.close(pack_err_w)
+    children.append(("group", pack.pid))
+    cipher_r, cipher_w = os.pipe()
+    err_r, err_w = os.pipe()
+    age_pid, pty_fd = pty.fork()
+    if age_pid == 0:
+        try:
+            settings = termios.tcgetattr(0)
+            settings[3] &= ~termios.ECHO
+            termios.tcsetattr(0, termios.TCSANOW, settings)
+            # Keep one open slave fd. Closing the last one drops the
+            # controlling terminal, the kernel sends SIGHUP, and age dies
+            # before it can open /dev/tty. os.dup() is close-on-exec, so the
+            # extra fd must be made inheritable or exec closes it too.
+            # dup2 onto 0/1/2 clears close-on-exec; set it again explicitly.
+            slave = os.dup(0)
+            os.dup2(tar_r, 0)
+            os.dup2(cipher_w, 1)
+            os.dup2(err_w, 2)
+            os.set_inheritable(slave, True)
+            os.set_inheritable(0, True)
+            os.set_inheritable(1, True)
+            os.set_inheritable(2, True)
+            keep = {0, 1, 2, slave}
+            for name in os.listdir("/proc/self/fd"):
+                if name.isdigit() and int(name) not in keep:
+                    try:
+                        os.close(int(name))
+                    except OSError:
+                        pass
+            os.execvpe("age", ["age", "--passphrase"], pack_env)
+        except OSError as exc:
+            try:
+                os.write(2, ("age failed to start: %s\n" % exc).encode())
+            except OSError:
+                pass
+            os._exit(127)
+    children.append(("pid", age_pid))
+    os.close(tar_r)
+    os.close(cipher_w)
+    os.close(err_w)
+    streams = {pty_fd: "pty", cipher_r: "cipher", err_r: "err", pack_err_r: "packerr"}
+    terminal = bytearray()
+    err_buf = bytearray()
+    stage_n = 0
+    echoed = False
+    unexpected = False
+    deadline = time.monotonic() + DEADLINE_S
+    while streams and time.monotonic() < deadline and not unexpected and not echoed:
+        while stage_n < 2:
+            visible = strip_controls(terminal)
+            prompt = PROMPTS[stage_n]
+            if visible is None:
+                unexpected = True
+                break
+            if visible.startswith(prompt):
+                write_all(pty_fd, bytes(passphrase) + b"\n")
+                terminal = bytearray(visible[len(prompt):])
+                stage_n += 1
+                continue
+            if prompt.startswith(visible):
+                break
+            unexpected = True
+            break
+        if stage_n >= 2 and terminal:
+            visible = strip_controls(terminal)
+            if visible is None or visible:
+                unexpected = True
+            terminal = bytearray()
+        if unexpected:
+            break
+        readable, _, _ = select.select(list(streams), [], [], 0.2)
+        if not readable:
+            continue
+        for fd in readable:
+            kind = streams.get(fd)
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                data = b""
+            if not data:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                streams.pop(fd, None)
+                continue
+            if kind == "cipher":
+                os.write(out_fd, data)
+            elif kind in ("err", "packerr"):
+                err_buf += data
+                if len(err_buf) > 8192:
+                    del err_buf[:-8192]
+            else:
+                if bytes(passphrase) in data:
+                    echoed = True
+                    break
+                terminal += data
+                if stage_n >= 2:
+                    visible = strip_controls(terminal)
+                    if visible is None or visible:
+                        unexpected = True
+                        break
+                    terminal = bytearray()
+    if time.monotonic() >= deadline and (stage_n < 2 or streams):
+        fail("state encryption timed out")
+    if echoed:
+        fail("passphrase was echoed by the terminal")
+    if unexpected or stage_n != 2:
+        visible = strip_controls(terminal)
+        if not isinstance(visible, (bytes, bytearray)):
+            visible = b""
+        secret = bytes(passphrase)
+        if secret:
+            visible = visible.replace(secret, b"[redacted]")
+        diag = bytes(err_buf)
+        if secret:
+            diag = diag.replace(secret, b"[redacted]")
+        if stage_n != 2 and not unexpected:
+            try:
+                done, status = os.waitpid(age_pid, os.WNOHANG)
+            except OSError:
+                done = 0
+            if done:
+                children[:] = [item for item in children if item[1] != age_pid]
+                fail("age exited before the passphrase prompts (status %s): %r" % (
+                    os.waitstatus_to_exitcode(status), diag[:240]))
+        fail("age produced unexpected terminal output (%r / %r)" % (bytes(visible[:120]), diag[:240]))
+    age_pid_done, age_status = os.waitpid(age_pid, 0)
+    children = [item for item in children if item[1] != age_pid]
+    pack_status = pack.wait(timeout=30)
+    children = [item for item in children if item[1] != pack.pid]
+    age_code = os.waitstatus_to_exitcode(age_status) if age_pid_done else 1
+    if age_code != 0 or pack_status != 0:
+        fail("state encryption failed")
+    if os.fstat(out_fd).st_size < 32:
+        fail("state encryption produced no archive")
+    os.lseek(out_fd, 0, os.SEEK_SET)
+    if not os.read(out_fd, 32).startswith(b"age-encryption.org/"):
+        fail("state encryption produced an unexpected archive")
+    success = True
+except SystemExit:
+    raise
+except Exception:
+    detail = traceback.format_exc()
+    if passphrase and bytes(passphrase) in detail.encode():
+        detail = "ERROR: state encryption failed.\n"
+    else:
+        detail = "ERROR: state encryption failed.\n" + detail
+    sys.stderr.write(detail)
+    raise SystemExit(1)
+finally:
+    wipe(passphrase)
+    if not success:
+        stop_children()
+        if out_fd is not None:
+            try:
+                os.close(out_fd)
+            except OSError:
+                pass
+            out_fd = None
+        if out_path:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+    else:
+        if out_fd is not None:
+            os.close(out_fd)
+        if pty_fd is not None:
+            try:
+                os.close(pty_fd)
+            except OSError:
+                pass
+AWG_STATE_AGE_PY
 }
 
 # Hash the installer only when it runs from a regular file. Under
@@ -5696,7 +6060,7 @@ function awgStateCommand() (
 	# xtrace must not echo imported private keys during printf -v/serialization.
 	set +x
 	umask 077
-	local MODE="$1" ARCHIVE="$2" OPTION="${3:-}" WORK NIC="${SERVER_PUB_NIC:-}" PUB_IP="${SERVER_PUB_IP:-}" STATE_ID JOURNAL
+	local MODE="$1" ARCHIVE="$2" OPTION="${3:-}" PASSFD="${4:-}" WORK NIC="${SERVER_PUB_NIC:-}" PUB_IP="${SERVER_PUB_IP:-}" STATE_ID JOURNAL
 	isRoot || exit 1
 	checkOS
 	# checkOS normalizes Raspbian to debian and Linux Mint to ubuntu.
@@ -5713,6 +6077,11 @@ function awgStateCommand() (
 	trap 'exit 143' TERM
 	trap 'exit 129' HUP
 	if [[ "${MODE}" == --export-state ]]; then
+		if [[ "${ARCHIVE}" == - ]]; then
+			[[ "${OPTION}" == --passphrase-fd ]] || { echo 'ERROR: streaming export requires --passphrase-fd.' >&2; exit 1; }
+			awgStateExportStream "${WORK}" "${PASSFD}"
+			exit $?
+		fi
 		awgStateExport "${ARCHIVE}" "${WORK}"
 		exit $?
 	fi
@@ -16665,6 +17034,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	#
 	# Server state migration (root; docs/STATE_MIGRATION.md):
 	#   amneziawg-install.sh --export-state <file>
+	#   amneziawg-install.sh --export-state - --passphrase-fd <fd>
 	#   amneziawg-install.sh --inspect-state <file>
 	#   [SERVER_PUB_NIC=<nic>] [SERVER_PUB_IP=<host>] amneziawg-install.sh --import-state <file> [--dry-run]
 	#   [AWG_STATE_PANEL_BINARY=<amneziawg-web>] [AWG_STATE_PROXY_BINARY=<amneziawg-proxy>] \
@@ -16679,8 +17049,14 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	# Requires AmneziaWG to be already installed (params file must exist).
 	case "${1:-}" in
 		--export-state|--inspect-state|--import-state|--activate-state)
+			# Streaming export is the only mode that reads a passphrase, and it
+			# reads it from a pipe descriptor. "-" is not a file destination.
+			if [[ "$1" == --export-state && $# -eq 4 && "$2" == - && "$3" == --passphrase-fd && "$4" =~ ^[0-9]+$ ]]; then
+				awgStateCommand "$@"
+				exit $?
+			fi
 			if [[ $# -ne 2 && ! ( "$1" == --import-state && $# -eq 3 && "$3" == --dry-run ) && ! ( "$1" == --activate-state && $# -eq 3 && "$3" == --enable-at-boot ) ]] || [[ -z "${2:-}" || "${2:-}" == -* ]]; then
-				echo 'Usage: amneziawg-install.sh --export-state <file> | --inspect-state <file> | --import-state <file> [--dry-run] | --activate-state <file> [--enable-at-boot]' >&2
+				echo 'Usage: amneziawg-install.sh --export-state <file> | --export-state - --passphrase-fd <fd> | --inspect-state <file> | --import-state <file> [--dry-run] | --activate-state <file> [--enable-at-boot]' >&2
 				exit 1
 			fi
 			awgStateCommand "$@"

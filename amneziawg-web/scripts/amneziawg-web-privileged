@@ -9,6 +9,11 @@
 # It deliberately accepts only the operations and argument shapes required by
 # the service.  Paths to privileged executables and AWG configuration files
 # are fixed here and cannot be overridden through the environment.
+#
+# export-state is the only subcommand whose standard output is secret, and
+# only as an age-encrypted state archive. The passphrase is read from the
+# stdin pipe by the trusted installer. It is not stored in a shell parameter,
+# argv, or the environment, and it is not written to a file.
 
 set -euo pipefail
 
@@ -657,6 +662,86 @@ fail_protocol_migration() {
     exit 2
 }
 
+# Stream an age-encrypted state archive. The passphrase stays on stdin and is
+# never assigned to a shell parameter, placed in argv, or copied into the
+# environment. This is the only helper operation that writes secret material,
+# and the bytes it writes are ciphertext from the trusted installer.
+#
+# The installer reads at most 1024 bytes and stops waiting after 30 seconds.
+# Stdout is that ciphertext and nothing else. Stderr is kept in this process,
+# bounded, and relayed only on failure, through the same sanitizer as the
+# other installer invocations. No archive, passphrase, or diagnostic file is
+# created here.
+run_export_state() {
+    local install_script rc=0 line index err_w
+    local -a diag_lines=() kept=()
+
+    if [[ ! -p /dev/stdin ]]; then
+        fail "export-state requires the passphrase on a pipe"
+    fi
+    install_script="$(resolve_awg_install_script)"
+    # Read as data. An older installer must not be executed with this mode:
+    # its dispatcher can treat an unknown flag as an interactive command.
+    if ! grep -qxF 'AWG_INSTALLER_CAPABILITY_STATE_EXPORT_STREAM="state-export-stream-v1"' -- "${install_script}"; then
+        fail "installed installer cannot stream a state archive"
+    fi
+
+    # DIAG[0] is the coprocess stdout. DIAG[1] is its stdin, which receives
+    # only the installer's stderr. The coprocess does not see the passphrase.
+    # Not a function: bash rejects `local` here.
+    coproc DIAG {
+        coproc_line=""
+        raw=()
+        while IFS= read -r coproc_line || [[ -n "${coproc_line}" ]]; do
+            if (( ${#coproc_line} > 4096 )); then
+                coproc_line="${coproc_line:0:4096}"
+            fi
+            raw+=("${coproc_line}")
+            if (( ${#raw[@]} > INSTALLER_DIAGNOSTIC_RAW_LINES )); then
+                raw=("${raw[@]:1}")
+            fi
+        done
+        if (( ${#raw[@]} > 0 )); then
+            printf '%s\n' "${raw[@]}"
+        fi
+    }
+    # Bash unsets the coproc array when that process exits. Keep our own
+    # descriptors, and drop the extras so the reader sees EOF.
+    exec {err_r}<&"${DIAG[0]}"
+    exec {err_w}>&"${DIAG[1]}"
+    diag_pid="${DIAG_PID}"
+    orig_r="${DIAG[0]}"
+    orig_w="${DIAG[1]}"
+    [[ "${orig_r}" =~ ^[0-9]+$ && "${orig_w}" =~ ^[0-9]+$ ]] \
+        || fail "could not capture installer diagnostics"
+    eval "exec ${orig_r}<&-"
+    eval "exec ${orig_w}>&-"
+    set +e
+    "${install_script}" --export-state - --passphrase-fd 0 2>&"${err_w}"
+    rc=$?
+    set -e
+    exec {err_w}>&-
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        diag_lines+=("${line}")
+    done <&"${err_r}"
+    exec {err_r}<&-
+    wait "${diag_pid}" || true
+    if (( rc == 0 )); then
+        return 0
+    fi
+    printf 'amneziawg-web-privileged: state export failed\n' >&2
+    for (( index = ${#diag_lines[@]} - 1; index >= 0; index-- )); do
+        sanitize_installer_line "${diag_lines[index]}" || continue
+        [[ -n "${SANITIZED_LINE//[[:space:]]/}" ]] || continue
+        kept=("${SANITIZED_LINE}" "${kept[@]}")
+        (( ${#kept[@]} < INSTALLER_DIAGNOSTIC_LINES )) || break
+    done
+    for line in "${kept[@]}"; do
+        printf 'installer: %s\n' "${line}" >&2
+    done
+    exit 2
+}
+
 run_protocol_migration() {
     local flag="$1"
     local install_script protocol
@@ -1187,6 +1272,12 @@ main() {
             validate_server_config_path "${conditional_remove_path}"
             require_managed_server_config "${conditional_remove_path}"
             remove_client_block "${conditional_remove_path}" "$2" "$3"
+            return 0
+            ;;
+        export-state)
+            require_arg_count "${subcommand}" 0 "$#"
+            # Only subcommand that emits a secret, and only age ciphertext.
+            run_export_state
             return 0
             ;;
         *)

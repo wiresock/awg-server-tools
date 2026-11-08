@@ -6,6 +6,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import base64
 import copy
+import errno
 import hashlib
 import gzip
 import io
@@ -1256,7 +1257,11 @@ fi
         self.assertIn(b'finalized local', self.run_helper('local-identity', expected, local, conf, ok=False).stderr)
 
     def test_invalid_arguments_never_enter_interactive_install(self):
-        for args in (['--export-state'], ['--inspect-state', 'x', '--dry-run'],
+        for args in (['--export-state'], ['--export-state', '-'],
+                     ['--export-state', '-', '--passphrase-fd'],
+                     ['--export-state', '-', '--passphrase-fd', 'nope'],
+                     ['--export-state', 'archive.awgx', '--passphrase-fd', '3'],
+                     ['--inspect-state', 'x', '--dry-run'],
                      ['--import-state', 'x', '--unknown'], ['--import-state', '--dry-run'],
                      ['--activate-state'], ['--activate-state', 'x', '--dry-run'],
                      ['--import-state', 'x', '--enable-at-boot'], ['--purge-state-journal'],
@@ -2865,6 +2870,292 @@ status=$?
                 self.assertNotIn(b'touch /bad', combined)
                 self.assertNotIn(b'invalid or unsupported', combined)
                 self.assertNotIn(KEY.encode(), combined)
+
+    def _stream_source(self):
+        source = self.root / 'source'
+        (source / 'clients').mkdir(parents=True, exist_ok=True)
+        (source / 'params').write_bytes(self.files['vpn/params'])
+        (source / 'awg0.conf').write_bytes(self.files['vpn/server.conf'])
+        (source / 'clients/awg0-client-phone.conf').write_bytes(self.files['clients/awg0-client-phone.conf'])
+        (self.root / 'work').mkdir(exist_ok=True)
+        shell = r'''
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/source"
+AWG_STATE_PROXY_CONFIG="$ROOT/not-installed-proxy"
+acquireClientLifecycleLock() { CLIENT_LIFECYCLE_LOCK_FD=held; }
+releaseClientLifecycleLock() { CLIENT_LIFECYCLE_LOCK_FD=""; printf released >"$ROOT/lock-released"; }
+awgStateTrustedPath() { return 0; }
+isWebPanelInstalled() { return 1; }
+collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=("$ROOT/source/clients/awg0-client-phone.conf"); }
+awg() { printf 'fixture-tools\n'; }
+exec {pfd}<&0
+awgStateExportStream "$ROOT/work" "$pfd" >"$ROOT/out.awgx"
+exit $?
+'''
+        return shell
+
+    def _run_stream(self, secret, path_prefix=None, delay=0):
+        env = os.environ.copy()
+        if path_prefix:
+            env['PATH'] = path_prefix + os.pathsep + env.get('PATH', '')
+        # The secret is written to the pipe only. It is not part of argv or env.
+        command = ['bash', '-c', self._stream_source(), 'test', str(SCRIPT), str(self.root)]
+        if not delay:
+            return subprocess.run(command, input=secret, capture_output=True, env=env)
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, env=env)
+        time.sleep(delay)
+        stdout, stderr = process.communicate(secret)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+    def test_stream_export_refuses_bad_passphrases_before_age(self):
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        age = bindir / 'age'
+        age.write_text('#!/bin/sh\ntouch %s\nexit 0\n' % (self.root / 'age-ran').as_posix())
+        age.chmod(0o755)
+        cases = {
+            'empty': b'',
+            'short': b'too-short',
+            'newline': b'abcdefghijklmnop\nmore',
+            'cr': b'abcdefghijklmnop\rmore',
+            'nul': b'abcdefghijklmnop\x00more',
+        }
+        self.assertLess(len(cases['short']), 16)
+        for name, secret in cases.items():
+            with self.subTest(name=name):
+                marker = self.root / 'age-ran'
+                if marker.exists():
+                    marker.unlink()
+                result = self._run_stream(secret, str(bindir))
+                self.assertNotEqual(result.returncode, 0, result.stderr.decode())
+                self.assertFalse(marker.exists())
+                self.assertEqual((self.root / 'out.awgx').stat().st_size, 0)
+                if secret:
+                    self.assertNotIn(secret, result.stdout + result.stderr)
+                self.assertNotIn(b'age-encryption.org', result.stdout)
+
+    def test_stream_export_answers_tty_prompts_and_hides_the_passphrase(self):
+        secret = b'stream-export-secret-value'
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        age = bindir / 'age'
+        # Token replacement, not %-formatting: the script itself contains %.
+        # root is baked in because the driver gives age a clean environment.
+        age.write_text(r'''#!/usr/bin/env python3
+import os, stat
+root = __ROOT__
+
+def read_line(fd):
+    buf = b""
+    while b"\n" not in buf:
+        chunk = os.read(fd, 256)
+        if not chunk:
+            os._exit(3)
+        buf += chunk
+    return buf
+
+tty = os.open("/dev/tty", os.O_RDWR)
+for fd in (0, 1):
+    if stat.S_ISCHR(os.fstat(fd).st_mode):
+        os._exit(2)
+if not os.path.exists(root + "/lock-released"):
+    os._exit(5)
+os.write(tty, b"Enter passphrase (leave empty to autogenerate a secure one): ")
+first = read_line(tty)
+os.write(tty, b"\r\n\x1b[F\x1b[KConfirm passphrase: ")
+second = read_line(tty)
+os.write(tty, b"\r\n\x1b[F\x1b[K")
+if first != second or not first.endswith(b"\n"):
+    os._exit(4)
+while True:
+    chunk = os.read(0, 65536)
+    if not chunk:
+        break
+blobs = []
+for pid in os.listdir("/proc"):
+    if not pid.isdigit():
+        continue
+    for leaf in ("cmdline", "environ"):
+        try:
+            with open("/proc/%s/%s" % (pid, leaf), "rb") as handle:
+                blobs.append(handle.read().replace(b"\x00", b"\n"))
+        except OSError:
+            pass
+with open(root + "/proc-dump", "wb") as handle:
+    handle.write(b"\n".join(blobs))
+with open(root + "/tty-ok", "w") as handle:
+    handle.write("ok\n")
+os.write(1, b"age-encryption.org/v1\nFAKE-CIPHERTEXT-PADDING\n")
+os.close(tty)
+os._exit(0)
+'''.replace('__ROOT__', repr(str(self.root))))
+        age.chmod(0o755)
+        result = self._run_stream(secret, str(bindir))
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        archive = (self.root / 'out.awgx').read_bytes()
+        self.assertTrue(archive.startswith(b'age-encryption.org/v1\n'))
+        self.assertGreaterEqual(len(archive), 32)
+        self.assertNotIn(secret, archive)
+        self.assertNotIn(secret, result.stdout)
+        self.assertNotIn(secret, result.stderr)
+        self.assertNotIn(b'Encrypted state archive created', archive)
+        self.assertIn(b'Client endpoints in this archive:', result.stderr)
+        self.assertTrue((self.root / 'tty-ok').is_file())
+        self.assertTrue((self.root / 'lock-released').is_file())
+        dump = (self.root / 'proc-dump').read_bytes()
+        self.assertNotIn(secret, dump)
+        staged = b''.join(path.read_bytes() for path in (self.root / 'work').rglob('*') if path.is_file())
+        self.assertNotIn(secret, staged)
+
+    def test_stream_export_waits_for_a_late_passphrase(self):
+        secret = b'stream-export-secret-value'
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        age = bindir / 'age'
+        age.write_text('''#!/usr/bin/env python3
+import os
+tty = os.open("/dev/tty", os.O_RDWR)
+os.write(tty, b"Enter passphrase (leave empty to autogenerate a secure one): ")
+buf = b""
+while b"\\n" not in buf:
+    buf += os.read(tty, 256)
+os.write(tty, b"\\r\\n\\x1b[F\\x1b[KConfirm passphrase: ")
+buf = b""
+while b"\\n" not in buf:
+    buf += os.read(tty, 256)
+os.write(tty, b"\\r\\n\\x1b[F\\x1b[K")
+while True:
+    chunk = os.read(0, 65536)
+    if not chunk:
+        break
+os.write(1, b"age-encryption.org/v1\\nFAKE-CIPHERTEXT-PADDING\\n")
+os._exit(0)
+''')
+        age.chmod(0o755)
+        result = self._run_stream(secret, str(bindir), delay=0.4)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertTrue((self.root / 'out.awgx').read_bytes().startswith(b'age-encryption.org/v1\n'))
+        self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_stream_export_discards_output_when_pack_or_age_fails(self):
+        secret = b'stream-export-secret-value'
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        age = bindir / 'age'
+        age.write_text('''#!/usr/bin/env python3
+import os
+tty = os.open("/dev/tty", os.O_RDWR)
+os.write(tty, b"Enter passphrase (leave empty to autogenerate a secure one): ")
+buf = b""
+while b"\\n" not in buf:
+    buf += os.read(tty, 256)
+os.write(tty, b"\\r\\n\\x1b[F\\x1b[KConfirm passphrase: ")
+buf = b""
+while b"\\n" not in buf:
+    buf += os.read(tty, 256)
+os.write(tty, b"\\r\\n\\x1b[F\\x1b[K")
+os.write(1, b"age-encryption.org/v1\\nPARTIAL")
+os._exit(1)
+''')
+        age.chmod(0o755)
+        result = self._run_stream(secret, str(bindir))
+        self.assertNotEqual(result.returncode, 0, result.stderr.decode())
+        # Age must have been prompted and then failed. A SIGHUP before the
+        # prompts is a different bug and must not satisfy this test.
+        self.assertIn(b'state encryption failed', result.stderr)
+        self.assertNotIn(b'exited before the passphrase prompts', result.stderr)
+        self.assertEqual((self.root / 'out.awgx').stat().st_size, 0)
+        self.assertFalse((self.root / 'work' / 'encrypted').exists())
+        self.assertNotIn(secret, result.stdout + result.stderr)
+        # A stage pack cannot succeed when the staged tree is not a directory.
+        shell = r'''
+set -uo pipefail
+source "$1"
+ROOT="$2"
+exec {pfd}<&0
+if awgStatePassphraseAge "$pfd" "$ROOT/direct.awgx" "$ROOT/missing-stage" fixture deadbeef; then
+    exit 10
+fi
+[[ ! -e "$ROOT/direct.awgx" ]] || exit 11
+exit 0
+'''
+        direct = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)],
+                                input=secret, capture_output=True)
+        self.assertEqual(direct.returncode, 0, (direct.stdout + direct.stderr).decode())
+        self.assertFalse((self.root / 'direct.awgx').exists())
+        self.assertNotIn(secret, direct.stdout + direct.stderr)
+
+    @unittest.skipUnless(shutil.which('age'), 'age not installed')
+    def test_stream_export_decrypts_with_age_and_imports(self):
+        secret = b'a-test-only-long-passphrase'
+        result = self._run_stream(secret)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        archive = self.root / 'out.awgx'
+        self.assertTrue(archive.read_bytes().startswith(b'age-encryption.org/v1\n'))
+        self.assertNotIn(secret, result.stderr)
+        plain = self.root / 'plain.tar.gz'
+        pid, fd = pty.fork()
+        if pid == 0:
+            try:
+                settings = termios.tcgetattr(0)
+                settings[3] &= ~termios.ECHO
+                termios.tcsetattr(0, termios.TCSANOW, settings)
+            except termios.error:
+                os._exit(1)
+            os.execvp('age', ['age', '--decrypt', '--output', str(plain), str(archive)])
+        deadline = time.monotonic() + 30
+        sent = False
+        pending = b''
+        transcript = b''
+        while time.monotonic() < deadline:
+            try:
+                ready, _, _ = select.select([fd], [], [], 0.2)
+            except OSError:
+                ready = []
+            if ready:
+                try:
+                    data = os.read(fd, 4096)
+                except OSError as exc:
+                    # Linux reports a slave hangup as EIO. That is the child
+                    # exiting, or a race before the slave is open, not a
+                    # failed read of a prompt that was actually written.
+                    if exc.errno != errno.EIO:
+                        raise
+                    data = b''
+                if data:
+                    transcript += data
+                    pending = (pending + data)[-200:]
+                    if (not sent) and b'passphrase' in pending.lower():
+                        os.write(fd, secret + b'\n')
+                        sent = True
+            try:
+                ended, status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if ended:
+                self.assertEqual(os.waitstatus_to_exitcode(status), 0,
+                                 transcript.decode(errors='replace'))
+                break
+        else:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+            self.fail('age decrypt timed out: ' + transcript.decode(errors='replace'))
+        os.close(fd)
+        self.assertTrue(sent, transcript.decode(errors='replace'))
+        try:
+            ended, status = os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+        else:
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+        self.run_helper('verify', plain)
+        unpacked = self.root / 'unpacked'
+        self.run_helper('unpack', plain, unpacked)
+        self.assertEqual((unpacked / 'clients/awg0-client-phone.conf').read_bytes(),
+                         self.files['clients/awg0-client-phone.conf'])
 
     def test_direct_export_without_proxy_is_schema_1(self):
         result = self.export_source(51820, proxy=False)

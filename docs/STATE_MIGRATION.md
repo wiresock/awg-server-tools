@@ -46,10 +46,39 @@ is **not** subject to fresh-install MTU admission: a deployed MTU/S4 pair is
 restored as is (with the warning), while normal fresh installs still refuse it.
 
 `age` prompts for the archive passphrase on the controlling terminal, confirming
-it on export. There is no password flag, environment variable, stdin protocol,
-or plaintext export mode. Use a real interactive terminal. Store the passphrase
+it on export. Interactive `--export-state <file>` has no password flag,
+environment variable, or plaintext export mode. Use a real interactive terminal
+for that form.
+
+`--export-state - --passphrase-fd N` is the non-interactive form used by
+amneziawg-web. Descriptor N must be a pipe (not a terminal and not a regular
+file). The installer reads the passphrase from that pipe until EOF and then
+closes it. The passphrase is at least 16 Unicode characters and at most 1024
+bytes, UTF-8, with no NUL, CR, or LF. An empty passphrase is refused before
+`age` starts: age 1.1.1 would otherwise invent a passphrase and print it only
+on its terminal, and the archive would be unrecoverable. If no passphrase
+arrives within 30 seconds, export fails before `age` starts. The installer must be
+a regular file for this form (`bash <(curl ...)` cannot stream). Ciphertext is
+written to standard output only after encryption succeeds. Encryption that does
+not finish within 5 minutes, or any failure of packing or `age`, writes nothing
+to standard output and leaves the VPN unchanged. There is still no passphrase
+flag, environment variable, or plaintext export mode. Store the passphrase
 separately from the archive. An archive grants full access to the VPN and can
 also contain panel passwords and SMTP credentials.
+
+amneziawg-web does not build this archive. Its root helper subcommand
+`export-state` reads the passphrase from a pipe on standard input and runs
+the trusted installer as `--export-state - --passphrase-fd 0`. The helper's
+standard output is the ciphertext and nothing else. It is the only helper
+subcommand that emits secret material, and only in that encrypted form. On
+failure it emits no ciphertext; a short redacted tail of the installer
+diagnostic goes to standard error. The helper writes no archive or passphrase
+file. The panel service's `ProtectSystem=strict` sandbox leaves `/dev`
+writable, so staging uses `/dev/shm` when that is a tmpfs; `/run` is read-only
+in that view and is only a fallback outside the sandbox. The installer
+lifecycle directory is created by the panel installer. If that directory is
+missing from a read-only `/var/lib`, export uses the panel database-directory
+lock instead.
 
 Export/import install missing `age`, `python3`, and `sqlite3` with apt. Inspect,
 dry-run and activation require them to be installed already and never install
