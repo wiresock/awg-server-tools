@@ -194,6 +194,8 @@ allow-listed operations provide:
   output. The passphrase arrives on a pipe (stdin), never in argv or the
   environment. This is the only subcommand whose output is secret, and only
   as that ciphertext. A failure writes no ciphertext.
+- `endpoint-summary` – print two integers, hostname endpoints then literal-IP
+  endpoints. Read-only. It does not print keys or hostnames.
 
 Every operation has a fixed argument shape.  Unknown subcommands, malformed
 interface/client names, keys or AllowedIPs, unsafe configuration paths,

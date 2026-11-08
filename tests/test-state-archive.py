@@ -1256,11 +1256,59 @@ fi
         conf.unlink()
         self.assertIn(b'finalized local', self.run_helper('local-identity', expected, local, conf, ok=False).stderr)
 
+    def test_endpoint_summary_counts_without_printing_keys_and_releases_the_lock(self):
+        phone = self.root / 'phone.conf'
+        laptop = self.root / 'laptop.conf'
+        secret = b'SECRETKEYMATERIAL='
+        phone.write_bytes(
+            b'[Interface]\nPrivateKey = ' + secret + b'\nAddress = 10.66.66.2/32\n\n'
+            b'[Peer]\nPublicKey = SERVERPUB=\nEndpoint = 203.0.113.10:51820\n'
+            b'AllowedIPs = 0.0.0.0/0\n')
+        laptop.write_bytes(
+            b'[Interface]\nPrivateKey = ' + secret + b'\nAddress = 10.66.66.3/32\n\n'
+            b'[Peer]\nPublicKey = SERVERPUB=\nEndpoint = vpn.example.com:51820\n'
+            b'AllowedIPs = 0.0.0.0/0\n')
+        shell = r'''
+set -euo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT"
+isRoot() { :; }
+checkOS() { OS=debian; }
+awgStateDependencies() { :; }
+awgStateWorkDir() { mkdir -p "$ROOT/work"; printf '%s\n' "$ROOT/work"; }
+acquireClientLifecycleLock() { echo locked >> "$ROOT/order"; }
+releaseClientLifecycleLock() { echo release >> "$ROOT/order"; RELEASED=1; }
+awgStateTrustedPath() { :; }
+awgStateReadParams() { SERVER_AWG_NIC=awg0; }
+collectAwgClientConfigCandidates() {
+    local -n OUTPUT="$1"
+    OUTPUT=("$ROOT/phone.conf" "$ROOT/laptop.conf")
+}
+printf() { echo "print-after-${RELEASED:-0}" >> "$ROOT/order"; builtin printf "$@"; }
+: > "$ROOT/awg0.conf"
+awgStateEndpointSummary > "$ROOT/counts"
+'''
+        result = subprocess.run(
+            ['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)],
+            capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        counts = (self.root / 'counts').read_text()
+        self.assertEqual(counts, '1\n1\n')
+        self.assertNotIn(secret, counts.encode())
+        self.assertNotIn(b'PrivateKey', counts.encode())
+        self.assertNotIn(b'203.0.113.10', counts.encode())
+        order = (self.root / 'order').read_text().splitlines()
+        self.assertIn('print-after-1', order)
+        self.assertLess(order.index('release'), order.index('print-after-1'))
+        self.assertFalse((self.root / 'work').exists())
+
     def test_invalid_arguments_never_enter_interactive_install(self):
         for args in (['--export-state'], ['--export-state', '-'],
                      ['--export-state', '-', '--passphrase-fd'],
                      ['--export-state', '-', '--passphrase-fd', 'nope'],
                      ['--export-state', 'archive.awgx', '--passphrase-fd', '3'],
+                     ['--endpoint-summary', 'extra'],
                      ['--inspect-state', 'x', '--dry-run'],
                      ['--import-state', 'x', '--unknown'], ['--import-state', '--dry-run'],
                      ['--activate-state'], ['--activate-state', 'x', '--dry-run'],

@@ -82,6 +82,14 @@ the same lock, and atomically replaces the config.  Arbitrary config
 content, raw file reads, arbitrary `syncconf` stdin, and unknown operations are
 rejected rather than forwarded.
 
+`export-state` is the only subcommand whose standard output is secret, and only
+as an age ciphertext stream. The passphrase arrives on the helper's stdin pipe.
+`endpoint-summary` is read-only and prints two integers. The panel's Server
+migration control posts the current admin password and the archive passphrase
+to `POST /admin/state/export` and streams that ciphertext back as a download.
+It does not write an archive file of its own. `GET /api/admin/state-export`
+reports the last successful export and the literal-IP count.
+
 The web panel holds an advisory lock on its open persistent state directory
 (the parent of the SQLite database) across the complete managed-client
 lifecycle, including database persistence and client-config cleanup. Supported

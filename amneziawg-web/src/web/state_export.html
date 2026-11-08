@@ -1,0 +1,63 @@
+<details id="state-export-panel" class="edit-form protocol-panel">
+<summary>Server migration</summary>
+<p>Download an age-encrypted archive of this server. The panel does not see the decrypted state and does not keep the archive passphrase. Store the passphrase away from the server and away from the file.</p>
+<p id="state-export-status" class="meta" role="status">Loading export status…</p>
+<p id="state-export-stale" class="creation-warning" role="status" hidden></p>
+<p id="state-export-endpoints" class="creation-warning" role="status" hidden></p>
+<p id="state-export-transport" class="creation-warning" role="status" hidden></p>
+<form method="POST" action="{{base}}/admin/state/export" autocomplete="off">
+  <input type="hidden" name="csrf_token" value="{{csrf}}">
+  <label for="state-export-password">Current password</label>
+  <input type="password" id="state-export-password" name="current_password" autocomplete="current-password" required>
+  <label for="state-export-passphrase">Archive passphrase</label>
+  <input type="password" id="state-export-passphrase" name="passphrase" autocomplete="new-password" minlength="16" required>
+  <label for="state-export-passphrase-confirm">Confirm passphrase</label>
+  <input type="password" id="state-export-passphrase-confirm" name="passphrase_confirm" autocomplete="new-password" minlength="16" required>
+  <p class="meta">At least 16 characters. The passphrase is not saved on this server.</p>
+  <button type="submit">Download encrypted archive</button>
+</form>
+</details>
+<script>
+var AWG_WEB_BASE='';
+(function() {
+  var statusEl = document.getElementById('state-export-status');
+  var staleEl = document.getElementById('state-export-stale');
+  var endpointEl = document.getElementById('state-export-endpoints');
+  var transportEl = document.getElementById('state-export-transport');
+  var host = String(location.hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
+  var loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  if (location.protocol !== 'https:' && !loopback) {
+    transportEl.hidden = false;
+    transportEl.textContent = 'This page is plain HTTP on a non-loopback address. Download the archive through HTTPS or an SSH tunnel.';
+  }
+  fetch(AWG_WEB_BASE + '/api/admin/state-export', { credentials: 'same-origin' })
+    .then(function(response) {
+      if (!response.ok) throw new Error('status unavailable');
+      return response.json();
+    })
+    .then(function(data) {
+      var days = (typeof data.stale_days === 'number' && data.stale_days > 0) ? data.stale_days : 7;
+      if (!data.last_export) {
+        statusEl.textContent = 'Last export: never';
+      } else {
+        statusEl.textContent = 'Last export: ' + data.last_export;
+      }
+      if (data.stale) {
+        staleEl.hidden = false;
+        staleEl.textContent = data.last_export
+          ? 'The last export from this panel is older than ' + days + ' days.'
+          : 'No encrypted archive has been exported from this panel yet.';
+      }
+      if (typeof data.warning === 'string' && data.warning) {
+        endpointEl.hidden = false;
+        endpointEl.textContent = data.warning;
+      } else if (data.ip_literal === null || typeof data.ip_literal === 'undefined') {
+        endpointEl.hidden = false;
+        endpointEl.textContent = 'Endpoint check unavailable. The archive can still be downloaded.';
+      }
+    })
+    .catch(function() {
+      statusEl.textContent = 'Export status unavailable.';
+    });
+})();
+</script>

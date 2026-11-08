@@ -80,6 +80,32 @@ lifecycle directory is created by the panel installer. If that directory is
 missing from a read-only `/var/lib`, export uses the panel database-directory
 lock instead.
 
+An administrator can download the same archive from the amneziawg-web peer
+page (Server → Server migration). The panel requires a signed-in admin session
+and the current admin password in that same request. A bearer token is not
+enough, and export is refused when panel authentication is disabled. The form
+also takes the archive passphrase twice. The panel enforces the same passphrase
+rules as `--passphrase-fd` and then streams the helper. It does not write a
+temporary archive file. If the browser disconnects, the helper process is
+killed. The passphrase is not stored and is not written to the audit log.
+
+Each attempt adds an `events` row. A completed download is `state.exported`.
+A refusal or a failed helper is `state.export_failed` with a reason code. The
+page shows the last successful export and a reminder when that was more than
+`AWG_STATE_EXPORT_STALE_DAYS` days ago (default 7, the same window as the
+stale-archive warning; values outside 1–3650 are treated as 7). Before the
+download it also warns when the page was opened over plain HTTP on a
+non-loopback address, and when client profiles use a literal IP in `Endpoint`.
+
+`--endpoint-summary` is the read-only count behind that warning. It copies
+installer-managed client profiles into tmpfs, counts them with the archive's
+endpoint audit, and prints two integers: hostname endpoints, then literal-IP
+endpoints. It does not print keys, hostnames, or the profile list. The
+lifecycle lock is held only for the copy and is released before the counts are
+printed. It does not install packages and does not change the VPN. The panel
+turns a non-zero literal-IP count into "N profiles use an IP in Endpoint; they
+will need a new profile after a ban" (singular when N is 1).
+
 Export/import install missing `age`, `python3`, and `sqlite3` with apt. Inspect,
 dry-run and activation require them to be installed already and never install
 packages.

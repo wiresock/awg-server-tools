@@ -7,6 +7,7 @@
 //! `crate::db::peers` and status derivation/history to `crate::domain`.
 mod delivery_admin;
 mod delivery_public;
+mod state_export;
 
 use axum::{
     extract::{Path, Query, State},
@@ -1474,6 +1475,7 @@ fn build_router_state(state: AppState) -> Router {
         .route("/api/admin/users", post(api_create_user))
         .route("/api/admin/users/:id/remove", post(api_remove_user))
         .route("/api/admin/protocol", get(api_protocol_status))
+        .route("/api/admin/state-export", get(state_export::api_status))
         .route("/api/admin/imitation", get(api_imitation_status))
         .route("/admin/imitation", post(post_imitation_form))
         .route("/admin/users/add", post(post_add_user_form))
@@ -1499,6 +1501,8 @@ fn build_router_state(state: AppState) -> Router {
         .route("/static/panel.css", get(panel_css))
         .route("/login", get(page_login).post(post_login))
         .route("/logout", post(post_logout))
+        // Audits a missing session itself, so it stays outside require_auth.
+        .route("/admin/state/export", post(state_export::post_export))
         // Protected routes
         .merge(protected)
         .merge(vpn_export)
@@ -5032,9 +5036,10 @@ fn render_peer_list_inner(
         String::new()
     } else {
         format!(
-            "<aside class=\"server-tools\" aria-label=\"Server tools\">\n<h2>Server</h2>\n{}{}</aside>\n",
+            "<aside class=\"server-tools\" aria-label=\"Server tools\">\n<h2>Server</h2>\n{}{}{}</aside>\n",
             render_protocol_controls(base, csrf_token),
             render_imitation_controls(base, csrf_token),
+            state_export::render_controls(base, csrf_token),
         )
     };
 

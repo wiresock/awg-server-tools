@@ -14,6 +14,7 @@
 # only as an age-encrypted state archive. The passphrase is read from the
 # stdin pipe by the trusted installer. It is not stored in a shell parameter,
 # argv, or the environment, and it is not written to a file.
+# endpoint-summary is read-only and prints two integers. It is not secret.
 
 set -euo pipefail
 
@@ -662,6 +663,77 @@ fail_protocol_migration() {
     exit 2
 }
 
+# Read-only endpoint counts from the trusted installer. Stdout is two
+# non-negative integers (hostname, then literal IP) and nothing else. A
+# warning list, a key, or any other installer text is refused. Stderr is
+# relayed only on failure, through the same sanitizer as other subcommands.
+run_endpoint_summary() {
+    local install_script out="" rc=0 line index err_r err_w host ip diag_pid orig_r orig_w
+    local -a diag_lines=() kept=()
+
+    install_script="$(resolve_awg_install_script)"
+    if ! grep -qxF 'AWG_INSTALLER_CAPABILITY_ENDPOINT_SUMMARY="endpoint-summary-v1"' -- "${install_script}"; then
+        fail "installed installer cannot summarize endpoints"
+    fi
+
+    coproc DIAG {
+        coproc_line=""
+        raw=()
+        while IFS= read -r coproc_line || [[ -n "${coproc_line}" ]]; do
+            if (( ${#coproc_line} > 4096 )); then
+                coproc_line="${coproc_line:0:4096}"
+            fi
+            raw+=("${coproc_line}")
+            if (( ${#raw[@]} > INSTALLER_DIAGNOSTIC_RAW_LINES )); then
+                raw=("${raw[@]:1}")
+            fi
+        done
+        if (( ${#raw[@]} > 0 )); then
+            printf '%s\n' "${raw[@]}"
+        fi
+    }
+    exec {err_r}<&"${DIAG[0]}"
+    exec {err_w}>&"${DIAG[1]}"
+    diag_pid="${DIAG_PID}"
+    orig_r="${DIAG[0]}"
+    orig_w="${DIAG[1]}"
+    [[ "${orig_r}" =~ ^[0-9]+$ && "${orig_w}" =~ ^[0-9]+$ ]] \
+        || fail "could not capture installer diagnostics"
+    eval "exec ${orig_r}<&-"
+    eval "exec ${orig_w}>&-"
+    set +e
+    out="$("${install_script}" --endpoint-summary 2>&"${err_w}")"
+    rc=$?
+    set -e
+    exec {err_w}>&-
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        diag_lines+=("${line}")
+    done <&"${err_r}"
+    exec {err_r}<&-
+    wait "${diag_pid}" || true
+    if (( rc == 0 )); then
+        # Command substitution already dropped the trailing newline.
+        [[ "${out}" == *$'\n'* ]] || fail "endpoint summary was not two counts"
+        host="${out%%$'\n'*}"
+        ip="${out#*$'\n'}"
+        [[ "${host}" =~ ^[0-9]+$ && "${ip}" =~ ^[0-9]+$ && "${ip}" != *$'\n'* ]] \
+            || fail "endpoint summary was not two counts"
+        printf '%s\n%s\n' "${host}" "${ip}"
+        return 0
+    fi
+    printf 'amneziawg-web-privileged: endpoint summary failed\n' >&2
+    for (( index = ${#diag_lines[@]} - 1; index >= 0; index-- )); do
+        sanitize_installer_line "${diag_lines[index]}" || continue
+        [[ -n "${SANITIZED_LINE//[[:space:]]/}" ]] || continue
+        kept=("${SANITIZED_LINE}" "${kept[@]}")
+        (( ${#kept[@]} < INSTALLER_DIAGNOSTIC_LINES )) || break
+    done
+    for line in "${kept[@]}"; do
+        printf 'installer: %s\n' "${line}" >&2
+    done
+    exit 2
+}
+
 # Stream an age-encrypted state archive. The passphrase stays on stdin and is
 # never assigned to a shell parameter, placed in argv, or copied into the
 # environment. This is the only helper operation that writes secret material,
@@ -1272,6 +1344,12 @@ main() {
             validate_server_config_path "${conditional_remove_path}"
             require_managed_server_config "${conditional_remove_path}"
             remove_client_block "${conditional_remove_path}" "$2" "$3"
+            return 0
+            ;;
+        endpoint-summary)
+            require_arg_count "${subcommand}" 0 "$#"
+            # Counts only. export-state remains the only secret output.
+            run_endpoint_summary
             return 0
             ;;
         export-state)

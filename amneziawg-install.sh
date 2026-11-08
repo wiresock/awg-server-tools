@@ -106,6 +106,9 @@ AWG_INSTALLER_CAPABILITY_PROTOCOL_DIAGNOSTICS="protocol-diagnostics-v1"
 # through into the interactive menu. Keep the marker unchanged.
 # shellcheck disable=SC2034
 AWG_INSTALLER_CAPABILITY_STATE_EXPORT_STREAM="state-export-stream-v1"
+# The panel helper reads this marker before the read-only --endpoint-summary.
+# shellcheck disable=SC2034
+AWG_INSTALLER_CAPABILITY_ENDPOINT_SUMMARY="endpoint-summary-v1"
 
 # The immutable public BoringTun release that fresh BoringTun installs download.
 # These values are the installer's only trust anchor for the binary: they are
@@ -4624,12 +4627,76 @@ function awgStateSnapshotPanel() {
 	echo 'NOTE: panel DB/env and the proxy config stay inside the encrypted archive. --activate-state --enable-at-boot restores them when this checkout has the installers; queued mail is not replayed.' >&2
 }
 
+# Copy installer-managed client profiles. The first copy of a name wins.
+# A later different copy is skipped and named; it does not replace the first.
+function awgStateStageClientCopies() { # <destination clients directory>
+	local DEST="$1" FILE BASE
+	local -a CANDIDATES=()
+	mkdir -p -- "${DEST}" || return 1
+	collectAwgClientConfigCandidates CANDIDATES || return 1
+	for FILE in "${CANDIDATES[@]}"; do
+		BASE="${FILE##*/}"
+		# Candidates come root-owned directory first. Keep that first copy and
+		# never let a later same-name (e.g. user-writable home) copy replace or
+		# abort it; the operator is told which file was skipped.
+		if [[ -f "${DEST}/${BASE}" ]]; then
+			if ! cmp -s -- "${FILE}" "${DEST}/${BASE}"; then
+				echo 'WARNING: skipped a conflicting same-name client config copy (the first, preferred copy is exported):' >&2
+				LC_ALL=C printf '  %q\n' "${FILE}" >&2
+			fi
+		else
+			install -m 600 -- "${FILE}" "${DEST}/${BASE}" || return 1
+		fi
+	done
+}
+
+# Read-only. Prints two integers: hostname endpoints, then literal-IP endpoints.
+# The lifecycle lock is held only while profiles are copied into tmpfs and is
+# released before the counts are printed. Keys and Endpoint values are not printed.
+function awgStateEndpointSummary() (
+	set +x
+	umask 077
+	isRoot || exit 1
+	checkOS
+	[[ "${OS:-}" == debian || "${OS:-}" == ubuntu ]] || {
+		echo 'ERROR: state migration supports Debian/Ubuntu (and their supported derivatives) only.' >&2
+		exit 1
+	}
+	awgStateDependencies 0 || exit 1
+	local WORK TEXT HOST_COUNT IP_COUNT
+	local -a LINES=()
+	WORK="$(awgStateWorkDir)" || exit 1
+	trap 'rm -rf -- "${WORK}"; releaseClientLifecycleLock' EXIT
+	acquireClientLifecycleLock || exit 1
+	awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || { echo 'ERROR: unsafe source params path.' >&2; exit 1; }
+	awgStateReadParams "${AMNEZIAWG_DIR}/params" "${WORK}/records" || exit 1
+	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	[[ -f "${SERVER_AWG_CONF}" && ! -L "${SERVER_AWG_CONF}" ]] || {
+		echo 'ERROR: endpoint summary requires the server interface config.' >&2
+		exit 1
+	}
+	awgStateStageClientCopies "${WORK}/clients" || exit 1
+	TEXT="$(awgStateArchive endpoint-summary "${WORK}" 2>/dev/null)" || {
+		echo 'ERROR: could not count client endpoints.' >&2
+		exit 1
+	}
+	mapfile -t LINES <<<"${TEXT}"
+	HOST_COUNT="${LINES[0]:-}"
+	IP_COUNT="${LINES[1]:-}"
+	[[ "${HOST_COUNT}" =~ ^[0-9]+$ && "${IP_COUNT}" =~ ^[0-9]+$ ]] || {
+		echo 'ERROR: could not count client endpoints.' >&2
+		exit 1
+	}
+	# A blocked stdout must not keep the lifecycle lock.
+	releaseClientLifecycleLock
+	printf '%s\n%s\n' "${HOST_COUNT}" "${IP_COUNT}"
+)
+
 # Snapshot, validate and count. The lifecycle lock is released before return
 # so the caller can encrypt without holding it. Informative lines stay on
 # stdout; refusals and the literal-IP warning stay on stderr.
 function awgStatePrepareExport() { # <private work directory>
-	local WORK="$1" FILE BASE
-	local -a CANDIDATES=()
+	local WORK="$1"
 	acquireClientLifecycleLock || return 1
 	awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || { echo 'ERROR: unsafe source params path.' >&2; return 1; }
 	awgStateReadParams "${AMNEZIAWG_DIR}/params" "${WORK}/records" || return 1
@@ -4642,21 +4709,7 @@ function awgStatePrepareExport() { # <private work directory>
 	mkdir -p "${WORK}/stage/vpn" "${WORK}/stage/clients" || return 1
 	install -m 600 -- "${AMNEZIAWG_DIR}/params" "${WORK}/stage/vpn/params" || return 1
 	install -m 600 -- "${SERVER_AWG_CONF}" "${WORK}/stage/vpn/server.conf" || return 1
-	collectAwgClientConfigCandidates CANDIDATES || return 1
-	for FILE in "${CANDIDATES[@]}"; do
-		BASE="${FILE##*/}"
-		# Candidates come root-owned directory first. Keep that first copy and
-		# never let a later same-name (e.g. user-writable home) copy replace or
-		# abort it; the operator is told which file was skipped.
-		if [[ -f "${WORK}/stage/clients/${BASE}" ]]; then
-			if ! cmp -s -- "${FILE}" "${WORK}/stage/clients/${BASE}"; then
-				echo 'WARNING: skipped a conflicting same-name client config copy (the first, preferred copy is exported):' >&2
-				LC_ALL=C printf '  %q\n' "${FILE}" >&2
-			fi
-		else
-			install -m 600 -- "${FILE}" "${WORK}/stage/clients/${BASE}" || return 1
-		fi
-	done
+	awgStateStageClientCopies "${WORK}/stage/clients" || return 1
 	awgStateSnapshotPanel "${WORK}/stage" || return 1
 	local PROXY_PATHS=()
 	awgStateProxyInstallPaths >"${WORK}/proxy.paths" || return 1
@@ -17035,6 +17088,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	# Server state migration (root; docs/STATE_MIGRATION.md):
 	#   amneziawg-install.sh --export-state <file>
 	#   amneziawg-install.sh --export-state - --passphrase-fd <fd>
+	#   amneziawg-install.sh --endpoint-summary
 	#   amneziawg-install.sh --inspect-state <file>
 	#   [SERVER_PUB_NIC=<nic>] [SERVER_PUB_IP=<host>] amneziawg-install.sh --import-state <file> [--dry-run]
 	#   [AWG_STATE_PANEL_BINARY=<amneziawg-web>] [AWG_STATE_PROXY_BINARY=<amneziawg-proxy>] \
@@ -17048,6 +17102,14 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	#
 	# Requires AmneziaWG to be already installed (params file must exist).
 	case "${1:-}" in
+		--endpoint-summary)
+			if [[ $# -ne 1 ]]; then
+				echo 'Usage: amneziawg-install.sh --endpoint-summary' >&2
+				exit 1
+			fi
+			awgStateEndpointSummary
+			exit $?
+			;;
 		--export-state|--inspect-state|--import-state|--activate-state)
 			# Streaming export is the only mode that reads a passphrase, and it
 			# reads it from a pipe descriptor. "-" is not a file destination.

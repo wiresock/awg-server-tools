@@ -172,4 +172,52 @@ PY
         || fail_test 'backup of the open database did not contain the row'
 fi
 
+cat > "$WORK/summary-installer.sh" <<MOCK
+#!/bin/bash
+AWG_INSTALLER_CAPABILITY_ENDPOINT_SUMMARY="endpoint-summary-v1"
+printf '%s\n' "\$@" > "$WORK/summary-argv"
+printf '4\n1\n'
+printf 'PrivateKey = should-not-be-on-stdout\n' >&2
+exit 0
+MOCK
+chmod 700 "$WORK/summary-installer.sh"
+resolve_awg_install_script() { printf '%s\n' "$WORK/summary-installer.sh"; }
+rc=0
+# exit 2 inside the helper must not abort this script.
+(trap cleanup EXIT; main endpoint-summary) >"$WORK/summary-out" 2>"$WORK/summary-err" || rc=$?
+[[ "$rc" == 0 ]] || fail_test "endpoint-summary failed: $rc"
+[[ "$(cat "$WORK/summary-out")" == $'4\n1' ]] || fail_test 'endpoint-summary did not print two counts'
+[[ ! -s "$WORK/summary-err" ]] || fail_test 'successful endpoint-summary wrote stderr'
+[[ "$(cat "$WORK/summary-argv")" == '--endpoint-summary' ]] \
+    || fail_test 'endpoint-summary argv was not the read-only flag'
+grep -q 'PrivateKey' "$WORK/summary-out" && fail_test 'endpoint count included a key'
+
+cat > "$WORK/summary-installer.sh" <<MOCK
+#!/bin/bash
+AWG_INSTALLER_CAPABILITY_ENDPOINT_SUMMARY="endpoint-summary-v1"
+printf 'PrivateKey = ${KEY}\n' >&2
+printf 'public key ${KEY} was rejected\n' >&2
+printf 'not counts\n'
+exit 1
+MOCK
+rc=0
+(trap cleanup EXIT; main endpoint-summary) >"$WORK/summary-out" 2>"$WORK/summary-err" || rc=$?
+[[ "$rc" == 2 ]] || fail_test "bad endpoint-summary should exit 2, got $rc"
+[[ ! -s "$WORK/summary-out" ]] || fail_test 'failed endpoint-summary wrote stdout'
+grep -q 'PrivateKey' "$WORK/summary-err" && fail_test 'endpoint-summary stderr kept a key'
+grep -q '\[redacted\]' "$WORK/summary-err" || fail_test 'endpoint-summary stderr was not redacted'
+
+cat > "$WORK/summary-installer.sh" <<'MOCK'
+#!/bin/bash
+printf '1\n2\n'
+exit 0
+MOCK
+rm -f "$WORK/summary-ran"
+rc=0
+(trap cleanup EXIT; main endpoint-summary) >"$WORK/summary-out" 2>"$WORK/summary-err" || rc=$?
+[[ "$rc" == 2 ]] || fail_test 'missing endpoint marker should fail'
+grep -q 'cannot summarize endpoints' "$WORK/summary-err" \
+    || fail_test 'missing endpoint marker did not produce the fixed error'
+[[ ! -s "$WORK/summary-out" ]] || fail_test 'missing marker wrote stdout'
+
 echo 'OK: export-state streams ciphertext and keeps the passphrase off argv, env, and stderr'
