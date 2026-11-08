@@ -31,7 +31,8 @@ disguise VPN traffic as QUIC, DNS, SIP or STUN.
 > standard AmneziaWG clients still benefit from server-side obfuscation.
 
 Experimental: [encrypted server-state export/import](docs/STATE_MIGRATION.md)
-(CLI prototype; panel restore and live migration acceptance tests are still TODO).
+(CLI export, inspect, import and activate, including panel and proxy restore.
+Live acceptance drills are still pending; see that runbook).
 
 ## Web panel preview
 

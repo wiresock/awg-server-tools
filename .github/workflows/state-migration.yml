@@ -1,0 +1,129 @@
+name: State migration
+
+# Two Debian 12 systemd containers, started one after the other. Sharing the
+# host cgroup namespace between two systemd instances is not reliable, so
+# container A is removed before container B starts. The handshake is the same
+# namespace BoringTun client as the BoringTun host job (TEST-NET-1 192.0.2.1
+# on a veth, exported profile bytes). CI has no physical client.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - amneziawg-install.sh
+      - tests/test-state-migration-live.sh
+      - tests/test-state-archive.py
+      - .github/workflows/state-migration.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - amneziawg-install.sh
+      - tests/test-state-migration-live.sh
+      - tests/test-state-archive.py
+      - .github/workflows/state-migration.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  migrate:
+    name: State migration (Debian 12, two systemd containers)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # age is in Debian 12 (1.1.1). Activate refuses to install packages, so
+      # age, python3 and sqlite3 are in the image. The installer still
+      # installs amneziawg-tools and the BoringTun release itself.
+      - name: Build a Debian 12 image with systemd
+        run: |
+          docker build -t awg-debian12-systemd - <<'EOF'
+          FROM debian:12
+          RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                systemd systemd-sysv dbus ca-certificates curl gnupg iproute2 iputils-ping kmod \
+                python3 procps nftables iptables age sqlite3 \
+              && rm -rf /var/lib/apt/lists/*
+          CMD ["/sbin/init"]
+          EOF
+
+      - name: Prepare the shared output directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/mig"
+          umask 077
+          # A CI-only passphrase. Written to a 0600 file and never printed.
+          python3 -c 'import os, pathlib, secrets; p = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mig" / "passphrase"; p.write_text(secrets.token_urlsafe(24) + "\n"); os.chmod(p, 0o600)'
+
+      - name: Install on container A and export
+        id: export
+        run: |
+          docker run -d --name awg-mig-a --privileged --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
+            -v "$PWD:/workspace:ro" -v "$RUNNER_TEMP/mig:/out" awg-debian12-systemd
+          for _ in $(seq 1 30); do
+            docker exec awg-mig-a systemctl is-system-running 2>/dev/null | grep -qE 'running|degraded' && break
+            sleep 1
+          done
+          docker exec awg-mig-a systemctl is-system-running || true
+          docker exec \
+            -e AWG_DISPOSABLE_HOST_TEST=1 \
+            -e AWG_MIGRATION_OUT=/out \
+            -e AWG_MIGRATION_PASSPHRASE_FILE=/out/passphrase \
+            awg-mig-a bash /workspace/tests/test-state-migration-live.sh source
+
+      - name: Remove container A
+        if: always()
+        run: |
+          if [[ "${{ steps.export.outcome }}" == "failure" ]] && docker exec awg-mig-a true >/dev/null 2>&1; then
+            docker exec awg-mig-a bash -c 'systemctl is-system-running || true; systemctl status awg-quick@awg0 --no-pager -l || true; journalctl -u awg-quick@awg0 -n 80 --no-pager || true; ip -4 addr; ip -4 route' \
+              >"$RUNNER_TEMP/mig-diagnostics.txt" 2>&1 || true
+          fi
+          docker rm -f awg-mig-a >/dev/null 2>&1 || true
+
+      - name: Import on container B and handshake
+        run: |
+          docker run -d --name awg-mig-b --privileged --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
+            -v "$PWD:/workspace:ro" -v "$RUNNER_TEMP/mig:/out" awg-debian12-systemd
+          for _ in $(seq 1 30); do
+            docker exec awg-mig-b systemctl is-system-running 2>/dev/null | grep -qE 'running|degraded' && break
+            sleep 1
+          done
+          docker exec awg-mig-b systemctl is-system-running || true
+          docker exec \
+            -e AWG_DISPOSABLE_HOST_TEST=1 \
+            -e AWG_MIGRATION_OUT=/out \
+            -e AWG_MIGRATION_PASSPHRASE_FILE=/out/passphrase \
+            awg-mig-b bash /workspace/tests/test-state-migration-live.sh target
+
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          docker rm -f awg-mig-a >/dev/null 2>&1 || true
+          if docker exec awg-mig-b true >/dev/null 2>&1; then
+            {
+              echo "=== container B"
+              docker exec awg-mig-b bash -c 'systemctl is-system-running || true; systemctl status awg-quick@awg0 --no-pager -l || true; journalctl -u awg-quick@awg0 -n 80 --no-pager || true; ip -4 addr; ip -4 route' || true
+            } >>"$RUNNER_TEMP/mig-diagnostics.txt" 2>&1 || true
+          fi
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: state-migration-diagnostics
+          path: ${{ runner.temp }}/mig-diagnostics.txt
+          retention-days: 7
+
+      - name: Remove container B and the passphrase
+        if: always()
+        run: |
+          docker rm -f awg-mig-b >/dev/null 2>&1 || true
+          rm -f "$RUNNER_TEMP/mig/passphrase"

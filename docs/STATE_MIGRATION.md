@@ -60,12 +60,16 @@ fallback.
 
 ## Timestamps and peer decisions
 
-`--inspect-state` emits the manifest as JSON with a `peer_plan` object and a
-`panel_plan` and a `proxy_plan` object (proxy listen/backend, AWG port match,
+`--inspect-state` emits the manifest as JSON with a `peer_plan` object, a
+`panel_plan`, a `proxy_plan` (proxy listen/backend, AWG port match,
 install paths; panel DB present, env/hash present — never the hash
 itself —, archive vs. panel-source migration versions, mail jobs that would be
-cancelled). `--dry-run` also prints the panel plan and how the panel would be
-installed.
+cancelled) and an `endpoint_audit` (`hostname`, `ip_literal`, and per-client
+name/host/kind). `--dry-run` also prints the panel plan and how the panel would be
+installed. When `ip_literal` is greater than zero, both warn that those
+profiles will need a new profile after an IP ban. Export prints the same
+counts. Client names and Endpoint hosts are included; private keys and full
+configs are not.
 `--dry-run` prints a JSON plan before the host-install plan. Both show the
 export timestamp, the destination evaluation time, per-peer **migrate/drop**
 decisions (name, expiry, reason), and migrate/drop counts. Import, unchanged-
@@ -249,6 +253,10 @@ proxy would ignore — does not block VPN export, verify, prepare or reconcile.
 `--inspect-state` and import `--dry-run` still show the VPN plan and warn
 `amneziawg-proxy: <reason>; proxy restore would be refused`. The proxy restore
 step still requires that subset and exits non-zero, naming the key it refused.
+A `listen` or `backend` value inside that subset that is not a usable socket
+address (`localhost:51821`, port `99999`) is the same kind of refusal:
+inspect and dry-run warn `unsupported proxy.toml address for key listen` or
+`key backend`, and proxy restore exits non-zero with that message.
 On import the server config keeps the backend `ListenPort`, the regenerated
 firewall hooks open only `SERVER_PORT` (the proxy's public port, as on the old host; the
 backend port is not opened, and the proxy installer adds no firewall rules),
@@ -600,7 +608,19 @@ destination is published with mode 0600 without overwriting an existing path.
 
 Clients using a hostname still depend on client DNS re-resolution behavior.
 Literal-IP endpoints need a profile update. No DNS changes or endpoint rewrites
-are done automatically.
+are done automatically. Export, `--inspect-state` and import `--dry-run` count
+archived `clients/*.conf` profiles whose `[Peer] Endpoint` host is a literal
+IP versus a hostname (`endpoint_audit`). An address on the server `[Interface]`
+or on a `[Peer]` inside `vpn/server.conf` is not a client profile and is not
+counted.
+
+`ListenAddr` in the server config is refused with an explicit error, not
+carried. Current `amneziawg-tools` (`src/config.c`, `process_line`) accepts
+`ListenPort` and does not accept `ListenAddr`; `awg setconf` stops with
+`Line unrecognized: ListenAddr` and `awg-quick` does not bring the interface
+up. The proxy installer rewrites a `ListenAddr` line only when one already
+exists and does not add one. Remove the line before export. The restored
+server listens on all addresses, which is what these tools do.
 
 ## Tests and remaining acceptance work
 
@@ -625,25 +645,67 @@ acquisition, not mocks. Tests cover ordinary fresh-install/reset contention,
 under-lock params rechecks, retained standalone inodes and the panel database
 lock compatibility/partial-failure release. Reset diagnostics cover multiple
 filenames, spaces, control characters, Unicode bidi controls and symlinks.
-Round-7 additions cover: a planted `tarfile.py` in the working directory not
-being imported, the read-only lifecycle-directory fallback to the panel lock,
-lock release before the prompt and early schema refusal at export, skipped
-conflicting client copies, `installer_sha256` under `bash <(…)`, the
-server-identity tombstone, the reset hint, the MTU warning, fractional-second
-expiries and clock-skew tolerance, the `SERVER_PUB_IP` override/IP-literal
-warning, and that journals hold no plaintext keys or panel DB. Round-12
-additions use the real `sqlite3` CLI (skipped if absent; CI installs it) to
-export a live WAL-mode panel DB and import a WAL-header DB without sidecars,
-and cover the config-replace failure window, `host:port` rejection, inherited
-subshell traps, refusal without RAM staging and the incomplete-rollback block.
-The suite passes under Python 3.9, 3.10 and 3.13.
+The same suite checks that a planted `tarfile.py` in the working directory is
+not imported, that a read-only lifecycle directory falls back to the panel
+lock, that the lock is released before the passphrase prompt, and that export
+refuses an unimportable panel schema before encryption. It checks skipped
+conflicting client copies, `installer_sha256` when the installer is read from
+`bash <(…)`, the server-identity tombstone, the reset hint, the MTU warning,
+fractional-second expiries, clock-skew tolerance, the `SERVER_PUB_IP`
+override and IP-literal warning, and that journals hold no plaintext keys or
+panel DB. It uses the real `sqlite3` CLI (skipped if absent; CI installs it)
+to export a live WAL-mode panel DB and import a WAL-header DB without
+sidecars, and covers the config-replace failure window, `host:port` rejection,
+inherited subshell traps, refusal without RAM staging and the
+incomplete-rollback block. It also covers the default proxy topology, an
+archive-controlled path that already exists, the journal-directory companion
+lock, a `proxy.toml` outside the installer's flat subset, an unusable proxy
+socket address, an explicit `ListenAddr` refusal, and the literal-IP endpoint
+count. The suite passes under Python 3.9, 3.10 and 3.12+.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.
 CI installs age and runs this suite.
 
-Still required: full two-container/VM install roundtrip with distinct uplinks,
-real client datapath/handshake, DNS failover across representative clients,
-BoringTun/kernel install drills, a live panel restore (build, start, expiry
-enforcement) and a live proxy restore — the panel/proxy tests here mock the installers/systemd —,
-concurrent panel export stress, and power-loss recovery testing. The mock
-roundtrip must not be described as those live tests.
+CI job **State migration (Debian 12, two systemd containers)** in
+`.github/workflows/state-migration.yml` starts the containers one after the
+other: two systemd containers sharing the host cgroup namespace are not
+started together. Container A installs BoringTun with one client whose
+`Endpoint` is `192.0.2.1` (the same TEST-NET-1 address the BoringTun host job
+uses) and exports through a pseudo-terminal. The passphrase is a mode-0600
+file; it is not placed in argv or the environment. Container B then renames
+its default-route interface to `migup0` (the archived uplink name is the
+source container's, so the restored name differs), imports, and activates
+with `--enable-at-boot`. The job checks the restored server key, obfuscation
+fields, peer public keys, preshared keys and the client profile hash. It
+places `192.0.2.1` on a veth and completes a BoringTun handshake from a
+network namespace using that exported profile, the same kind of handshake as
+the BoringTun host job. CI has no physical client, so this is not a phone or
+WireSock handshake. The job is not a kernel-backend drill, a panel restore, a
+proxy restore, a DNS cutover or a power-loss test.
+
+## Manual live acceptance
+
+This checklist is for an operator with two real VPSs. Nothing here is run by
+CI, and a passing unit suite or the Debian container job above is not a pass
+of this checklist. Do not record it as passed until each step has been run.
+
+1. Kernel backend, AWG 2.0: export on the old VPS, import and
+   `--activate-state --enable-at-boot` on the new VPS, then a handshake from a
+   real client that already has the exported profile.
+2. Repeat with BoringTun instead of the kernel module.
+3. Repeat with an AWG 3.1 server (no proxy; the proxy refuses AWG 3.x).
+4. Reboot the new VPS after finalization and confirm the tunnel comes back
+   and the same client handshakes again.
+5. Live panel restore: the panel starts from the archive, a migrated peer
+   with a future `expires_at` is still present, and that peer is removed
+   after the deadline without a manual config edit.
+6. Live proxy restore: a client whose Endpoint is the proxy's public port
+   handshakes, and the backend port is not the client's Endpoint.
+7. DNS cutover with at least two client types (for example the official
+   AmneziaWG client and WireSock): profiles that already use a hostname keep
+   working after the DNS record moves; profiles counted as `ip_literal` do
+   not, until they are given a new profile.
+8. Power loss during import: kill the host after quarantine has started and
+   before finalization. After boot the VPN must still be the old one or be
+   stopped, and a rerun must refuse an incomplete rollback or finish the
+   quarantine without mixing the two servers' keys.
