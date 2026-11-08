@@ -618,9 +618,11 @@ Literal-IP endpoints need one profile update. Export, import and activation do
 not rewrite `Endpoint` lines. `--audit-endpoints` and `--set-endpoint-host` do
 that switch; see below. Export, `--inspect-state` and import `--dry-run` count
 archived `clients/*.conf` profiles whose `[Peer] Endpoint` host is a literal
-IP versus a hostname (`endpoint_audit`). An address on the server `[Interface]`
-or on a `[Peer]` inside `vpn/server.conf` is not a client profile and is not
-counted.
+IP versus a hostname (`endpoint_audit`). A host is a literal IP when it is an
+IP address or when the C resolver's `inet_aton` accepts it without asking DNS,
+including `123`, `1.2.3`, `0x7f.1`, `0177.0.0.1` and `4294967295`. An address
+on the server `[Interface]` or on a `[Peer]` inside `vpn/server.conf` is not a
+client profile and is not counted.
 
 ### Endpoint audit and hostname switch
 
@@ -639,26 +641,45 @@ lists installer-managed profile symlinks; their targets are not read. The
 search is the one `collectAwgClientConfigCandidates` uses: the managed clients
 directory, `/root`, `/home/*`, each managed client's resolved home, and the
 panel config directory. It is not limited to the archived `clients/*.conf`
-copies that export counts. Names are the profile basename without `.conf`.
-`hostname` and `ip_literal` count files, so two copies of one client count
-twice. Copies that share a name, host and kind are one client with several
-files. Profiles with no usable `[Peer] Endpoint` are omitted. Private keys are
-not printed.
+copies that export counts. Only a file named
+`${SERVER_AWG_NIC}-client-<name>.conf` is included, and only when `<name>` is
+a `### Client <name>` marker in the server config. A profile whose name is
+not one of those markers is ignored. A symlink or a conflicting copy that
+does use a managed name, in any of those directories, refuses the whole
+switch and is listed with its path. Names in the JSON are the profile
+basename without `.conf`. `hostname` and `ip_literal` count files, so two
+copies of one client count twice. Copies that share a name, host and kind
+are one client with several files. Profiles with no usable `[Peer] Endpoint`
+are omitted from the counts. Private keys are not printed.
 
 `--set-endpoint-host` accepts a DNS hostname and refuses an IP literal,
 including a dotted quad, a bare IPv6 address and a bracketed IPv6 address.
-`--dry-run` prints `SERVER_PUB_IP` when it would change and a diff of the
-`Endpoint` lines only. It does not write.
+It also refuses any name `inet_aton` accepts without asking DNS, including
+`123`, `1.2.3`, `0x7f.1`, `0177.0.0.1` and `4294967295`. The error says that
+value would be read as an IPv4 address. An accepted name keeps the spelling
+that was typed, and a trailing root dot is refused.
+`--dry-run` prints `SERVER_PUB_IP` when it would change, a diff of the
+`Endpoint` lines that would change, and `skipped` plus the path of each
+profile whose Endpoint line cannot be parsed. It does not write.
 
-The apply updates every regular profile from that search. Only the host in the
+The apply updates every regular managed profile from that search whose
+Endpoint line can be parsed. A profile whose Endpoint cannot be parsed, for
+example because of a `;` comment, a UTF-8 BOM, or a lowercase `endpoint` key,
+is listed as `skipped` with its path and left unchanged. Only the host in the
 first `[Peer] Endpoint` (`host:port` or `[ipv6]:port`) changes. The port, the
 line ending and every other byte stay, including keys, preshared keys,
 `AllowedIPs`, MTU and obfuscation fields. `SERVER_PUB_IP` in params is set to
 the same hostname, so a profile created afterwards uses it. The installer and
 amneziawg-web both build `Endpoint` from `SERVER_PUB_IP` and the server port.
 A hostname has no colon, so it is written as `hostname:port` and is not
-bracketed. The command does not call client regeneration and does not create
-a new key when a profile has no private key.
+bracketed. After the switch the endpoint is not an IPv4 literal, so creating
+a client warns about awg-quick's automatic MTU when S4 is greater than 0.
+The hard S4 limit stays 140 for IPv4 and IPv6, and that warning does not
+refuse the client. The command does not call client regeneration and does
+not create a new key when a profile has no private key. Rewriting a client
+profile changes its file digest, so a pending panel email job or link no
+longer matches; admission is refused as changed, and a grant redeem or
+download is refused as unavailable, and the client binding is invalidated.
 
 The command takes the lifecycle lock, then releases it before it prints. It
 does not follow symlinks. A symlink profile refuses the whole switch, including
@@ -729,7 +750,10 @@ It checks `--audit-endpoints` and `--set-endpoint-host`: an IPv4 or bracketed
 IPv6 host is rewritten and every other byte is kept, an IP-literal argument
 is refused, disagreeing copies and symlinks are refused, a missing private
 key does not regenerate the profile, `--dry-run` changes nothing, and a second
-run changes nothing.
+run changes nothing. A name `inet_aton` accepts is refused, an unparsed
+Endpoint is listed as skipped and left unchanged, a client file that is not
+a managed name is ignored, and replacing a profile does not follow a
+temporary symlink.
 The suite passes under Python 3.9, 3.10 and 3.12+.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.

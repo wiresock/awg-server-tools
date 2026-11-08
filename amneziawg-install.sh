@@ -3418,6 +3418,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import socket
 import os
 from pathlib import Path
 import re
@@ -4236,10 +4237,16 @@ def endpoint_host(value):
     try:
         ipaddress.ip_address(host)
     except ValueError:
-        if (len(host) <= 253 and re.fullmatch(
-                r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*', host)):
-            return host, 'hostname'
-        return None
+        # glibc inet_aton accepts forms ipaddress rejects, such as 123,
+        # 1.2.3, 0x7f.1 and 0177.0.0.1, and it does not ask DNS.
+        try:
+            socket.inet_aton(host)
+        except OSError:
+            if (len(host) <= 253 and re.fullmatch(
+                    r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*', host)):
+                return host, 'hostname'
+            return None
+        return host, 'ip_literal'
     return host, 'ip_literal'
 
 
@@ -4426,17 +4433,36 @@ def rewrite_endpoint_line(record, hostname):
     if record['lines'][:index] + record['lines'][index + 1:] != lines[:index] + lines[index + 1:]:
         raise StatePolicyError('client profile endpoint could not be rewritten safely')
     if new_line != line:
-        host = record['parsed'][0]
-        needle = '[' + host + ']' if value.startswith('[') else host
-        if core.replace(needle, hostname, 1) != new_core:
+        start = match.start('value')
+        end = match.end('value')
+        written = hostname + ':' + port
+        # Compare the bytes outside the old value. A host that also occurs in
+        # the "Endpoint" label (for example "n") must not fail this check.
+        if core[:start] != new_core[:start] or core[end:] != new_core[start + len(written):]:
+            raise StatePolicyError('client profile endpoint could not be rewritten safely')
+        if new_core[start:start + len(written)] != written:
             raise StatePolicyError('client profile endpoint could not be rewritten safely')
     return ''.join(lines).encode('utf-8'), core, new_core
 
 
+def endpoint_hostname_status(value):
+    # One rule for the switch and for endpoint_host: a value glibc parses as
+    # IPv4 is not a hostname, even when the label grammar would accept it.
+    if not isinstance(value, str) or not value or ':' in value or '[' in value or ']' in value:
+        return 'no'
+    try:
+        socket.inet_aton(value)
+    except OSError:
+        pass
+    else:
+        return 'ipv4'
+    if len(value) <= 253 and _ENDPOINT_HOSTNAME.fullmatch(value) is not None:
+        return 'ok'
+    return 'no'
+
+
 def endpoint_hostname_ok(value):
-    if not value or ':' in value or '[' in value or ']' in value or re.fullmatch(r'[0-9.]+', value):
-        return False
-    return len(value) <= 253 and _ENDPOINT_HOSTNAME.fullmatch(value) is not None
+    return endpoint_hostname_status(value) == 'ok'
 
 
 def write_private_exact(directory, name, data):
@@ -4506,6 +4532,7 @@ def endpoint_plan(regular_list, symlink_list, out_dir, action, hostname, current
                 original = ''.join(record['lines']).encode('utf-8')
                 if rewritten != original:
                     write_private_exact(out_dir, str(number), rewritten)
+                    write_private_exact(out_dir, str(number) + '.before', original)
                     row['status'] = 'update'
                     row['out'] = str(number)
                 else:
@@ -4666,6 +4693,9 @@ def main():
         print(audit['hostname'])
         print(audit['ip_literal'])
         print(audit['warning'] or '')
+    elif mode == 'endpoint-hostname':
+        # path is the candidate name. Prints ok, ipv4, or no. No other text.
+        print(endpoint_hostname_status(path))
     elif mode == 'endpoint-plan':
         # path is the NUL-terminated regular-file list. args are the symlink
         # list, the private output directory, audit|rewrite, the new hostname
@@ -5929,20 +5959,24 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 # A hostname only. awgStateNormalizePubHost also accepts IP literals; the switch
 # refuses those before calling it, because the point is to stop depending on an IP.
 function awgStateEndpointRequireHostname() {
-	local VALUE="$1" NORMALIZED
-	if [[ "${VALUE}" == *:* || "${VALUE}" == *'['* || "${VALUE}" == *']'* || "${VALUE}" =~ ^[0-9.]+$ ]]; then
+	local VALUE="$1" STATUS
+	# Fast refusals for the forms that are never a DNS name. inet_aton,
+	# including 123, 1.2.3 and 0x7f.1, is decided by the same Python rule
+	# as endpoint_host. An accepted name keeps the spelling that was typed.
+	if [[ "${VALUE}" == *:* || "${VALUE}" == *'['* || "${VALUE}" == *']'* ]]; then
 		echo 'ERROR: --set-endpoint-host accepts a hostname, not an IP address.' >&2
 		return 1
 	fi
-	NORMALIZED="$(awgStateNormalizePubHost "${VALUE}")" || {
+	STATUS="$(awgStateArchive endpoint-hostname "${VALUE}")" || return 1
+	if [[ "${STATUS}" == ipv4 ]]; then
+		echo 'ERROR: --set-endpoint-host would be read as an IPv4 address.' >&2
+		return 1
+	fi
+	if [[ "${STATUS}" != ok ]]; then
 		echo 'ERROR: --set-endpoint-host requires a DNS hostname.' >&2
 		return 1
-	}
-	if [[ -z "${NORMALIZED}" || "${NORMALIZED}" == *:* || "${NORMALIZED}" =~ ^[0-9.]+$ ]]; then
-		echo 'ERROR: --set-endpoint-host accepts a hostname, not an IP address.' >&2
-		return 1
 	fi
-	printf '%s\n' "${NORMALIZED}"
+	printf '%s\n' "${VALUE}"
 }
 
 # Same files as collectAwgClientConfigCandidates, plus symlink profiles.
@@ -5956,11 +5990,26 @@ function awgStateEndpointProfileList() {
 	awgStateClientConfigSearchRoots SEARCH_ROOTS || return 1
 	: >"${REGULAR}" || return 1
 	: >"${SYMLINKS}" || return 1
+	local -A MANAGED=()
+	local CLIENT_NAME BASE
+	# Same marker grammar as collectActiveAwgClientConfigs. A private key is
+	# not required: a profile without one is still a managed client here.
+	while IFS= read -r CLIENT_NAME; do
+		[[ -n "${CLIENT_NAME}" ]] || continue
+		MANAGED["${CLIENT_NAME}"]=1
+	done < <(grep -E '^### Client [A-Za-z0-9_-]{1,15}$' "${SERVER_AWG_CONF}" | cut -d ' ' -f 3)
 	shopt -q nullglob && NULLGLOB_WAS_SET=1
 	shopt -s nullglob
 	for ROOT in "${SEARCH_ROOTS[@]}"; do
-		[[ -d "${ROOT}" && ! -L "${ROOT}" ]] || continue
+		# A trailing slash from getent would make a symlink path contain
+		# "//", which the plan then refuses as a whole.
+		ROOT="${ROOT%/}"
+		[[ -n "${ROOT}" && -d "${ROOT}" && ! -L "${ROOT}" ]] || continue
 		for CANDIDATE in "${ROOT}/${SERVER_AWG_NIC}-client-"*.conf; do
+			BASE="${CANDIDATE##*/}"
+			CLIENT_NAME="${BASE#"${SERVER_AWG_NIC}-client-"}"
+			CLIENT_NAME="${CLIENT_NAME%.conf}"
+			[[ -n "${MANAGED[${CLIENT_NAME}]+present}" ]] || continue
 			if [[ -L "${CANDIDATE}" ]]; then
 				printf '%s\0' "${CANDIDATE}" >>"${SYMLINKS}"
 				continue
@@ -5976,25 +6025,174 @@ function awgStateEndpointProfileList() {
 	(( NULLGLOB_WAS_SET )) || shopt -u nullglob
 }
 
-# Replace one regular profile. The temporary file is in the same directory so
-# the rename is atomic, and it keeps the destination's mode and, as root, owner.
+# Replace one regular profile through file descriptors. The destination's
+# directory may be writable by another user, so this never creates, writes,
+# chmod or chown by path there.
 function awgStateInstallRewrittenProfile() {
-	local SRC="$1" DEST="$2" TMP
-	[[ -f "${SRC}" && ! -L "${SRC}" && -f "${DEST}" && ! -L "${DEST}" ]] || return 1
-	TMP="$(mktemp -- "${DEST%/*}/.awg-endpoint.XXXXXX")" || return 1
-	if ! cp -f -- "${SRC}" "${TMP}"; then
-		rm -f -- "${TMP}"
-		return 1
-	fi
-	chmod --reference="${DEST}" "${TMP}" || { rm -f -- "${TMP}"; return 1; }
-	if [[ "${EUID}" -eq 0 ]]; then
-		chown --reference="${DEST}" "${TMP}" || { rm -f -- "${TMP}"; return 1; }
-	fi
-	[[ -f "${DEST}" && ! -L "${DEST}" ]] || { rm -f -- "${TMP}"; return 1; }
-	if ! mv -fT -- "${TMP}" "${DEST}"; then
-		rm -f -- "${TMP}"
-		return 1
-	fi
+	local SRC="$1" DEST="$2" BEFORE="$3"
+	[[ -f "${SRC}" && ! -L "${SRC}" && -f "${BEFORE}" && ! -L "${BEFORE}" && -n "${DEST}" ]] || return 1
+	python3 -I - "${SRC}" "${DEST}" "${BEFORE}" <<'AWG_ENDPOINT_INSTALL_PY'
+import errno
+import os
+import secrets
+import stat
+import sys
+
+def fail(message):
+    sys.stderr.write('ERROR: %s\n' % message)
+    raise SystemExit(1)
+
+src_path, dest_path, before_path = sys.argv[1:]
+if (not dest_path.startswith('/') or '\0' in dest_path or
+        not src_path.startswith('/') or not before_path.startswith('/')):
+    fail('could not install rewritten profile')
+parent, name = os.path.split(dest_path)
+if not parent or not name or name in ('.', '..') or '/' in name or name.startswith('.awg-endpoint.'):
+    fail('could not install rewritten profile')
+
+def read_regular(path):
+    try:
+        info = os.lstat(path)
+    except OSError:
+        fail('could not install rewritten profile')
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_size > 1024 * 1024:
+        fail('could not install rewritten profile')
+    handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        data = os.read(handle, info.st_size + 1)
+    finally:
+        os.close(handle)
+    if len(data) != info.st_size or len(data) > 1024 * 1024:
+        fail('could not install rewritten profile')
+    return data
+
+new_bytes = read_regular(src_path)
+expected = read_regular(before_path)
+dir_fd = None
+temp_name = None
+temp_fd = None
+replaced = False
+try:
+    dir_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.lstat(name, dir_fd=dir_fd)
+    except OSError:
+        fail('could not install rewritten profile')
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        fail('could not install rewritten profile')
+    current_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    try:
+        current = os.read(current_fd, info.st_size + 1)
+    finally:
+        os.close(current_fd)
+    if current != expected:
+        fail('profile changed since the plan; rerun')
+    # A name that is no longer our inode was swapped for a symlink. Unlink
+    # that name and try another. Never rename it onto the destination.
+    installed = False
+    for _attempt in range(100):
+        candidate = '.awg-endpoint.' + secrets.token_hex(8)
+        try:
+            temp_fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                              0o600, dir_fd=dir_fd)
+        except OSError as exc:
+            if exc.errno == errno.EEXIST:
+                continue
+            raise
+        temp_name = candidate
+        swapped = False
+        try:
+            view = new_bytes
+            while view:
+                wrote = os.write(temp_fd, view)
+                if wrote <= 0:
+                    fail('could not install rewritten profile')
+                view = view[wrote:]
+            if os.geteuid() == 0:
+                os.fchown(temp_fd, info.st_uid, info.st_gid)
+            os.fchmod(temp_fd, stat.S_IMODE(info.st_mode))
+            os.fsync(temp_fd)
+            ours = os.fstat(temp_fd)
+            try:
+                listed = os.lstat(temp_name, dir_fd=dir_fd)
+            except OSError:
+                swapped = True
+            else:
+                swapped = (not stat.S_ISREG(listed.st_mode) or listed.st_ino != ours.st_ino or
+                           listed.st_dev != ours.st_dev)
+            if not swapped:
+                os.replace(temp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                replaced = True
+                landed = os.lstat(name, dir_fd=dir_fd)
+                if (not stat.S_ISREG(landed.st_mode) or landed.st_ino != ours.st_ino or
+                        landed.st_dev != ours.st_dev):
+                    # rename moved a symlink onto the destination. Remove that
+                    # directory entry without following it, put the bytes we
+                    # read back, and try again.
+                    try:
+                        os.unlink(name, dir_fd=dir_fd)
+                    except OSError:
+                        pass
+                    replaced = False
+                    restore = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                      0o600, dir_fd=dir_fd)
+                    try:
+                        pending = expected
+                        while pending:
+                            wrote = os.write(restore, pending)
+                            if wrote <= 0:
+                                fail('could not install rewritten profile')
+                            pending = pending[wrote:]
+                        if os.geteuid() == 0:
+                            os.fchown(restore, info.st_uid, info.st_gid)
+                        os.fchmod(restore, stat.S_IMODE(info.st_mode))
+                        os.fsync(restore)
+                    finally:
+                        os.close(restore)
+                    swapped = True
+                else:
+                    os.fsync(dir_fd)
+                    installed = True
+        finally:
+            if temp_fd is not None:
+                try:
+                    os.close(temp_fd)
+                except OSError:
+                    pass
+                temp_fd = None
+            if temp_name and not replaced:
+                try:
+                    os.unlink(temp_name, dir_fd=dir_fd)
+                except OSError:
+                    pass
+                temp_name = None
+        if installed:
+            break
+        if not swapped:
+            fail('could not install rewritten profile')
+    if not installed:
+        fail('could not install rewritten profile')
+except SystemExit:
+    raise
+except OSError:
+    fail('could not install rewritten profile')
+finally:
+    if temp_fd is not None:
+        try:
+            os.close(temp_fd)
+        except OSError:
+            pass
+    if temp_name and not replaced:
+        try:
+            os.unlink(temp_name, dir_fd=dir_fd)
+        except OSError:
+            pass
+    if dir_fd is not None:
+        try:
+            os.close(dir_fd)
+        except OSError:
+            pass
+AWG_ENDPOINT_INSTALL_PY
 }
 
 # User-facing text from a plan. Kinds: audit, diff, result, symlink, conflict.
@@ -6020,6 +6218,9 @@ elif kind == 'diff':
         print('+++ ' + item['path'])
         print('-' + item['old_line'])
         print('+' + item['new_line'])
+    for item in plan['files']:
+        if item.get('status') == 'skipped':
+            print('skipped ' + item['path'])
 elif kind == 'result':
     for item in plan['files']:
         label = 'updated' if item.get('status') == 'update' else item.get('status')
@@ -6128,7 +6329,7 @@ for item in d["files"]:
 		case "${STATUS}" in
 			update)
 				[[ -n "${OUT_NAME}" && "${OUT_NAME}" != */* && "${OUT_NAME}" != *..* ]] || { FAILED=1; break; }
-				awgStateInstallRewrittenProfile "${WORK}/out/${OUT_NAME}" "${PROFILE}" || { FAILED=1; break; }
+				awgStateInstallRewrittenProfile "${WORK}/out/${OUT_NAME}" "${PROFILE}" "${WORK}/out/${OUT_NAME}.before" || { FAILED=1; break; }
 				;;
 			unchanged|skipped) ;;
 			*) FAILED=1; break ;;
