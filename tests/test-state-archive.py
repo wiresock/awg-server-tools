@@ -1262,7 +1262,11 @@ fi
                      ['--import-state', 'x', '--enable-at-boot'], ['--purge-state-journal'],
                      ['--purge-state-journal', '../x', '--force'], ['--purge-state-journal', 'a'*64, '--unknown'],
                      ['--reset-state-journal', 'a'*64], ['--reset-state-journal', '../x', '--confirm-policy-replay'],
-                     ['--reset-state-journal', 'a'*64, '--force']):
+                     ['--reset-state-journal', 'a'*64, '--force'],
+                     ['--audit-endpoints', 'extra'], ['--set-endpoint-host'],
+                     ['--set-endpoint-host', '--dry-run'],
+                     ['--set-endpoint-host', 'vpn.example.test', '--apply'],
+                     ['--set-endpoint-host', 'vpn.example.test', '--dry-run', 'extra']):
             result = subprocess.run(['bash', str(SCRIPT), *args], capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b'Usage:', result.stderr)
@@ -3113,6 +3117,366 @@ shift; parse_args "$@"; printf 'hash=%s\n' "$PASSWORD_HASH"
         self.assertIn('HTTPS/reverse proxy for the panel is operator-managed', out)
 
 
+    def test_endpoint_plan_rewrites_only_the_host(self):
+        secret = b'ENDPOINT-PLAN-SECRET-KEY'
+        phone = self.root / 'awg0-client-phone.conf'
+        # The old address also appears in a comment. Only the Endpoint host moves.
+        phone_old = (
+            b'# note 203.0.113.7 stays\n'
+            b'[Interface]\nPrivateKey = ' + secret + b'\nAddress = 10.66.66.2/32\nMTU = 1280\n'
+            b'Jc = 4\nJmin = 40\nJmax = 70\nS1 = 15\nS2 = 16\nS3 = 17\nS4 = 18\n'
+            b'H1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\n'
+            b'[Peer]\nPublicKey = ' + PUB.encode() + b'\nPresharedKey = ' + KEY.encode() + b'\n'
+            b'Endpoint = 203.0.113.7:51820\nAllowedIPs = 0.0.0.0/0,::/0\n'
+        )
+        phone.write_bytes(phone_old)
+        v6 = self.root / 'awg0-client-v6.conf'
+        v6_old = (
+            b'[Interface]\r\nAddress = 10.66.66.4/32\r\nMTU = 1280\r\n'
+            b'[Peer]\r\nPresharedKey = ' + secret + b'\r\n'
+            b'Endpoint = [2001:db8::5]:51820\r\nAllowedIPs = 0.0.0.0/0\r\n'
+        )
+        v6.write_bytes(v6_old)
+        plain = self.root / 'awg0-client-plain.conf'
+        plain_old = b'[Peer]\nEndpoint = vpn.example.test:51820\n'
+        plain.write_bytes(plain_old)
+        out = self.root / 'out'
+        out.mkdir()
+        regular = self.root / 'regular'
+        regular.write_bytes(b''.join(str(path).encode() + b'\0' for path in (phone, v6, plain)))
+        (self.root / 'symlinks').write_bytes(b'')
+        result = self.run_helper('endpoint-plan', regular, self.root / 'symlinks', out, 'rewrite',
+                                 'vpn.example.test', '203.0.113.9')
+        plan = json.loads(result.stdout)
+        self.assertIsNone(plan['refused'])
+        self.assertEqual(plan['ip_literal'], 2)
+        self.assertEqual(plan['hostname'], 1)
+        written = {row['path']: row for row in plan['files']}
+        self.assertEqual(written[str(phone)]['status'], 'update')
+        self.assertEqual(written[str(v6)]['status'], 'update')
+        self.assertEqual(written[str(plain)]['status'], 'unchanged')
+        phone_new = (out / written[str(phone)]['out']).read_bytes()
+        v6_new = (out / written[str(v6)]['out']).read_bytes()
+        self.assertEqual(phone_new, phone_old.replace(
+            b'Endpoint = 203.0.113.7:51820', b'Endpoint = vpn.example.test:51820', 1))
+        self.assertIn(b'203.0.113.7 stays', phone_new)
+        self.assertEqual(v6_new, v6_old.replace(
+            b'Endpoint = [2001:db8::5]:51820', b'Endpoint = vpn.example.test:51820', 1))
+        self.assertNotIn(b'PrivateKey', v6_new)
+        self.assertNotIn(secret, result.stdout + result.stderr)
+        self.assertNotIn(KEY.encode(), result.stdout)
+        # A second plan of the rewritten bytes changes nothing and writes nothing.
+        phone.write_bytes(phone_new)
+        v6.write_bytes(v6_new)
+        again_out = self.root / 'out-again'
+        again_out.mkdir()
+        again = self.run_helper('endpoint-plan', regular, self.root / 'symlinks', again_out, 'rewrite',
+                                'vpn.example.test', 'vpn.example.test')
+        again_plan = json.loads(again.stdout)
+        self.assertTrue(all(row['status'] == 'unchanged' for row in again_plan['files']))
+        self.assertEqual(list(again_out.iterdir()), [])
+
+    def test_endpoint_plan_refuses_symlink_conflict_and_ip_hostname(self):
+        secret = b'ENDPOINT-PLAN-UNREAD-SECRET'
+        target = self.root / 'target.conf'
+        target.write_bytes(b'[Peer]\nPrivateKey = ' + secret + b'\nEndpoint = 203.0.113.7:51820\n')
+        link = self.root / 'awg0-client-link.conf'
+        link.symlink_to(self.root / 'missing-target.conf')
+        regular_file = self.root / 'awg0-client-phone.conf'
+        regular_file.write_bytes(b'[Peer]\nPrivateKey = ' + secret + b'\nEndpoint = 203.0.113.7:51820\n')
+        out = self.root / 'out'
+        out.mkdir()
+        regular = self.root / 'regular'
+        regular.write_bytes(str(regular_file).encode() + b'\0')
+        symlinks = self.root / 'symlinks'
+        symlinks.write_bytes(str(link).encode() + b'\0')
+        refused = json.loads(self.run_helper(
+            'endpoint-plan', regular, symlinks, out, 'rewrite', 'vpn.example.test', '203.0.113.9').stdout)
+        self.assertEqual(refused['refused'], 'symlink')
+        self.assertEqual(refused['symlinks'], [str(link)])
+        self.assertEqual(list(out.iterdir()), [])
+        self.assertNotIn(secret, json.dumps(refused).encode())
+        # A symlink handed in as a regular path is still not opened.
+        (self.root / 'empty-sym').write_bytes(b'')
+        followed = self.run_helper('endpoint-plan', symlinks, self.root / 'empty-sym', out, 'rewrite',
+                                   'vpn.example.test', '203.0.113.9', ok=False)
+        self.assertIn(b'symlink client profile', followed.stderr)
+        self.assertNotIn(b'not readable', followed.stderr)
+        self.assertNotIn(secret, followed.stdout + followed.stderr)
+        left = self.root / 'a' / 'awg0-client-phone.conf'
+        right = self.root / 'b' / 'awg0-client-phone.conf'
+        left.parent.mkdir()
+        right.parent.mkdir()
+        left.write_bytes(b'[Peer]\nEndpoint = 203.0.113.7:51820\nAllowedIPs = 0.0.0.0/0\n')
+        right.write_bytes(left.read_bytes() + b'MTU = 1420\n')
+        both = self.root / 'both'
+        both.write_bytes(str(left).encode() + b'\0' + str(right).encode() + b'\0')
+        conflict_out = self.root / 'conflict-out'
+        conflict_out.mkdir()
+        conflict = json.loads(self.run_helper(
+            'endpoint-plan', both, self.root / 'empty-sym', conflict_out, 'rewrite',
+            'vpn.example.test', '203.0.113.9').stdout)
+        self.assertEqual(conflict['refused'], 'conflict')
+        self.assertEqual(conflict['conflicts'][0]['files'], sorted([str(left), str(right)]))
+        self.assertEqual(list(conflict_out.iterdir()), [])
+        self.assertEqual(left.read_bytes(), b'[Peer]\nEndpoint = 203.0.113.7:51820\nAllowedIPs = 0.0.0.0/0\n')
+        for bad in ('203.0.113.7', '2001:db8::1', '[2001:db8::1]', 'vpn.example.test:51820'):
+            with self.subTest(bad=bad):
+                denied = self.run_helper('endpoint-plan', both, self.root / 'empty-sym', conflict_out,
+                                         'rewrite', bad, '203.0.113.9', ok=False)
+                self.assertIn(b'hostname refused', denied.stderr)
+                self.assertNotIn(secret, denied.stdout + denied.stderr)
+
+    def test_endpoint_host_switch_command(self):
+        # Search roots are mocked. The live /root and /home trees are not used.
+        roots_fn = SOURCE.split('function awgStateClientConfigSearchRoots()', 1)[1].split('\nfunction ', 1)[0]
+        for needle in ('${AMNEZIAWG_DIR}/clients', '"/root"', '/home/*', 'getHomeDirForClient', 'resolveWebPanelConfigDir'):
+            self.assertIn(needle, roots_fn)
+        collect = SOURCE.split('function collectAwgClientConfigCandidates()', 1)[1].split('\nfunction ', 1)[0]
+        self.assertIn('awgStateClientConfigSearchRoots SEARCH_ROOTS', collect)
+        command = SOURCE.split('function awgStateEndpointCommand()', 1)[1].split('\nfunction awgStateCommand()', 1)[0]
+        self.assertNotIn('regenerateClients', command)
+        secret = b'ENDPOINT-SWITCH-SECRET-KEY'
+        tree = self.root / 'tree'
+        clients = tree / 'clients'
+        home = tree / 'home'
+        panel = tree / 'panel'
+        conflict_dir = tree / 'conflict'
+        for directory in (clients, home, panel, conflict_dir):
+            directory.mkdir(parents=True)
+        phone_old = (
+            b'# note 203.0.113.7 stays\n'
+            b'[Interface]\nPrivateKey = ' + secret + b'\nAddress = 10.66.66.2/32\nMTU = 1280\n'
+            b'Jc = 4\nJmin = 40\nJmax = 70\nS1 = 15\nS2 = 16\nS3 = 17\nS4 = 18\n'
+            b'H1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\n'
+            b'PreUp = touch ' + str(self.root / 'pwned').encode() + b'\n'
+            b'[Peer]\nPublicKey = ' + PUB.encode() + b'\nPresharedKey = ENDPOINT-SWITCH-PSK\n'
+            b'Endpoint = 203.0.113.7:51820\nAllowedIPs = 0.0.0.0/0,::/0\nPersistentKeepalive = 25\n'
+        )
+        v6_old = (
+            b'[Interface]\r\nAddress = 10.66.66.4/32\r\nMTU = 1280\r\n'
+            b'Jc = 4\r\nJmin = 40\r\nJmax = 70\r\nS1 = 15\r\nS2 = 16\r\nS3 = 17\r\nS4 = 18\r\n'
+            b'H1 = 1\r\nH2 = 2\r\nH3 = 3\r\nH4 = 4\r\n'
+            b'[Peer]\r\nPublicKey = ' + PUB.encode() + b'\r\nPresharedKey = ENDPOINT-SWITCH-PSK\r\n'
+            b'Endpoint = [2001:db8::5]:51820\r\nAllowedIPs = 0.0.0.0/0\r\n'
+        )
+        phone = clients / 'awg0-client-phone.conf'
+        phone_home = home / 'awg0-client-phone.conf'
+        v6 = panel / 'awg0-client-v6.conf'
+        phone.write_bytes(phone_old)
+        phone_home.write_bytes(phone_old)
+        v6.write_bytes(v6_old)
+        os.chmod(phone, 0o640)
+        os.chmod(phone_home, 0o600)
+        (conflict_dir / 'awg0-client-phone.conf').write_bytes(phone_old + b'MTU = 1420\n')
+        (tree / 'awg0.conf').write_bytes(b'[Interface]\nListenPort = 51820\n')
+        params = self.files['vpn/params'].replace(
+            b"SERVER_PUB_IP='vpn.example.test'", b"SERVER_PUB_IP='203.0.113.9'")
+        (tree / 'params').write_bytes(params)
+        shell = r'''
+set -uo pipefail
+source "$1"
+T="$2"
+isRoot() { :; }
+checkOS() { OS=debian; }
+awgStateWorkDir() { printf '%s\n' "$T/work"; }
+awgStateTrustedPath() { return 0; }
+acquireClientLifecycleLock() { echo lock >>"$T/order"; return 0; }
+releaseClientLifecycleLock() {
+    if [[ ! -e "$T/released-once" ]]; then
+        touch "$T/released-once"
+        if [[ -n "${AWG_ENDPOINT_OUT:-}" && -s "${AWG_ENDPOINT_OUT}" ]]; then
+            echo early-print >>"$T/order"
+        fi
+    fi
+    echo release >>"$T/order"
+}
+regenerateClients() { echo regen >>"$T/called"; exit 99; }
+awg() { echo awg >>"$T/called"; exit 99; }
+# The third profile fails once, as root or not. The other profiles use the real rename.
+eval "$(declare -f awgStateInstallRewrittenProfile | sed '1s/awgStateInstallRewrittenProfile/awgStateInstallRewrittenProfileReal/')"
+awgStateInstallRewrittenProfile() {
+    if [[ -f "$T/fail-v6" && "$2" == *awg0-client-v6.conf ]]; then
+        return 1
+    fi
+    awgStateInstallRewrittenProfileReal "$@"
+}
+getHomeDirForClient() { echo getent >>"$T/called"; printf '%s\n' /root; }
+resolveWebPanelConfigDir() { echo panel >>"$T/called"; printf '%s\n' /etc/amneziawg-panel; }
+awgStateClientConfigSearchRoots() {
+    local -n ROOTS_REF="$1"
+    ROOTS_REF=("$T/tree/clients" "$T/tree/home" "$T/tree/panel")
+    if [[ -f "$T/include-conflict" ]]; then
+        ROOTS_REF+=("$T/tree/conflict")
+    fi
+}
+begin() {
+    rm -rf -- "$T/work"
+    mkdir -p -- "$T/work"
+    rm -f -- "$T/released-once"
+    : >"$T/order"
+}
+AMNEZIAWG_DIR="$T/tree"
+begin
+awgStateReadParams "$AMNEZIAWG_DIR/params" "$T/work/records" || { echo 'read-params-failed' >&2; exit 40; }
+canon="$(mktemp -- "$T/params.canon.XXXXXX")"
+serializeParams "$canon" || { echo 'serialize-failed' >&2; exit 41; }
+mv -f -- "$canon" "$AMNEZIAWG_DIR/params"
+cp -a -- "$AMNEZIAWG_DIR/params" "$T/params-canonical"
+rm -rf -- "$T/work"
+: >"$T/order"
+for bad in 203.0.113.7 127.0.0.1 1.2.3.4 '2001:db8::1' '[2001:db8::1]' 1.2.3; do
+    if awgStateEndpointCommand set "$bad" >"$T/ip.out" 2>"$T/ip.err"; then
+        echo "accepted-ip $bad" >&2
+        exit 30
+    fi
+    grep -q 'not an IP address' "$T/ip.err" || { echo "ip-message $bad" >&2; cat "$T/ip.err" >&2; exit 31; }
+done
+if awgStateEndpointCommand set 'not a host' >"$T/ip.out" 2>"$T/ip.err"; then
+    echo 'accepted-bad-host' >&2
+    exit 32
+fi
+grep -q 'DNS hostname' "$T/ip.err" || { cat "$T/ip.err" >&2; exit 33; }
+grep -q lock "$T/order" && { echo 'locked-on-refusal' >&2; exit 34; }
+ln -s "$T/tree/missing-target.conf" "$T/tree/clients/awg0-client-extra.conf"
+cand=()
+collectAwgClientConfigCandidates cand || { echo 'collect-failed' >&2; exit 60; }
+printf '%s\n' "${cand[@]}" >"$T/collected"
+begin
+AWG_ENDPOINT_OUT="$T/symlink.out"
+: >"$AWG_ENDPOINT_OUT"
+if awgStateEndpointCommand set vpn.example.test >"$AWG_ENDPOINT_OUT" 2>"$T/symlink.err"; then
+    echo 'symlink-accepted' >&2
+    exit 61
+fi
+grep -q 'symlink' "$T/symlink.err" || { cat "$T/symlink.err" >&2; exit 62; }
+grep -q 'not readable' "$T/symlink.err" && { echo 'opened-symlink' >&2; exit 63; }
+rm -f -- "$T/tree/clients/awg0-client-extra.conf"
+: >"$T/include-conflict"
+begin
+AWG_ENDPOINT_OUT="$T/conflict.out"
+: >"$AWG_ENDPOINT_OUT"
+if awgStateEndpointCommand set vpn.example.test --dry-run >"$AWG_ENDPOINT_OUT" 2>"$T/conflict.err"; then
+    echo 'conflict-accepted' >&2
+    exit 64
+fi
+grep -q 'disagree outside the Endpoint line' "$T/conflict.err" || { cat "$T/conflict.err" >&2; exit 65; }
+cmp -s "$AMNEZIAWG_DIR/params" "$T/params-canonical" || { echo 'conflict-wrote-params' >&2; exit 66; }
+rm -f -- "$T/include-conflict"
+cp -a -- "$T/tree/clients/awg0-client-phone.conf" "$T/original-phone"
+cp -a -- "$T/tree/panel/awg0-client-v6.conf" "$T/original-v6"
+cp -a -- "$T/tree/home/awg0-client-phone.conf" "$T/original-home"
+begin
+AWG_ENDPOINT_OUT="$T/audit.json"
+: >"$AWG_ENDPOINT_OUT"
+awgStateEndpointCommand audit >"$AWG_ENDPOINT_OUT" 2>"$T/audit.err" || { echo 'audit-failed' >&2; cat "$T/audit.err" >&2; exit 50; }
+grep -q early-print "$T/order" && { echo 'audit-printed-under-lock' >&2; exit 51; }
+grep -q lock "$T/order" || { echo 'audit-no-lock' >&2; exit 52; }
+grep -q release "$T/order" || { echo 'audit-no-release' >&2; exit 53; }
+begin
+AWG_ENDPOINT_OUT="$T/dry.out"
+: >"$AWG_ENDPOINT_OUT"
+awgStateEndpointCommand set vpn.example.test --dry-run >"$AWG_ENDPOINT_OUT" 2>"$T/dry.err" || { echo 'dry-run-failed' >&2; cat "$T/dry.err" >&2; exit 54; }
+cmp -s "$AMNEZIAWG_DIR/params" "$T/params-canonical" || { echo 'dry-run-wrote-params' >&2; exit 55; }
+cmp -s "$T/tree/clients/awg0-client-phone.conf" "$T/original-phone" || { echo 'dry-run-wrote-phone' >&2; exit 56; }
+cmp -s "$T/tree/home/awg0-client-phone.conf" "$T/original-home" || exit 57
+cmp -s "$T/tree/panel/awg0-client-v6.conf" "$T/original-v6" || exit 58
+: >"$T/fail-v6"
+begin
+AWG_ENDPOINT_OUT="$T/partial.out"
+: >"$AWG_ENDPOINT_OUT"
+if awgStateEndpointCommand set vpn.example.test >"$AWG_ENDPOINT_OUT" 2>"$T/partial.err"; then
+    echo 'partial-succeeded' >&2
+    exit 70
+fi
+grep -q 'partial write' "$T/partial.err" || { cat "$T/partial.err" >&2; exit 71; }
+cmp -s "$AMNEZIAWG_DIR/params" "$T/params-canonical" || { echo 'partial-wrote-params' >&2; exit 72; }
+cmp -s "$T/tree/panel/awg0-client-v6.conf" "$T/original-v6" || { echo 'partial-wrote-v6' >&2; exit 73; }
+cmp -s "$T/tree/clients/awg0-client-phone.conf" "$T/original-phone" && { echo 'partial-skipped-phone' >&2; exit 74; }
+rm -f -- "$T/fail-v6"
+begin
+AWG_ENDPOINT_OUT="$T/apply.out"
+: >"$AWG_ENDPOINT_OUT"
+awgStateEndpointCommand set vpn.example.test >"$AWG_ENDPOINT_OUT" 2>"$T/apply.err" || { echo 'apply-failed' >&2; cat "$T/apply.err" >&2; exit 80; }
+cp -a -- "$AMNEZIAWG_DIR/params" "$T/params-after"
+cp -a -- "$T/tree/clients/awg0-client-phone.conf" "$T/phone-after"
+cp -a -- "$T/tree/home/awg0-client-phone.conf" "$T/home-after"
+cp -a -- "$T/tree/panel/awg0-client-v6.conf" "$T/v6-after"
+begin
+AWG_ENDPOINT_OUT="$T/rerun.out"
+: >"$AWG_ENDPOINT_OUT"
+awgStateEndpointCommand set vpn.example.test >"$AWG_ENDPOINT_OUT" 2>"$T/rerun.err" || { echo 'rerun-failed' >&2; cat "$T/rerun.err" >&2; exit 81; }
+cmp -s "$AMNEZIAWG_DIR/params" "$T/params-after" || { echo 'rerun-wrote-params' >&2; exit 82; }
+cmp -s "$T/tree/clients/awg0-client-phone.conf" "$T/phone-after" || exit 83
+cmp -s "$T/tree/home/awg0-client-phone.conf" "$T/home-after" || exit 84
+cmp -s "$T/tree/panel/awg0-client-v6.conf" "$T/v6-after" || exit 85
+begin
+AWG_ENDPOINT_OUT="$T/audit-after.json"
+: >"$AWG_ENDPOINT_OUT"
+awgStateEndpointCommand audit >"$AWG_ENDPOINT_OUT" 2>"$T/audit-after.err" || { echo 'audit-after-failed' >&2; cat "$T/audit-after.err" >&2; exit 86; }
+begin
+AWG_ENDPOINT_OUT="$T/dry-after.out"
+: >"$AWG_ENDPOINT_OUT"
+awgStateEndpointCommand set vpn.example.test --dry-run >"$AWG_ENDPOINT_OUT" 2>"$T/dry-after.err" || { echo 'dry-after-failed' >&2; cat "$T/dry-after.err" >&2; exit 87; }
+[[ ! -e "$T/called" ]] || { echo 'regenerated-or-searched-live-roots' >&2; cat "$T/called" >&2; exit 88; }
+[[ ! -e "$T/pwned" ]] || { echo 'executed-profile' >&2; exit 89; }
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        combined = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, combined.decode())
+        self.assertNotIn(secret, combined)
+        self.assertNotIn(b'ENDPOINT-SWITCH-PSK', combined)
+        self.assertNotIn(KEY.encode(), combined)
+        collected = set((self.root / 'collected').read_text().splitlines())
+        self.assertEqual(collected, {str(phone.resolve()), str(phone_home.resolve()), str(v6.resolve())})
+        audit = json.loads((self.root / 'audit.json').read_text())
+        self.assertEqual(audit['hostname'], 0)
+        self.assertEqual(audit['ip_literal'], 3)
+        self.assertEqual(audit['symlinks'], [])
+        by_name = {item['name']: item for item in audit['clients']}
+        self.assertEqual(by_name['awg0-client-phone']['kind'], 'ip_literal')
+        self.assertEqual(by_name['awg0-client-phone']['host'], '203.0.113.7')
+        self.assertEqual(by_name['awg0-client-phone']['files'], sorted([str(phone.resolve()), str(phone_home.resolve())]))
+        self.assertEqual(by_name['awg0-client-v6']['host'], '2001:db8::5')
+        self.assertEqual(by_name['awg0-client-v6']['files'], [str(v6.resolve())])
+        dry = (self.root / 'dry.out').read_text()
+        self.assertIn('SERVER_PUB_IP 203.0.113.9 -> vpn.example.test\n', dry)
+        self.assertIn('-Endpoint = 203.0.113.7:51820\n+Endpoint = vpn.example.test:51820\n', dry)
+        self.assertIn('-Endpoint = [2001:db8::5]:51820\n+Endpoint = vpn.example.test:51820\n', dry)
+        self.assertNotIn(secret.decode(), dry)
+        self.assertNotIn('PrivateKey', dry)
+        self.assertNotIn('PreUp', dry)
+        phone_now = phone.read_bytes()
+        home_now = phone_home.read_bytes()
+        v6_now = v6.read_bytes()
+        self.assertEqual(phone_now, phone_old.replace(
+            b'Endpoint = 203.0.113.7:51820', b'Endpoint = vpn.example.test:51820', 1))
+        self.assertEqual(home_now, phone_now)
+        self.assertEqual(v6_now, v6_old.replace(
+            b'Endpoint = [2001:db8::5]:51820', b'Endpoint = vpn.example.test:51820', 1))
+        self.assertNotIn(b'PrivateKey', v6_now)
+        self.assertIn(b'203.0.113.7 stays', phone_now)
+        self.assertEqual(stat_mode(phone), 0o640)
+        self.assertEqual(stat_mode(phone_home), 0o600)
+        self.assertFalse((self.root / 'pwned').exists())
+        params_text = (tree / 'params').read_text()
+        self.assertIn("SERVER_PUB_IP='vpn.example.test'\n", params_text)
+        self.assertNotIn('203.0.113.9', params_text)
+        self.assertIn("SERVER_PRIV_KEY='" + KEY + "'\n", params_text)
+        rerun = (self.root / 'rerun.out').read_text()
+        self.assertIn('unchanged ' + str(phone.resolve()), rerun)
+        self.assertIn('unchanged ' + str(v6.resolve()), rerun)
+        self.assertNotIn('updated ', rerun)
+        self.assertIn('SERVER_PUB_IP vpn.example.test\n', rerun)
+        self.assertNotIn('->', rerun)
+        after = json.loads((self.root / 'audit-after.json').read_text())
+        self.assertEqual(after['hostname'], 3)
+        self.assertEqual(after['ip_literal'], 0)
+        self.assertTrue(all(item['kind'] == 'hostname' and item['host'] == 'vpn.example.test' for item in after['clients']))
+        self.assertEqual((self.root / 'dry-after.out').read_text(), 'No Endpoint lines need to change.\n')
+        self.assertFalse((self.root / 'work').exists())
+
+
 PERMS_HARNESS = r"""
 set -euo pipefail
 ROOT="$1" PROXY_SH="$2" WEB_SH="$3"; shift 3
@@ -3135,6 +3499,10 @@ for action in "$@"; do "$action"; done
 key=$(printf %s "$PROXY_DATA" | tr / _)
 printf '%s %s\n' "$(cat "$ROOT/state/$key.owner")" "$(cat "$ROOT/state/$key.mode")"
 """
+
+
+def stat_mode(path):
+    return path.stat().st_mode & 0o777
 
 
 class CompanionPermissionTests(unittest.TestCase):

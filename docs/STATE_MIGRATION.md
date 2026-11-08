@@ -22,12 +22,15 @@ SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --import-state /root/server.awgx -
 SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --import-state /root/server.awgx
 # After reviewing configuration and fencing/stopping the old server:
 SERVER_PUB_NIC=ens3 bash amneziawg-install.sh --activate-state /root/server.awgx --enable-at-boot
+bash amneziawg-install.sh --audit-endpoints
+bash amneziawg-install.sh --set-endpoint-host vpn.example.com --dry-run
+bash amneziawg-install.sh --set-endpoint-host vpn.example.com
 ```
 
 `ens3` is an example: use the **new host's public network interface**, not its
 VPN interface. If omitted, the installer uses the default-route interface. The
 VPN interface name is retained from the archive. Neither server nor client keys
-are regenerated. Client profiles and Endpoint values remain unchanged.
+are regenerated. Import leaves client profiles and their Endpoint lines unchanged.
 
 `SERVER_PUB_IP=<hostname|IPv4|IPv6>` (no port; `host:port` is rejected, and a
 value containing `:` must be a valid IPv6 address, bare or in one balanced
@@ -611,12 +614,66 @@ A fully no-plaintext-staging SQLite workflow remains follow-up work. The encrypt
 destination is published with mode 0600 without overwriting an existing path.
 
 Clients using a hostname still depend on client DNS re-resolution behavior.
-Literal-IP endpoints need a profile update. No DNS changes or endpoint rewrites
-are done automatically. Export, `--inspect-state` and import `--dry-run` count
+Literal-IP endpoints need one profile update. Export, import and activation do
+not rewrite `Endpoint` lines. `--audit-endpoints` and `--set-endpoint-host` do
+that switch; see below. Export, `--inspect-state` and import `--dry-run` count
 archived `clients/*.conf` profiles whose `[Peer] Endpoint` host is a literal
 IP versus a hostname (`endpoint_audit`). An address on the server `[Interface]`
 or on a `[Peer]` inside `vpn/server.conf` is not a client profile and is not
 counted.
+
+### Endpoint audit and hostname switch
+
+Run this on the server that clients still reach, before an address is taken
+away.
+
+```sh
+bash amneziawg-install.sh --audit-endpoints
+bash amneziawg-install.sh --set-endpoint-host vpn.example.com --dry-run
+bash amneziawg-install.sh --set-endpoint-host vpn.example.com
+```
+
+`--audit-endpoints` is read-only. It prints JSON with `hostname`, `ip_literal`
+and `clients` (name, host, `hostname` or `ip_literal`, and `files`). `symlinks`
+lists installer-managed profile symlinks; their targets are not read. The
+search is the one `collectAwgClientConfigCandidates` uses: the managed clients
+directory, `/root`, `/home/*`, each managed client's resolved home, and the
+panel config directory. It is not limited to the archived `clients/*.conf`
+copies that export counts. Names are the profile basename without `.conf`.
+`hostname` and `ip_literal` count files, so two copies of one client count
+twice. Copies that share a name, host and kind are one client with several
+files. Profiles with no usable `[Peer] Endpoint` are omitted. Private keys are
+not printed.
+
+`--set-endpoint-host` accepts a DNS hostname and refuses an IP literal,
+including a dotted quad, a bare IPv6 address and a bracketed IPv6 address.
+`--dry-run` prints `SERVER_PUB_IP` when it would change and a diff of the
+`Endpoint` lines only. It does not write.
+
+The apply updates every regular profile from that search. Only the host in the
+first `[Peer] Endpoint` (`host:port` or `[ipv6]:port`) changes. The port, the
+line ending and every other byte stay, including keys, preshared keys,
+`AllowedIPs`, MTU and obfuscation fields. `SERVER_PUB_IP` in params is set to
+the same hostname, so a profile created afterwards uses it. The installer and
+amneziawg-web both build `Endpoint` from `SERVER_PUB_IP` and the server port.
+A hostname has no colon, so it is written as `hostname:port` and is not
+bracketed. The command does not call client regeneration and does not create
+a new key when a profile has no private key.
+
+The command takes the lifecycle lock, then releases it before it prints. It
+does not follow symlinks. A symlink profile refuses the whole switch, including
+`--dry-run`, and nothing is written. Copies of the same filename that differ
+in any line other than that `Endpoint` line also refuse the whole switch,
+including `--dry-run`. A different port on that line is allowed, and each file
+keeps its own port. Each written file is renamed into place and keeps its mode
+and, when run as root, its owner. A profile that already uses the hostname is
+left untouched. After a partial write, run the same command again: finished
+profiles stay as they are and the rest are updated. When every profile and
+`SERVER_PUB_IP` already use the hostname, a rerun changes nothing.
+
+Clients import the updated profile once. After that, moving the hostname's DNS
+record is enough. A further profile update is not required for that move.
+Profiles that already used the hostname follow DNS without this command.
 
 `ListenAddr` in the server config is refused with an explicit error, not
 carried. Current `amneziawg-tools` (`src/config.c`, `process_line`) accepts
@@ -668,6 +725,11 @@ socket address, an explicit `ListenAddr` refusal, and the literal-IP endpoint
 count. It checks that the literal-IP warning is printed before encryption
 starts, that a failed endpoint count still leaves a successful export, and
 that a client-profile hook or `ListenAddr` is refused before encryption.
+It checks `--audit-endpoints` and `--set-endpoint-host`: an IPv4 or bracketed
+IPv6 host is rewritten and every other byte is kept, an IP-literal argument
+is refused, disagreeing copies and symlinks are refused, a missing private
+key does not regenerate the profile, `--dry-run` changes nothing, and a second
+run changes nothing.
 The suite passes under Python 3.9, 3.10 and 3.12+.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.
@@ -713,9 +775,12 @@ of this checklist. Do not record it as passed until each step has been run.
 6. Live proxy restore: a client whose Endpoint is the proxy's public port
    handshakes, and the backend port is not the client's Endpoint.
 7. DNS cutover with at least two client types (for example the official
-   AmneziaWG client and WireSock): profiles that already use a hostname keep
-   working after the DNS record moves; profiles counted as `ip_literal` do
-   not, until they are given a new profile.
+   AmneziaWG client and WireSock). While the old server still answers,
+   `--audit-endpoints` lists literal-IP profiles and `--set-endpoint-host
+   <hostname>` (after `--dry-run`) rewrites only that host. Each of those
+   clients imports the updated profile once. Moving the hostname's DNS record
+   then works without another profile. Profiles that already used the hostname
+   keep working after the DNS record moves.
 8. Power loss during import: kill the host after quarantine has started and
    before finalization. After boot the VPN must still be the old one or be
    stopped, and a rerun must refuse an incomplete rollback or finish the

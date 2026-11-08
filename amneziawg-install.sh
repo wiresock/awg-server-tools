@@ -3422,6 +3422,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import sys
 import tarfile
 import zlib
@@ -4291,6 +4292,233 @@ def endpoint_audit_dir(root):
     return endpoint_audit(files)
 
 
+# The first Peer Endpoint line. The value is [ipv6]:port or host:port. The
+# suffix keeps a trailing comment. This is the only line a host switch rewrites.
+_ENDPOINT_LINE = re.compile(
+    r'(?P<prefix>[ \t]*Endpoint[ \t]*=[ \t]*)'
+    r'(?P<value>\[[0-9A-Fa-f:.]+\]:[0-9]{1,5}|[^[\]\s:#]+:[0-9]{1,5})'
+    r'(?P<suffix>[ \t]*(?:#.*)?)')
+_ENDPOINT_HOSTNAME = re.compile(
+    r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*')
+
+
+def read_nul_paths(path):
+    data = Path(path).read_bytes()
+    if not data:
+        return []
+    if data[-1:] != b'\0':
+        raise StatePolicyError('truncated profile list')
+    paths = []
+    for part in data.split(b'\0')[:-1]:
+        if not part or b'\n' in part or b'\r' in part:
+            raise StatePolicyError('refusing an unsafe profile path')
+        text = part.decode('utf-8', 'strict')
+        if not text.startswith('/') or text != os.path.normpath(text):
+            raise StatePolicyError('refusing an unsafe profile path')
+        paths.append(text)
+    return paths
+
+
+def read_profile_bytes(path):
+    # O_NOFOLLOW refuses a symlink at the final component. Do not read the target.
+    try:
+        info = os.lstat(path)
+    except OSError:
+        raise StatePolicyError('client profile is not readable') from None
+    if stat.S_ISLNK(info.st_mode):
+        raise StatePolicyError('symlink client profile')
+    if not stat.S_ISREG(info.st_mode):
+        raise StatePolicyError('client profile is not a regular file')
+    if info.st_size > 1024 * 1024:
+        raise StatePolicyError('client profile is too large')
+    try:
+        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        raise StatePolicyError('client profile is not readable') from None
+    try:
+        data = os.read(handle, info.st_size + 1)
+    finally:
+        os.close(handle)
+    if len(data) > 1024 * 1024:
+        raise StatePolicyError('client profile is too large')
+    return data
+
+
+def _line_core(line):
+    if line.endswith('\r\n'):
+        return line[:-2], line[-2:]
+    if line.endswith('\n') or line.endswith('\r'):
+        return line[:-1], line[-1:]
+    return line, ''
+
+
+def parse_profile(path, data):
+    try:
+        text = data.decode('utf-8')
+    except UnicodeError:
+        raise StatePolicyError('client profile is not valid text') from None
+    if '\x00' in text:
+        raise StatePolicyError('client profile is not valid text')
+    lines = text.splitlines(keepends=True)
+    # splitlines drops a trailing break only when keepends is false. Rejoining
+    # these lines is the original text, so a rewrite can change one line.
+    if ''.join(lines) != text:
+        raise StatePolicyError('client profile is not valid text')
+    in_peer = False
+    endpoint_index = None
+    for index, line in enumerate(lines):
+        core, _ending = _line_core(line)
+        stripped = core.split('#', 1)[0].strip()
+        if stripped.startswith('['):
+            in_peer = stripped == '[Peer]'
+            continue
+        if not in_peer:
+            continue
+        if re.fullmatch(r'Endpoint\s*=\s*(.+)', stripped) is None:
+            continue
+        endpoint_index = index
+        break
+    parsed = None
+    match = None
+    if endpoint_index is not None:
+        core, _ending = _line_core(lines[endpoint_index])
+        match = _ENDPOINT_LINE.fullmatch(core)
+        if match is not None:
+            parsed = endpoint_host(match.group('value').strip())
+            if parsed is None:
+                match = None
+    return dict(path=path, name=Path(path).name[:-5] if path.endswith('.conf') else Path(path).name,
+                base=Path(path).name, lines=lines, endpoint_index=endpoint_index, parsed=parsed, match=match)
+
+
+def comparable_profile(record):
+    # The Endpoint line itself may differ (host or port). Every other line must match.
+    lines = record['lines']
+    index = record['endpoint_index']
+    if index is None:
+        return tuple(lines)
+    return tuple(lines[:index] + ['<endpoint>\n'] + lines[index + 1:])
+
+
+def rewrite_endpoint_line(record, hostname):
+    if record['parsed'] is None or record['match'] is None:
+        return None
+    line = record['lines'][record['endpoint_index']]
+    core, ending = _line_core(line)
+    match = record['match']
+    if match.group(0) != core:
+        raise StatePolicyError('client profile endpoint could not be rewritten safely')
+    value = match.group('value')
+    if value.startswith('['):
+        _host, sep, port = value.partition(']:')
+        if not sep:
+            raise StatePolicyError('client profile endpoint could not be rewritten safely')
+    else:
+        _host, sep, port = value.rpartition(':')
+        if not sep:
+            raise StatePolicyError('client profile endpoint could not be rewritten safely')
+    new_core = match.group('prefix') + hostname + ':' + port + match.group('suffix')
+    new_line = new_core + ending
+    lines = list(record['lines'])
+    index = record['endpoint_index']
+    lines[index] = new_line
+    # Every line except that Endpoint line stays the original string.
+    if record['lines'][:index] + record['lines'][index + 1:] != lines[:index] + lines[index + 1:]:
+        raise StatePolicyError('client profile endpoint could not be rewritten safely')
+    if new_line != line:
+        host = record['parsed'][0]
+        needle = '[' + host + ']' if value.startswith('[') else host
+        if core.replace(needle, hostname, 1) != new_core:
+            raise StatePolicyError('client profile endpoint could not be rewritten safely')
+    return ''.join(lines).encode('utf-8'), core, new_core
+
+
+def endpoint_hostname_ok(value):
+    if not value or ':' in value or '[' in value or ']' in value or re.fullmatch(r'[0-9.]+', value):
+        return False
+    return len(value) <= 253 and _ENDPOINT_HOSTNAME.fullmatch(value) is not None
+
+
+def write_private_exact(directory, name, data):
+    dest = Path(directory) / name
+    if dest.parent != Path(directory):
+        raise StatePolicyError('endpoint output path escaped its directory')
+    handle = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        view = data
+        while view:
+            written = os.write(handle, view)
+            if written <= 0:
+                raise StatePolicyError('cannot stage a rewritten profile')
+            view = view[written:]
+    finally:
+        os.close(handle)
+    return dest
+
+
+def endpoint_plan(regular_list, symlink_list, out_dir, action, hostname, current_pub):
+    if action not in ('audit', 'rewrite'):
+        raise StatePolicyError('unknown endpoint operation')
+    symlinks = read_nul_paths(symlink_list)
+    if action == 'rewrite' and symlinks:
+        # Do not open any profile, symlink or regular, once a symlink is in the set.
+        print(json.dumps(dict(refused='symlink', symlinks=symlinks, hostname=0, ip_literal=0,
+                              clients=[], conflicts=[], files=[], params_from=current_pub, params_host=hostname),
+                         sort_keys=True))
+        return
+    if action == 'rewrite':
+        if not endpoint_hostname_ok(hostname):
+            raise StatePolicyError('hostname refused')
+        out_root = Path(out_dir)
+        if out_root.is_symlink() or not out_root.is_dir():
+            raise StatePolicyError('endpoint output directory is unsafe')
+    records = []
+    for path in read_nul_paths(regular_list):
+        records.append(parse_profile(path, read_profile_bytes(path)))
+    conflicts = []
+    grouped = {}
+    for record in records:
+        grouped.setdefault(record['base'], []).append(record)
+    for base, group in grouped.items():
+        bodies = {comparable_profile(record) for record in group}
+        if len(bodies) > 1:
+            conflicts.append(dict(name=base, files=sorted(record['path'] for record in group)))
+    if action == 'rewrite' and conflicts:
+        print(json.dumps(dict(refused='conflict', symlinks=symlinks, hostname=0, ip_literal=0,
+                              clients=[], conflicts=conflicts, files=[], params_from=current_pub, params_host=hostname),
+                         sort_keys=True))
+        return
+    counts = {'hostname': 0, 'ip_literal': 0}
+    clients = {}
+    file_rows = []
+    for number, record in enumerate(sorted(records, key=lambda item: item['path'])):
+        parsed = record['parsed']
+        row = dict(path=record['path'], status='skipped', out=None, old_line=None, new_line=None)
+        if parsed is not None:
+            host, kind = parsed
+            counts[kind] += 1
+            key = (record['name'], host, kind)
+            clients.setdefault(key, []).append(record['path'])
+            if action == 'rewrite':
+                rewritten, old_line, new_line = rewrite_endpoint_line(record, hostname)
+                row['old_line'] = old_line
+                row['new_line'] = new_line
+                original = ''.join(record['lines']).encode('utf-8')
+                if rewritten != original:
+                    write_private_exact(out_dir, str(number), rewritten)
+                    row['status'] = 'update'
+                    row['out'] = str(number)
+                else:
+                    row['status'] = 'unchanged'
+        file_rows.append(row)
+    client_rows = [dict(name=name, host=host, kind=kind, files=sorted(paths))
+                   for (name, host, kind), paths in sorted(clients.items())]
+    print(json.dumps(dict(refused=None, symlinks=sorted(symlinks), hostname=counts['hostname'],
+                          ip_literal=counts['ip_literal'], clients=client_rows, conflicts=conflicts,
+                          files=file_rows, params_from=current_pub, params_host=hostname if action == 'rewrite' else ''),
+                     sort_keys=True))
+
+
 def emit_plan(report):
     for warning in report['warnings']:
         print('WARNING: ' + warning, file=sys.stderr)
@@ -4438,6 +4666,12 @@ def main():
         print(audit['hostname'])
         print(audit['ip_literal'])
         print(audit['warning'] or '')
+    elif mode == 'endpoint-plan':
+        # path is the NUL-terminated regular-file list. args are the symlink
+        # list, the private output directory, audit|rewrite, the new hostname
+        # and the current SERVER_PUB_IP. Rewritten bytes stay in that directory.
+        require(len(args) >= 5, 'endpoint plan arguments')
+        endpoint_plan(path, args[0], args[1], args[2], args[3], args[4])
     elif mode == 'awg-port':
         print(awg_listen_port((Path(path) / 'vpn/server.conf').read_bytes()) or '')
     elif mode == 'proxy-plan':
@@ -5691,6 +5925,250 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 		echo 'Existing import re-reconciled without reinstalling; VPN remains stopped/disabled.'
 	fi
 }
+
+# A hostname only. awgStateNormalizePubHost also accepts IP literals; the switch
+# refuses those before calling it, because the point is to stop depending on an IP.
+function awgStateEndpointRequireHostname() {
+	local VALUE="$1" NORMALIZED
+	if [[ "${VALUE}" == *:* || "${VALUE}" == *'['* || "${VALUE}" == *']'* || "${VALUE}" =~ ^[0-9.]+$ ]]; then
+		echo 'ERROR: --set-endpoint-host accepts a hostname, not an IP address.' >&2
+		return 1
+	fi
+	NORMALIZED="$(awgStateNormalizePubHost "${VALUE}")" || {
+		echo 'ERROR: --set-endpoint-host requires a DNS hostname.' >&2
+		return 1
+	}
+	if [[ -z "${NORMALIZED}" || "${NORMALIZED}" == *:* || "${NORMALIZED}" =~ ^[0-9.]+$ ]]; then
+		echo 'ERROR: --set-endpoint-host accepts a hostname, not an IP address.' >&2
+		return 1
+	fi
+	printf '%s\n' "${NORMALIZED}"
+}
+
+# Same files as collectAwgClientConfigCandidates, plus symlink profiles.
+# collect skips symlinks. The switch refuses them instead of following them.
+function awgStateEndpointProfileList() {
+	local REGULAR="$1" SYMLINKS="$2"
+	local -a SEARCH_ROOTS=()
+	local ROOT CANDIDATE CANONICAL
+	local -A SEEN=()
+	local NULLGLOB_WAS_SET=0
+	awgStateClientConfigSearchRoots SEARCH_ROOTS || return 1
+	: >"${REGULAR}" || return 1
+	: >"${SYMLINKS}" || return 1
+	shopt -q nullglob && NULLGLOB_WAS_SET=1
+	shopt -s nullglob
+	for ROOT in "${SEARCH_ROOTS[@]}"; do
+		[[ -d "${ROOT}" && ! -L "${ROOT}" ]] || continue
+		for CANDIDATE in "${ROOT}/${SERVER_AWG_NIC}-client-"*.conf; do
+			if [[ -L "${CANDIDATE}" ]]; then
+				printf '%s\0' "${CANDIDATE}" >>"${SYMLINKS}"
+				continue
+			fi
+			[[ -f "${CANDIDATE}" ]] || continue
+			CANONICAL="$(readlink -f -- "${CANDIDATE}" 2>/dev/null || true)"
+			[[ -n "${CANONICAL}" && -z "${SEEN[${CANONICAL}]+present}" ]] || continue
+			[[ -f "${CANONICAL}" && ! -L "${CANONICAL}" ]] || continue
+			SEEN["${CANONICAL}"]=1
+			printf '%s\0' "${CANONICAL}" >>"${REGULAR}"
+		done
+	done
+	(( NULLGLOB_WAS_SET )) || shopt -u nullglob
+}
+
+# Replace one regular profile. The temporary file is in the same directory so
+# the rename is atomic, and it keeps the destination's mode and, as root, owner.
+function awgStateInstallRewrittenProfile() {
+	local SRC="$1" DEST="$2" TMP
+	[[ -f "${SRC}" && ! -L "${SRC}" && -f "${DEST}" && ! -L "${DEST}" ]] || return 1
+	TMP="$(mktemp -- "${DEST%/*}/.awg-endpoint.XXXXXX")" || return 1
+	if ! cp -f -- "${SRC}" "${TMP}"; then
+		rm -f -- "${TMP}"
+		return 1
+	fi
+	chmod --reference="${DEST}" "${TMP}" || { rm -f -- "${TMP}"; return 1; }
+	if [[ "${EUID}" -eq 0 ]]; then
+		chown --reference="${DEST}" "${TMP}" || { rm -f -- "${TMP}"; return 1; }
+	fi
+	[[ -f "${DEST}" && ! -L "${DEST}" ]] || { rm -f -- "${TMP}"; return 1; }
+	if ! mv -fT -- "${TMP}" "${DEST}"; then
+		rm -f -- "${TMP}"
+		return 1
+	fi
+}
+
+# User-facing text from a plan. Kinds: audit, diff, result, symlink, conflict.
+# The plan's file rows carry Endpoint lines only, never the rest of a profile.
+function awgStateEndpointPrintPlan() {
+	local PLAN="$1" KIND="$2"
+	python3 -I - "${PLAN}" "${KIND}" <<'AWG_ENDPOINT_PY'
+import json, sys
+plan = json.load(open(sys.argv[1], encoding='utf-8'))
+kind = sys.argv[2]
+if kind == 'audit':
+    public = dict(hostname=plan['hostname'], ip_literal=plan['ip_literal'],
+                  clients=plan['clients'], symlinks=plan.get('symlinks') or [])
+    print(json.dumps(public, indent=2, sort_keys=True))
+elif kind == 'diff':
+    updates = [item for item in plan['files'] if item.get('status') == 'update']
+    if plan.get('params_from') != plan.get('params_host'):
+        sys.stdout.write('SERVER_PUB_IP %s -> %s\n' % (plan.get('params_from') or '', plan.get('params_host') or ''))
+    if not updates and plan.get('params_from') == plan.get('params_host'):
+        print('No Endpoint lines need to change.')
+    for item in updates:
+        print('--- ' + item['path'])
+        print('+++ ' + item['path'])
+        print('-' + item['old_line'])
+        print('+' + item['new_line'])
+elif kind == 'result':
+    for item in plan['files']:
+        label = 'updated' if item.get('status') == 'update' else item.get('status')
+        print('%s %s' % (label, item['path']))
+    if plan.get('params_from') != plan.get('params_host'):
+        sys.stdout.write('SERVER_PUB_IP %s -> %s\n' % (plan.get('params_from') or '', plan.get('params_host') or ''))
+    elif plan.get('params_host'):
+        print('SERVER_PUB_IP %s' % plan['params_host'])
+elif kind == 'symlink':
+    for path in plan.get('symlinks') or []:
+        print(path)
+elif kind == 'conflict':
+    for item in plan.get('conflicts') or []:
+        print(item.get('name', ''))
+        for path in item.get('files') or []:
+            print('  ' + path)
+else:
+    sys.exit(1)
+AWG_ENDPOINT_PY
+}
+
+# Read-only audit, or a one-time Endpoint host switch. Does not regenerate keys.
+function awgStateEndpointCommand() (
+	set +x
+	umask 077
+	local ACTION="$1" HOST_ARG="${2:-}" DRY="${3:-}" HOST="" WORK DECISION FAILED=0
+	local STATUS PROFILE OUT_NAME PARAMS TMP PY_ACTION="audit"
+	isRoot || exit 1
+	checkOS
+	[[ "${OS:-}" == debian || "${OS:-}" == ubuntu ]] || {
+		echo 'ERROR: endpoint changes support Debian/Ubuntu (and their supported derivatives) only.' >&2
+		exit 1
+	}
+	if [[ "${ACTION}" == set ]]; then
+		HOST="$(awgStateEndpointRequireHostname "${HOST_ARG}")" || exit 1
+	elif [[ "${ACTION}" != audit ]]; then
+		echo 'ERROR: unknown endpoint operation.' >&2
+		exit 1
+	fi
+	command -v python3 >/dev/null 2>&1 || {
+		echo 'ERROR: python3 is required.' >&2
+		exit 1
+	}
+	WORK="$(awgStateWorkDir)" || exit 1
+	[[ -n "${WORK}" && "${WORK}" == /* && "${WORK}" != / && -d "${WORK}" && ! -L "${WORK}" ]] || {
+		echo 'ERROR: refusing an unsafe staging directory.' >&2
+		exit 1
+	}
+	trap 'rm -rf -- "${WORK}"; releaseClientLifecycleLock' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	trap 'exit 129' HUP
+	acquireClientLifecycleLock || exit 1
+	awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || {
+		echo 'ERROR: unsafe source params path.' >&2
+		exit 1
+	}
+	awgStateReadParams "${AMNEZIAWG_DIR}/params" "${WORK}/records" || exit 1
+	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	[[ -f "${SERVER_AWG_CONF}" && ! -L "${SERVER_AWG_CONF}" ]] || {
+		echo 'ERROR: server config is missing.' >&2
+		exit 1
+	}
+	[[ "${SERVER_AWG_NIC}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}$ ]] || {
+		echo 'ERROR: refusing unsafe interface name.' >&2
+		exit 1
+	}
+	mkdir -p -- "${WORK}/out" || exit 1
+	chmod 700 "${WORK}/out" || exit 1
+	awgStateEndpointProfileList "${WORK}/regular" "${WORK}/symlinks" || exit 1
+	[[ "${ACTION}" == set ]] && PY_ACTION="rewrite"
+	awgStateArchive endpoint-plan "${WORK}/regular" "${WORK}/symlinks" "${WORK}/out" "${PY_ACTION}" "${HOST}" "${SERVER_PUB_IP}" >"${WORK}/plan.json" || exit 1
+	DECISION="$(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); print(d.get("refused") or "ok")' "${WORK}/plan.json")" || exit 1
+	if [[ "${DECISION}" != ok ]]; then
+		releaseClientLifecycleLock
+		if [[ "${DECISION}" == symlink ]]; then
+			echo 'ERROR: a client profile is a symlink; not following it and not changing any profile.' >&2
+		elif [[ "${DECISION}" == conflict ]]; then
+			echo 'ERROR: client profile copies disagree outside the Endpoint line; nothing was changed.' >&2
+		else
+			echo 'ERROR: endpoint update refused.' >&2
+		fi
+		awgStateEndpointPrintPlan "${WORK}/plan.json" "${DECISION}" >&2 || true
+		exit 1
+	fi
+	if [[ "${ACTION}" == audit ]]; then
+		# Drop the lock before printing. A blocked reader must not stall client changes.
+		releaseClientLifecycleLock
+		awgStateEndpointPrintPlan "${WORK}/plan.json" audit
+		exit $?
+	fi
+	if [[ "${DRY}" == --dry-run ]]; then
+		releaseClientLifecycleLock
+		awgStateEndpointPrintPlan "${WORK}/plan.json" diff
+		exit $?
+	fi
+	python3 -I -c 'import json,sys
+d=json.load(open(sys.argv[1], encoding="utf-8"))
+out=open(sys.argv[2], "wb")
+for item in d["files"]:
+    out.write((item["status"] + "\0" + item["path"] + "\0" + (item.get("out") or "") + "\0").encode())
+' "${WORK}/plan.json" "${WORK}/actions" || exit 1
+	while IFS= read -r -d '' STATUS; do
+		IFS= read -r -d '' PROFILE || { echo 'ERROR: truncated endpoint plan.' >&2; exit 1; }
+		IFS= read -r -d '' OUT_NAME || { echo 'ERROR: truncated endpoint plan.' >&2; exit 1; }
+		case "${STATUS}" in
+			update)
+				[[ -n "${OUT_NAME}" && "${OUT_NAME}" != */* && "${OUT_NAME}" != *..* ]] || { FAILED=1; break; }
+				awgStateInstallRewrittenProfile "${WORK}/out/${OUT_NAME}" "${PROFILE}" || { FAILED=1; break; }
+				;;
+			unchanged|skipped) ;;
+			*) FAILED=1; break ;;
+		esac
+	done <"${WORK}/actions"
+	if ((FAILED)); then
+		echo 'ERROR: endpoint update stopped after a partial write. Rerun the same command to finish; profiles already updated stay on the new hostname.' >&2
+		exit 1
+	fi
+	if [[ "${SERVER_PUB_IP}" != "${HOST}" ]]; then
+		PARAMS="${AMNEZIAWG_DIR}/params"
+		[[ -f "${PARAMS}" && ! -L "${PARAMS}" ]] || {
+			echo 'ERROR: params is missing. Rerun the same command to finish.' >&2
+			exit 1
+		}
+		TMP="$(mktemp -- "${AMNEZIAWG_DIR}/.params.awg-endpoint.XXXXXX")" || exit 1
+		SERVER_PUB_IP="${HOST}"
+		if ! serializeParams "${TMP}"; then
+			rm -f -- "${TMP}"
+			echo 'ERROR: could not write params. Client profiles that were updated already use the new hostname. Rerun the same command to finish.' >&2
+			exit 1
+		fi
+		chmod --reference="${PARAMS}" "${TMP}" || { rm -f -- "${TMP}"; exit 1; }
+		if [[ "${EUID}" -eq 0 ]]; then
+			chown --reference="${PARAMS}" "${TMP}" || { rm -f -- "${TMP}"; exit 1; }
+		fi
+		[[ -f "${PARAMS}" && ! -L "${PARAMS}" ]] || {
+			rm -f -- "${TMP}"
+			echo 'ERROR: params changed during the update. Rerun the same command to finish.' >&2
+			exit 1
+		}
+		if ! mv -fT -- "${TMP}" "${PARAMS}"; then
+			rm -f -- "${TMP}"
+			echo 'ERROR: could not replace params. Rerun the same command to finish.' >&2
+			exit 1
+		fi
+	fi
+	releaseClientLifecycleLock
+	awgStateEndpointPrintPlan "${WORK}/plan.json" result
+)
 
 function awgStateCommand() (
 	# xtrace must not echo imported private keys during printf -v/serialization.
@@ -14407,34 +14885,40 @@ function rewriteAwgProtocolConfig() {
 	) >"${OUTPUT_FILE}" || return 1
 }
 
-# Return every regular, non-symlink client config in the known installer/web
-# locations. Search roots come from managed server state, the system account
-# database, and root-controlled web configuration.
-function collectAwgClientConfigCandidates() {
+# Search roots for installer-managed client profiles: the managed clients
+# directory, /root, /home/*, each managed client's resolved home (NSS/LDAP
+# homes such as /srv/alice), and the panel config directory. Endpoint audit
+# uses this same list. collectAwgClientConfigCandidates still skips symlinks.
+function awgStateClientConfigSearchRoots() {
 	local OUTPUT_NAME="$1"
-	local -n OUTPUT_REF="${OUTPUT_NAME}"
-	local -a SEARCH_ROOTS=()
-	local ROOT CANDIDATE CANONICAL PANEL_DIR HOME_PATH CLIENT_NAME
-	local NULLGLOB_WAS_SET=0
-	local -A SEEN_PATHS=()
-
-	OUTPUT_REF=()
-	SEARCH_ROOTS+=("${AMNEZIAWG_DIR}/clients" "/root")
+	local -n ROOTS_REF="${OUTPUT_NAME}"
+	local HOME_PATH CLIENT_NAME PANEL_DIR
+	ROOTS_REF=()
+	ROOTS_REF+=("${AMNEZIAWG_DIR}/clients" "/root")
 	for HOME_PATH in /home/*; do
-		[[ -d "${HOME_PATH}" && ! -L "${HOME_PATH}" ]] && SEARCH_ROOTS+=("${HOME_PATH}")
+		[[ -d "${HOME_PATH}" && ! -L "${HOME_PATH}" ]] && ROOTS_REF+=("${HOME_PATH}")
 	done
-	# getHomeDirForClient supports NSS/LDAP accounts whose homes are outside
-	# /home. Resolve each root-controlled managed marker so configs originally
-	# written to paths such as /srv/alice remain part of an all-client migration.
 	while IFS= read -r CLIENT_NAME; do
 		[[ -n "${CLIENT_NAME}" ]] || continue
 		HOME_PATH="$(getHomeDirForClient "${CLIENT_NAME}")" || return 1
 		if [[ "${HOME_PATH}" == /* && -d "${HOME_PATH}" && ! -L "${HOME_PATH}" ]]; then
-			SEARCH_ROOTS+=("${HOME_PATH}")
+			ROOTS_REF+=("${HOME_PATH}")
 		fi
 	done < <(grep -E '^### Client [A-Za-z0-9_-]{1,15}$' "${SERVER_AWG_CONF}" | cut -d ' ' -f 3)
 	PANEL_DIR="$(resolveWebPanelConfigDir 2>/dev/null || true)"
-	[[ -z "${PANEL_DIR}" ]] || SEARCH_ROOTS+=("${PANEL_DIR}")
+	[[ -z "${PANEL_DIR}" ]] || ROOTS_REF+=("${PANEL_DIR}")
+}
+
+function collectAwgClientConfigCandidates() {
+	local OUTPUT_NAME="$1"
+	local -n OUTPUT_REF="${OUTPUT_NAME}"
+	local -a SEARCH_ROOTS=()
+	local ROOT CANDIDATE CANONICAL
+	local NULLGLOB_WAS_SET=0
+	local -A SEEN_PATHS=()
+
+	OUTPUT_REF=()
+	awgStateClientConfigSearchRoots SEARCH_ROOTS || return 1
 
 	shopt -q nullglob && NULLGLOB_WAS_SET=1
 	shopt -s nullglob
@@ -16675,9 +17159,30 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	#     journal retries only the unfinished companion steps.
 	#   amneziawg-install.sh --purge-state-journal <manifest-sha256> [--force]
 	#   amneziawg-install.sh --reset-state-journal <manifest-sha256> --confirm-policy-replay
+	#   amneziawg-install.sh --audit-endpoints
+	#   amneziawg-install.sh --set-endpoint-host <hostname> [--dry-run]
+	#     Rewrites only the host in client Endpoint lines (and SERVER_PUB_IP).
+	#     Keys are not regenerated. Clients import the updated profile once;
+	#     after that, changing the hostname's DNS record is enough.
 	#
 	# Requires AmneziaWG to be already installed (params file must exist).
 	case "${1:-}" in
+		--audit-endpoints)
+			if [[ $# -ne 1 ]]; then
+				echo 'Usage: amneziawg-install.sh --audit-endpoints' >&2
+				exit 1
+			fi
+			awgStateEndpointCommand audit
+			exit $?
+			;;
+		--set-endpoint-host)
+			if [[ $# -ne 2 && ! ( $# -eq 3 && "${3:-}" == --dry-run ) ]] || [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+				echo 'Usage: amneziawg-install.sh --set-endpoint-host <hostname> [--dry-run]' >&2
+				exit 1
+			fi
+			awgStateEndpointCommand set "$2" "${3:-}"
+			exit $?
+			;;
 		--export-state|--inspect-state|--import-state|--activate-state)
 			if [[ $# -ne 2 && ! ( "$1" == --import-state && $# -eq 3 && "$3" == --dry-run ) && ! ( "$1" == --activate-state && $# -eq 3 && "$3" == --enable-at-boot ) ]] || [[ -z "${2:-}" || "${2:-}" == -* ]]; then
 				echo 'Usage: amneziawg-install.sh --export-state <file> | --inspect-state <file> | --import-state <file> [--dry-run] | --activate-state <file> [--enable-at-boot]' >&2
