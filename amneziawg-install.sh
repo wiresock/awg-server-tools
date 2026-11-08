@@ -3588,11 +3588,33 @@ def config(data, state=None, blocked=frozenset(), preserve_hooks=False, proxy=No
 
 
 def proxy_ports(data):
-    # (public listen port, backend port) of an archived/staged proxy.toml.
-    if data is None:
+    # (public listen port, backend port) for the VPN topology check only.
+    # A proxy.toml outside the installer's flat subset (single quotes, integer
+    # underscores, unknown keys the proxy ignores) must not block VPN
+    # export/import. The proxy step keeps the strict parse in proxy_toml.
+    if not data:
         return None
-    values = proxy_toml(data)
-    return socket_parts(values['listen'])[1], socket_parts(values['backend'])[1]
+    try:
+        text = data.decode('utf-8')
+    except UnicodeError:
+        return None
+    found = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        match = re.fullmatch(r'(listen|backend)\s*=\s*(?:"([^"\\]*)"|\'([^\'\\]*)\')\s*(?:#.*)?', stripped)
+        if match is None:
+            continue
+        name = match.group(1)
+        if name in found:
+            return None  # Do not guess which duplicate the proxy would keep.
+        value = match.group(2) if match.group(2) is not None else match.group(3)
+        try:
+            found[name] = socket_parts(value)[1]
+        except ValueError:
+            return None
+    if 'listen' not in found or 'backend' not in found:
+        return None
+    return found['listen'], found['backend']
 
 
 def listen_port_matches(listen, server_port, proxy):
@@ -3815,11 +3837,41 @@ def panel_plan(root, migrations_dir=None):
                 queued_mail_to_cancel=pending.get('queued', 0), sending_mail_to_mark_unknown=pending.get('sending', 0))
     plan['schema_newer_than_panel'] = bool(known and applied and applied[-1] > known[-1])
     plan['listen'] = (env or {}).get('AWG_WEB_LISTEN')
-    plan['listen_warning'] = listen_warning(plan['listen'])
+    own = set()
+    server_conf = root / 'vpn/server.conf'
+    if server_conf.is_file():
+        try:
+            own = interface_addresses(server_conf.read_bytes())
+        except (OSError, UnicodeError):
+            own = set()
+    plan['listen_warning'] = listen_warning(plan['listen'], own)
     return plan
 
 
-def listen_warning(listen):
+def interface_addresses(data):
+    # IPs from the VPN [Interface] Address lines. Companions run after the VPN
+    # is up, so the panel can bind these on the new host.
+    found = set()
+    in_interface = False
+    for line in data.decode('utf-8').splitlines():
+        stripped = line.split('#', 1)[0].strip()
+        if stripped.startswith('['):
+            in_interface = stripped == '[Interface]'
+            continue
+        if not in_interface:
+            continue
+        match = re.fullmatch(r'Address\s*=\s*(.+)', stripped)
+        if match is None:
+            continue
+        for part in match.group(1).split(','):
+            try:
+                found.add(ipaddress.ip_interface(part.strip()).ip)
+            except ValueError:
+                continue
+    return found
+
+
+def listen_warning(listen, own_addresses=()):
     # AWG_WEB_LISTEN is restored verbatim: a specific old-host address fails to bind.
     if not listen:
         return None
@@ -3828,7 +3880,7 @@ def listen_warning(listen):
         address = ipaddress.ip_address(host)
     except ValueError:
         return None
-    if address.is_loopback or address.is_unspecified:
+    if address.is_loopback or address.is_unspecified or address in own_addresses:
         return None
     return ('AWG_WEB_LISTEN binds the old host address %s; the restored panel fails to start unless this host has it. '
             'Edit the panel env after restore or use 127.0.0.1/0.0.0.0 on the old host before export.' % host)
@@ -3945,20 +3997,30 @@ def target_dir_ok(path, default, kind, approved=()):
 def proxy_toml(data):
     # The proxy config is flat `key = value` TOML (what the proxy installer
     # writes). Python 3.9/3.10 have no tomllib: parse only that subset and
-    # refuse anything else rather than guess.
+    # refuse anything else rather than guess. VPN export does not use this;
+    # a refusal here is the proxy step, and it names the key.
     values = {}
     for line in data.decode('utf-8').splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith('#'):
             continue
         match = re.fullmatch(r'([a-z_]+)\s*=\s*("([^"\\]*)"|true|false|[0-9]{1,12})\s*(#.*)?', stripped)
-        require(match is not None, 'unsupported proxy.toml line')
+        if match is None:
+            key_match = re.match(r'([A-Za-z_][A-Za-z0-9_]{0,63})\s*=', stripped)
+            if key_match:
+                raise StatePolicyError('unsupported proxy.toml value for key %s' % key_match.group(1))
+            raise StatePolicyError('unsupported proxy.toml line')
         name, raw = match.group(1), match.group(2)
-        require(name in PROXY_KEYS and name not in values, 'unknown or duplicate proxy.toml key')
+        if name not in PROXY_KEYS:
+            raise StatePolicyError('unknown proxy.toml key %s' % name)
+        if name in values:
+            raise StatePolicyError('duplicate proxy.toml key %s' % name)
         value = match.group(3) if raw.startswith('"') else (raw == 'true' if raw in ('true', 'false') else int(raw))
-        require(type(value) is PROXY_KEYS[name], 'proxy.toml type mismatch')
+        if type(value) is not PROXY_KEYS[name]:
+            raise StatePolicyError('proxy.toml type mismatch for key %s' % name)
         values[name] = value
-    require('listen' in values and 'backend' in values, 'proxy.toml needs listen and backend')
+    if 'listen' not in values or 'backend' not in values:
+        raise StatePolicyError('proxy.toml needs listen and backend')
     return values
 
 

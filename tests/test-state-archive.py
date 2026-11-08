@@ -2394,7 +2394,7 @@ awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 13
         cases = {
             'existing-proxy': ('touch "$ROOT/unit"', {}, 'already installed'),
             'backend-mismatch': ('', {'listen_port': 51820}, 'is not the proxy backend port'),
-            'unsupported-toml': ('', {'toml': '[table]\nlisten = "0.0.0.0:1"\n'}, 'invalid or unsupported'),
+            'unsupported-toml': ('', {'toml': '[table]\nlisten = "0.0.0.0:1"\n'}, 'unsupported proxy.toml line'),
             'no-installer': ('awgStateProxyInstaller() { return 1; }', {}, 'was not found next to this script'),
             'installer-fails': ('export FAIL_INSTALLER=1', {}, '--non-interactive failed'),
         }
@@ -2580,6 +2580,64 @@ write_proxy_config
         make_tar(self.tar, files)
         self.assertIn(b'no amneziawg-proxy config explains it', self.run_helper('verify', ok=False).stderr)
 
+    def test_non_subset_proxy_toml_does_not_block_vpn_export(self):
+        # Valid TOML the proxy accepts, and an unknown key it ignores, must not
+        # fail VPN export/import. The proxy step still refuses and names the key.
+        cases = {
+            'single-quotes': ("listen = '0.0.0.0:51820'\nbackend = '127.0.0.1:51821'\n", 'listen'),
+            'underscore': ('listen = "0.0.0.0:51820"\nbackend = "127.0.0.1:51821"\nmax_sessions = 10_000\n', 'max_sessions'),
+            'unknown-key': ('listen = "0.0.0.0:51820"\nbackend = "127.0.0.1:51821"\nlog_level = "info"\n', 'log_level'),
+        }
+        for name, (toml, key) in cases.items():
+            with self.subTest(name=name):
+                stage = self.root / name
+                (stage / 'vpn').mkdir(parents=True)
+                (stage / 'proxy').mkdir()
+                (stage / 'vpn/params').write_bytes(self.files['vpn/params'])
+                (stage / 'vpn/server.conf').write_bytes(
+                    self.files['vpn/server.conf'].replace(b'ListenPort = 51820', b'ListenPort = 51821'))
+                (stage / 'proxy/proxy.toml').write_text(toml)
+                self.run_helper('export-check', stage)
+                packed = self.root / (name + '.tar.gz')
+                self.run_helper('pack', stage, packed, 'awg-fixture')
+                self.run_helper('verify', packed)
+                dest = self.root / (name + '-unpacked')
+                self.run_helper('unpack', packed, dest)
+                self.run_helper('prepare', dest)
+                self.assertIn('ListenPort = 51821', (dest / 'interface.conf').read_text())
+                inspected = self.run_helper('inspect', packed, ok=False)
+                self.assertIn(key.encode(), inspected.stderr)
+                self.assertNotIn(b'invalid or unsupported', inspected.stderr)
+                # The same file in the direct topology exports too.
+                (stage / 'vpn/server.conf').write_bytes(self.files['vpn/server.conf'])
+                self.run_helper('export-check', stage)
+                root = self.root / (name + '-restore')
+                root.mkdir()
+                self.proxy_stage(root, toml=toml, meta=dict(config_path=str(root / 'p/proxy.toml'),
+                                                            data_dir=str(root / 'd'), install_dir=str(root / 'b')))
+                result = self.run_proxy(root, r"""
+if awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ ! -e "$ROOT/installer.runs" ]] || exit 11
+""")
+                out = (result.stdout + result.stderr).decode()
+                self.assertEqual(result.returncode, 0, out)
+                self.assertIn(key, out)
+                self.assertNotIn('invalid or unsupported', out)
+        # Unreadable listen/backend: direct export still proceeds; a moved
+        # ListenPort fails with the explicit topology error, not a generic one.
+        stage = self.root / 'unreadable'
+        (stage / 'vpn').mkdir(parents=True)
+        (stage / 'proxy').mkdir()
+        (stage / 'vpn/params').write_bytes(self.files['vpn/params'])
+        (stage / 'vpn/server.conf').write_bytes(self.files['vpn/server.conf'])
+        (stage / 'proxy/proxy.toml').write_text('not toml\n')
+        self.run_helper('export-check', stage)
+        (stage / 'vpn/server.conf').write_bytes(
+            self.files['vpn/server.conf'].replace(b'ListenPort = 51820', b'ListenPort = 51821'))
+        refused = self.run_helper('export-check', stage, ok=False)
+        self.assertIn(b'no amneziawg-proxy config explains it', refused.stderr)
+        self.assertNotIn(b'invalid or unsupported', refused.stderr)
+
     def test_direct_export_without_proxy_is_schema_1(self):
         result = self.export_source(51820, proxy=False)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
@@ -2709,6 +2767,18 @@ if awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10
             (panel / 'stage/web/env.conf').write_text('AUTH_PASSWORD_HASH=$argon2id$v=19$x\nAWG_WEB_LISTEN=%s\n' % listen)
             result = self.run_panel(panel, 'awgStatePanelPlan "$ROOT/stage"')
             self.assertNotIn(b'AWG_WEB_LISTEN binds', result.stderr, listen)
+        # The VPN's own Interface addresses exist once the VPN (restored first) is up.
+        (panel / 'stage/vpn').mkdir()
+        (panel / 'stage/vpn/server.conf').write_bytes(self.files['vpn/server.conf'].replace(
+            b'Address = 10.66.66.1/24', b'Address = 10.66.66.1/24, fd42:42:42::1/64'))
+        for listen in ('10.66.66.1:8080', '[fd42:42:42::1]:8080'):
+            (panel / 'stage/web/env.conf').write_text('AUTH_PASSWORD_HASH=$argon2id$v=19$x\nAWG_WEB_LISTEN=%s\n' % listen)
+            result = self.run_panel(panel, 'awgStatePanelPlan "$ROOT/stage"')
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertNotIn(b'AWG_WEB_LISTEN binds', result.stderr, listen)
+        (panel / 'stage/web/env.conf').write_text('AUTH_PASSWORD_HASH=$argon2id$v=19$x\nAWG_WEB_LISTEN=203.0.113.8:8080\n')
+        result = self.run_panel(panel, 'awgStatePanelPlan "$ROOT/stage"')
+        self.assertIn(b'AWG_WEB_LISTEN binds the old host address 203.0.113.8', result.stderr)
 
     def test_panel_health_ignores_http_proxy_env(self):
         # m3: an http_proxy pointing at a dead port must not break the local check.

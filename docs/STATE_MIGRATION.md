@@ -213,10 +213,11 @@ environment variable, like `SERVER_PUB_IP`). The Argon2 hash reaches the panel
 installer through `--password-hash-file` (a 0600 file in the RAM-backed work
 directory), never on its command line; `--password-hash HASH` remains for
 compatibility. `AWG_WEB_LISTEN` is restored verbatim: if it binds a specific
-old-host address (not loopback or a wildcard), the panel cannot bind on the
-new host and the restore fails its health check; dry-run and `--inspect-state`
-warn about this, so change it on the old host before export or edit the
-restored env.conf and rerun. Saved
+old-host address (not loopback, a wildcard, or an address on the archived
+`[Interface] Address` line, which exists once the VPN is up), the panel cannot
+bind on the new host and the restore fails its health check; dry-run and
+`--inspect-state` warn about this, so change it on the old host before export
+or edit the restored env.conf and rerun. Saved
 SMTP settings travel inside the DB. Remaining TODO: merging multiple env files
 or systemd `Environment=` directives, and restoring without the repository
 checkout (the only checkout-less path, `amneziawg-web.sh`/`amneziawg-proxy.sh`,
@@ -241,7 +242,11 @@ moves AWG's `ListenPort` to the backend port (51821); params are never edited.
 The archive verifier therefore accepts either a direct setup (`ListenPort ==
 SERVER_PORT`) or this proxy topology (archive has `proxy/proxy.toml`,
 `ListenPort` == proxy backend port and `SERVER_PORT` == proxy listen port);
-anything else fails export/verify with an explicit port error. On import the
+anything else fails export/verify with an explicit port error. That check
+reads only `listen` and `backend` (double or single quotes). A `proxy.toml`
+outside the installer's flat subset — integer underscores, an unknown key the
+proxy would ignore — does not block VPN export, verify, prepare or reconcile.
+The proxy restore step still requires that subset and names the key it refused. On import the
 server config keeps the backend `ListenPort`, the regenerated firewall hooks
 open only `SERVER_PORT` (the proxy's public port, as on the old host; the
 backend port is not opened, and the proxy installer adds no firewall rules),
