@@ -288,7 +288,10 @@ datetime = TestDatetime
         name = 'clients/awg0-client-phone.conf'
         files[name] = files[name].replace(b'[Interface]\n', b'[Interface]\nPreUp = touch /bad\n')
         make_tar(self.tar, files)
-        self.run_helper('verify', ok=False)
+        refused = self.run_helper('verify', ok=False)
+        self.assertIn(b'client/peer hooks unsupported', refused.stderr)
+        self.assertNotIn(b'touch', refused.stderr)
+        self.assertNotIn(b'invalid or unsupported', refused.stderr)
 
     def test_prepare_strips_hooks_preserves_keys_and_psks(self):
         dest = self.root / 'dest'
@@ -2758,6 +2761,110 @@ if awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10
         self.assertIn(b'will need a new profile after an IP ban', prepared.stderr)
         summary = self.run_helper('endpoint-summary', stage)
         self.assertEqual(summary.stdout.splitlines()[:2], [b'1', b'2'])
+
+    def test_endpoint_warning_precedes_encryption_and_count_failure_still_exports(self):
+        source = self.root / 'source'
+        (source / 'clients').mkdir(parents=True)
+        (source / 'params').write_bytes(self.files['vpn/params'])
+        (source / 'awg0.conf').write_bytes(self.files['vpn/server.conf'])
+        literal = self.files['clients/awg0-client-phone.conf'].replace(
+            b'Endpoint = vpn.example.test:51820', b'Endpoint = 203.0.113.7:51820')
+        (source / 'clients/awg0-client-phone.conf').write_bytes(literal)
+        (self.root / 'work/a').mkdir(parents=True)
+        (self.root / 'work/b').mkdir()
+        shell = r'''
+set -uo pipefail
+source "$1"
+ROOT="$2"
+AMNEZIAWG_DIR="$ROOT/source"
+AWG_STATE_PROXY_CONFIG="$ROOT/not-installed-proxy"
+acquireClientLifecycleLock() { return 0; }
+releaseClientLifecycleLock() { :; }
+awgStateTrustedPath() { return 0; }
+isWebPanelInstalled() { return 1; }
+collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=("$ROOT/source/clients/awg0-client-phone.conf"); }
+awg() { printf 'fixture-tools\n'; }
+age() {
+    # Snapshot the log age can see. Appending to order.log from here would
+    # be overwritten: the caller's stdout fd still owns that file's offset.
+    cp -- "$ROOT/order.log" "$ROOT/at-age.log" || return 80
+    grep -q 'Client endpoints in this archive: 0 hostname, 1 literal IP.' "$ROOT/at-age.log" || return 81
+    grep -q 'will need a new profile after an IP ban' "$ROOT/at-age.log" || return 82
+    grep -q 'Enter passphrase' "$ROOT/at-age.log" && return 83
+    grep -q 'Encrypted state archive created' "$ROOT/at-age.log" && return 84
+    printf 'AGE-STARTED\n' >"$ROOT/age-marker"
+    cat >"$3"
+}
+awgStateExport "$ROOT/warned.tar.gz" "$ROOT/work/a" >"$ROOT/order.log" 2>&1 || {
+    echo 'export-failed' >&2
+    cat "$ROOT/order.log" >&2
+    exit 10
+}
+[[ -f "$ROOT/age-marker" ]] || { echo 'age-did-not-start' >&2; cat "$ROOT/order.log" >&2; exit 11; }
+grep -q 'Encrypted state archive created' "$ROOT/order.log" || { echo 'no-success-line' >&2; exit 12; }
+# A broken counter does not change the exit status of an otherwise valid export.
+awgStateArchive() {
+    if [[ "$1" == endpoint-summary ]]; then return 9; fi
+    python3 "$ROOT/helper.py" "${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}" "$@"
+}
+age() { cat >"$3"; }
+awgStateExport "$ROOT/count-failed.tar.gz" "$ROOT/work/b" >"$ROOT/count.log" 2>&1 || exit 13
+grep -q 'could not count client endpoints; export will continue' "$ROOT/count.log" || exit 14
+[[ -f "$ROOT/count-failed.tar.gz" ]] || exit 15
+'''
+        result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertNotIn(KEY.encode(), (self.root / 'order.log').read_bytes())
+        self.run_helper('verify', self.root / 'warned.tar.gz')
+        self.run_helper('verify', self.root / 'count-failed.tar.gz')
+
+    def test_client_profile_refusals_happen_before_encryption(self):
+        source = self.root / 'source'
+        (source / 'clients').mkdir(parents=True)
+        (source / 'params').write_bytes(self.files['vpn/params'])
+        (source / 'awg0.conf').write_bytes(self.files['vpn/server.conf'])
+        client = source / 'clients/awg0-client-phone.conf'
+        client.write_bytes(self.files['clients/awg0-client-phone.conf'])
+        (self.root / 'work').mkdir()
+        shell = r'''
+set -uo pipefail
+source "$1"
+ROOT="$2"
+KIND="$3"
+AMNEZIAWG_DIR="$ROOT/source"
+AWG_STATE_PROXY_CONFIG="$ROOT/not-installed-proxy"
+acquireClientLifecycleLock() { return 0; }
+releaseClientLifecycleLock() { :; }
+awgStateTrustedPath() { return 0; }
+isWebPanelInstalled() { return 1; }
+collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=("$ROOT/source/clients/awg0-client-phone.conf"); }
+awg() { printf 'fixture-tools\n'; }
+age() { touch "$ROOT/age-ran"; cat >"$3"; }
+rm -f "$ROOT/age-ran"
+awgStateExport "$ROOT/refused-$KIND" "$ROOT/work/$KIND"
+status=$?
+[[ "$status" -ne 0 && ! -e "$ROOT/age-ran" && ! -e "$ROOT/refused-$KIND" ]] || exit 10
+'''
+        base = self.files['clients/awg0-client-phone.conf']
+        cases = {
+            'hook': (base.replace(b'[Interface]\n', b'[Interface]\nPreUp = touch /bad\n'),
+                     b'client/peer hooks unsupported'),
+            'listen-addr': (base.replace(b'Address = 10.66.66.2/32\n',
+                                         b'Address = 10.66.66.2/32\nListenAddr = 127.0.0.1\n'),
+                            b'ListenAddr is not accepted by amneziawg-tools'),
+        }
+        for kind, (payload, needle) in cases.items():
+            with self.subTest(kind=kind):
+                client.write_bytes(payload)
+                (self.root / 'work' / kind).mkdir()
+                result = subprocess.run(['bash', '-c', shell, 'test', str(SCRIPT), str(self.root), kind],
+                                        capture_output=True)
+                combined = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, combined.decode())
+                self.assertIn(needle, combined)
+                self.assertNotIn(b'touch /bad', combined)
+                self.assertNotIn(b'invalid or unsupported', combined)
+                self.assertNotIn(KEY.encode(), combined)
 
     def test_direct_export_without_proxy_is_schema_1(self):
         result = self.export_source(51820, proxy=False)

@@ -68,8 +68,12 @@ cancelled) and an `endpoint_audit` (`hostname`, `ip_literal`, and per-client
 name/host/kind). `--dry-run` also prints the panel plan and how the panel would be
 installed. When `ip_literal` is greater than zero, both warn that those
 profiles will need a new profile after an IP ban. Export prints the same
-counts. Client names and Endpoint hosts are included; private keys and full
-configs are not.
+counts before the passphrase prompt. If the count cannot be produced, export
+warns and continues; a published archive is not failed because counting
+failed. Client names and Endpoint hosts are included; private keys and full
+configs are not. Staged `clients/*.conf` profiles are validated before the
+prompt with the same rules as the server config: a client `ListenAddr` or a
+client hook is refused, and the hook command is not printed.
 `--dry-run` prints a JSON plan before the host-install plan. Both show the
 export timestamp, the destination evaluation time, per-peer **migrate/drop**
 decisions (name, expiry, reason), and migrate/drop counts. Import, unchanged-
@@ -661,27 +665,34 @@ incomplete-rollback block. It also covers the default proxy topology, an
 archive-controlled path that already exists, the journal-directory companion
 lock, a `proxy.toml` outside the installer's flat subset, an unusable proxy
 socket address, an explicit `ListenAddr` refusal, and the literal-IP endpoint
-count. The suite passes under Python 3.9, 3.10 and 3.12+.
+count. It checks that the literal-IP warning is printed before encryption
+starts, that a failed endpoint count still leaves a successful export, and
+that a client-profile hook or `ListenAddr` is refused before encryption.
+The suite passes under Python 3.9, 3.10 and 3.12+.
 With `age` installed it additionally
 uses a real controlling TTY for passphrase roundtrip and wrong-passphrase tests.
 CI installs age and runs this suite.
 
-CI job **State migration (Debian 12, two systemd containers)** in
-`.github/workflows/state-migration.yml` starts the containers one after the
-other: two systemd containers sharing the host cgroup namespace are not
-started together. Container A installs BoringTun with one client whose
-`Endpoint` is `192.0.2.1` (the same TEST-NET-1 address the BoringTun host job
-uses) and exports through a pseudo-terminal. The passphrase is a mode-0600
-file; it is not placed in argv or the environment. Container B then renames
-its default-route interface to `migup0` (the archived uplink name is the
-source container's, so the restored name differs), imports, and activates
-with `--enable-at-boot`. The job checks the restored server key, obfuscation
-fields, peer public keys, preshared keys and the client profile hash. It
-places `192.0.2.1` on a veth and completes a BoringTun handshake from a
-network namespace using that exported profile, the same kind of handshake as
-the BoringTun host job. CI has no physical client, so this is not a phone or
-WireSock handshake. The job is not a kernel-backend drill, a panel restore, a
-proxy restore, a DNS cutover or a power-loss test.
+CI jobs **State migration (Debian 12, AWG 2.0)** and **State migration
+(Debian 12, AWG 3.1)** in `.github/workflows/state-migration.yml` run as a
+matrix.
+Each leg starts the containers one after the other: two systemd containers
+sharing the host cgroup namespace are not started together. Container A
+installs BoringTun with one client whose `Endpoint` is `192.0.2.1` (the same
+TEST-NET-1 address the BoringTun host job uses). The AWG 3.1 leg then runs
+`--enable-awg31` before export. Export uses a pseudo-terminal. The passphrase
+is a mode-0600 file; it is not placed in argv or the environment. Container B
+then renames its default-route interface to `migup0` (the archived uplink
+name is the source container's, so the restored name differs), imports, and
+activates with `--enable-at-boot`. The job checks the restored server key,
+obfuscation fields, the header-protection key hash, AWG 3.x padding, rekey,
+keepalive, `RandomTrailers` and `DisableCookies` values, peer public keys,
+preshared keys and the client profile hash. It places `192.0.2.1` on a veth
+and completes a BoringTun handshake from a network namespace using that
+exported profile, the same kind of handshake as the BoringTun host job. CI
+has no physical client, so this is not a phone or WireSock handshake. The
+job is not a kernel-backend drill, a panel restore, a proxy restore, a DNS
+cutover or a power-loss test.
 
 ## Manual live acceptance
 

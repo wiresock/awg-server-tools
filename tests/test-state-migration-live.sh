@@ -5,6 +5,7 @@
 # checklist in docs/STATE_MIGRATION.md.
 #
 # source: install BoringTun, add one client, export to ${AWG_MIGRATION_OUT}.
+#         AWG_MIGRATION_PROTOCOL=3.1 runs --enable-awg31 before the export.
 # target: rename the default-route NIC to migup0, import, activate with
 #         --enable-at-boot, compare material, handshake from a namespace.
 #
@@ -26,11 +27,13 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 ROLE="${1:-}"
 OUT="${AWG_MIGRATION_OUT:-}"
 PASSFILE="${AWG_MIGRATION_PASSPHRASE_FILE:-}"
+PROTOCOL="${AWG_MIGRATION_PROTOCOL:-2.0}"
 # The path is not a secret, but children do not need it. age must not see a
 # passphrase in the environment; this variable is only a path, and it is
 # dropped before any installer process starts.
 unset AWG_MIGRATION_PASSPHRASE_FILE
 [[ "${ROLE}" == source || "${ROLE}" == target ]] || die "usage: $0 source|target"
+[[ "${PROTOCOL}" == 2.0 || "${PROTOCOL}" == 3.1 ]] || die "AWG_MIGRATION_PROTOCOL must be 2.0 or 3.1"
 [[ -n "${OUT}" && -d "${OUT}" && ! -L "${OUT}" ]] || die "AWG_MIGRATION_OUT must be a directory"
 [[ -f "${PASSFILE}" && ! -L "${PASSFILE}" && -s "${PASSFILE}" ]] || die "passphrase file must be a non-empty regular file"
 [[ "$(stat -c %a "${PASSFILE}")" == 600 ]] || die "passphrase file must be mode 0600"
@@ -138,6 +141,12 @@ material() { # <params> <server.conf> <client.conf> <outfile>
 		for LINE in JC JMIN JMAX S1 S2 S3 S4 H1 H2 H3 H4; do
 			printf 'obf %s %s\n' "${LINE}" "$(field "${PARAMS}" "SERVER_AWG_${LINE}")"
 		done
+		# Hash only. The header-protection key is a secret; the other AWG 3.x
+		# values are ranges or on/off and are compared as text. Empty on AWG 2.0.
+		printf 'hpk %s\n' "$(printf %s "$(field "${PARAMS}" AWG_HEADER_PROTECTION_KEY)" | sha256sum | cut -d' ' -f1)"
+		for LINE in CONTENT_PADDING_ADDITION REKEY_AFTER_TIME REKEY_TIMEOUT REJECT_AFTER_TIME KEEPALIVE_TIMEOUT RANDOM_TRAILERS DISABLE_COOKIES; do
+			printf 'p3 %s %s\n' "${LINE}" "$(field "${PARAMS}" "AWG_${LINE}")"
+		done
 		awk '
 			/^[[:space:]]*PublicKey[[:space:]]*=/ { print "peer", $3 }
 			/^[[:space:]]*PresharedKey[[:space:]]*=/ { print "psk", $3 }
@@ -182,6 +191,12 @@ if [[ "${ROLE}" == source ]]; then
 		CREATE_INITIAL_CLIENT=n bash "${INSTALLER}" </dev/null
 	# --add-client prints the profile and a QR code. Keep that off the log.
 	bash "${INSTALLER}" --add-client migrate1 >/dev/null
+	if [[ "${PROTOCOL}" == 3.1 ]]; then
+		# Fresh 2.0, then the real enablement path, before the profile is copied.
+		bash "${INSTALLER}" --enable-awg31
+		grep -qx "AWG_PROTOCOL_VERSION='3.1'" /etc/amnezia/amneziawg/params \
+			|| die "AWG 3.1 enablement did not persist"
+	fi
 	CLIENT="/etc/amnezia/amneziawg/clients/${IF}-client-migrate1.conf"
 	[[ -f "${CLIENT}" && ! -L "${CLIENT}" ]] || die "client profile was not written"
 	install -m 600 "${CLIENT}" "${OUT}/client.conf"
@@ -218,6 +233,14 @@ RESTORED="/etc/amnezia/amneziawg/clients/${IF}-client-migrate1.conf"
 [[ -f "${RESTORED}" && ! -L "${RESTORED}" ]] || die "restored client profile is missing"
 material /etc/amnezia/amneziawg/params "/etc/amnezia/amneziawg/${IF}.conf" "${RESTORED}" "${OUT}/target.material"
 cmp -s "${OUT}/source.material" "${OUT}/target.material" || die "restored key, obfuscation, peer or client hash differs"
+if [[ "${PROTOCOL}" == 3.1 ]]; then
+	grep -qx "AWG_PROTOCOL_VERSION='3.1'" /etc/amnezia/amneziawg/params \
+		|| die "restored params are not AWG 3.1"
+	grep -q '^HeaderProtectionKey = ' "/etc/amnezia/amneziawg/${IF}.conf" \
+		|| die "restored server config has no HeaderProtectionKey"
+	grep -q '^RandomTrailers = ' "/etc/amnezia/amneziawg/${IF}.conf" \
+		|| die "restored server config has no RandomTrailers"
+fi
 grep -q "^Endpoint = ${HOST_ADDR}:${PORT}\$" "${RESTORED}" || die "restored client profile Endpoint changed"
 grep -qx "SERVER_PUB_NIC='migup0'" /etc/amnezia/amneziawg/params || die "restored params did not record migup0"
 systemctl is-active --quiet "awg-quick@${IF}" || die "restored VPN is not active"

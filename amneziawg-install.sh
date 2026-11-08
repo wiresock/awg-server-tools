@@ -3539,7 +3539,10 @@ def config(data, state=None, blocked=frozenset(), preserve_hooks=False, proxy=No
                                        '"Line unrecognized: ListenAddr"); remove it before export. These tools '
                                        'listen on all addresses, and the proxy installer does not add ListenAddr.')
             if name in HOOKS:
-                require(kind == 'Interface' and state is not None, 'client/peer hooks unsupported')
+                # Server hooks are stripped and never executed. A client or
+                # peer hook is a fixed refusal: the command text is not printed.
+                if kind != 'Interface' or state is None:
+                    raise StatePolicyError('client/peer hooks unsupported')
                 if preserve_hooks:
                     lines.append(line)  # Only receipt-verified local generated hooks.
                 continue  # NEVER execute commands supplied by an archive.
@@ -4344,11 +4347,19 @@ def main():
             sys.stdout.buffer.write(name.encode() + b'\0' + value.encode() + b'\0')
     elif mode == 'export-check':
         # Fail before the passphrase prompt: the staged panel snapshot must have
-        # the schema import will require, and the server config must parse.
+        # the schema import will require, and the server and client configs
+        # must parse. Client profiles use the same config() rules as pack.
         root = Path(path)
         state = params((root / 'vpn/params').read_bytes())
         data = (root / 'vpn/server.conf').read_bytes()
         config(data, state, set(), proxy=staged_proxy_ports(root))
+        client_dir = root / 'clients'
+        if client_dir.is_dir():
+            for client in sorted(client_dir.iterdir()):
+                if client.is_symlink():
+                    raise StatePolicyError('symlink in staging tree')
+                if client.is_file() and client.name.endswith('.conf'):
+                    config(client.read_bytes())
         stamp = utc_text(utc_now().replace(microsecond=0))
         migration_plan(dict(exported_at=stamp), {'vpn/server.conf': data}, data, peer_policy(root), 'export')
     elif mode == 'identity':
@@ -4652,11 +4663,27 @@ function awgStateExport() { # <destination> <private work directory>
 		awgStateArchive proxy-meta "${PROXY_PATHS[@]}" >"${WORK}/stage/proxy/install.json" || return 1
 		chmod 600 "${WORK}/stage/proxy/install.json" || return 1
 	fi
-	# Validate the panel policy schema and server config now, before the prompt.
+	# Validate the panel policy schema, the server config and every staged
+	# client profile now, before the prompt.
 	awgStateArchive export-check "${WORK}/stage" || {
 		echo 'ERROR: staged state would not be importable; export refused before encryption.' >&2
 		return 1
 	}
+	# Count before the prompt. A counting failure warns and continues: export
+	# must not fail after the archive has been published, and must not fail
+	# here either once the staged state itself is valid.
+	local ENDPOINT_AUDIT_TEXT=""
+	local -a ENDPOINT_AUDIT=()
+	if ENDPOINT_AUDIT_TEXT="$(awgStateArchive endpoint-summary "${WORK}/stage" 2>/dev/null)" \
+		&& mapfile -t ENDPOINT_AUDIT <<<"${ENDPOINT_AUDIT_TEXT}" \
+		&& [[ ${#ENDPOINT_AUDIT[@]} -ge 2 && "${ENDPOINT_AUDIT[0]}" =~ ^[0-9]+$ && "${ENDPOINT_AUDIT[1]}" =~ ^[0-9]+$ ]]; then
+		echo "Client endpoints in this archive: ${ENDPOINT_AUDIT[0]} hostname, ${ENDPOINT_AUDIT[1]} literal IP."
+		if [[ -n "${ENDPOINT_AUDIT[2]:-}" ]]; then
+			echo "WARNING: ${ENDPOINT_AUDIT[2]}" >&2
+		fi
+	else
+		echo 'WARNING: could not count client endpoints; export will continue.' >&2
+	fi
 	# The private staging copy is a complete, consistent snapshot. Do not hold
 	# the lifecycle locks (blocking panel/CLI operations) during the prompt.
 	releaseClientLifecycleLock
@@ -4677,18 +4704,6 @@ function awgStateExport() { # <destination> <private work directory>
 		return 1
 	fi
 	rm -f -- "${PUBLISH}"
-	local ENDPOINT_AUDIT_TEXT
-	local -a ENDPOINT_AUDIT=()
-	ENDPOINT_AUDIT_TEXT="$(awgStateArchive endpoint-summary "${WORK}/stage")" || return 1
-	mapfile -t ENDPOINT_AUDIT <<<"${ENDPOINT_AUDIT_TEXT}"
-	[[ ${#ENDPOINT_AUDIT[@]} -ge 2 && "${ENDPOINT_AUDIT[0]}" =~ ^[0-9]+$ && "${ENDPOINT_AUDIT[1]}" =~ ^[0-9]+$ ]] || {
-		echo 'ERROR: could not count client endpoints.' >&2
-		return 1
-	}
-	echo "Client endpoints in this archive: ${ENDPOINT_AUDIT[0]} hostname, ${ENDPOINT_AUDIT[1]} literal IP."
-	if [[ -n "${ENDPOINT_AUDIT[2]:-}" ]]; then
-		echo "WARNING: ${ENDPOINT_AUDIT[2]}" >&2
-	fi
 	echo 'Encrypted state archive created. Keep it offline; it grants full VPN access.'
 }
 

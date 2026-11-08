@@ -1,10 +1,11 @@
 name: State migration
 
-# Two Debian 12 systemd containers, started one after the other. Sharing the
-# host cgroup namespace between two systemd instances is not reliable, so
-# container A is removed before container B starts. The handshake is the same
-# namespace BoringTun client as the BoringTun host job (TEST-NET-1 192.0.2.1
-# on a veth, exported profile bytes). CI has no physical client.
+# Two Debian 12 systemd containers, started one after the other, for AWG 2.0
+# and AWG 3.1. Sharing the host cgroup namespace between two systemd instances
+# is not reliable, so container A is removed before container B starts. The
+# AWG 3.1 leg runs --enable-awg31 on container A before export. The handshake
+# is the same namespace BoringTun client as the BoringTun host job (TEST-NET-1
+# 192.0.2.1 on a veth, exported profile bytes). CI has no physical client.
 
 on:
   push:
@@ -32,9 +33,13 @@ defaults:
 
 jobs:
   migrate:
-    name: State migration (Debian 12, two systemd containers)
+    name: State migration (Debian 12, AWG ${{ matrix.protocol }})
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: ['2.0', '3.1']
     steps:
       - uses: actions/checkout@v6
         with:
@@ -64,53 +69,55 @@ jobs:
       - name: Install on container A and export
         id: export
         run: |
-          docker run -d --name awg-mig-a --privileged --cgroupns=host \
+          docker run -d --name "awg-mig-a-${{ matrix.protocol }}" --privileged --cgroupns=host \
             -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
             -v "$PWD:/workspace:ro" -v "$RUNNER_TEMP/mig:/out" awg-debian12-systemd
           for _ in $(seq 1 30); do
-            docker exec awg-mig-a systemctl is-system-running 2>/dev/null | grep -qE 'running|degraded' && break
+            docker exec "awg-mig-a-${{ matrix.protocol }}" systemctl is-system-running 2>/dev/null | grep -qE 'running|degraded' && break
             sleep 1
           done
-          docker exec awg-mig-a systemctl is-system-running || true
+          docker exec "awg-mig-a-${{ matrix.protocol }}" systemctl is-system-running || true
           docker exec \
             -e AWG_DISPOSABLE_HOST_TEST=1 \
             -e AWG_MIGRATION_OUT=/out \
             -e AWG_MIGRATION_PASSPHRASE_FILE=/out/passphrase \
-            awg-mig-a bash /workspace/tests/test-state-migration-live.sh source
+            -e AWG_MIGRATION_PROTOCOL=${{ matrix.protocol }} \
+            "awg-mig-a-${{ matrix.protocol }}" bash /workspace/tests/test-state-migration-live.sh source
 
       - name: Remove container A
         if: always()
         run: |
-          if [[ "${{ steps.export.outcome }}" == "failure" ]] && docker exec awg-mig-a true >/dev/null 2>&1; then
-            docker exec awg-mig-a bash -c 'systemctl is-system-running || true; systemctl status awg-quick@awg0 --no-pager -l || true; journalctl -u awg-quick@awg0 -n 80 --no-pager || true; ip -4 addr; ip -4 route' \
+          if [[ "${{ steps.export.outcome }}" == "failure" ]] && docker exec "awg-mig-a-${{ matrix.protocol }}" true >/dev/null 2>&1; then
+            docker exec "awg-mig-a-${{ matrix.protocol }}" bash -c 'systemctl is-system-running || true; systemctl status awg-quick@awg0 --no-pager -l || true; journalctl -u awg-quick@awg0 -n 80 --no-pager || true; ip -4 addr; ip -4 route' \
               >"$RUNNER_TEMP/mig-diagnostics.txt" 2>&1 || true
           fi
-          docker rm -f awg-mig-a >/dev/null 2>&1 || true
+          docker rm -f "awg-mig-a-${{ matrix.protocol }}" >/dev/null 2>&1 || true
 
       - name: Import on container B and handshake
         run: |
-          docker run -d --name awg-mig-b --privileged --cgroupns=host \
+          docker run -d --name "awg-mig-b-${{ matrix.protocol }}" --privileged --cgroupns=host \
             -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
             -v "$PWD:/workspace:ro" -v "$RUNNER_TEMP/mig:/out" awg-debian12-systemd
           for _ in $(seq 1 30); do
-            docker exec awg-mig-b systemctl is-system-running 2>/dev/null | grep -qE 'running|degraded' && break
+            docker exec "awg-mig-b-${{ matrix.protocol }}" systemctl is-system-running 2>/dev/null | grep -qE 'running|degraded' && break
             sleep 1
           done
-          docker exec awg-mig-b systemctl is-system-running || true
+          docker exec "awg-mig-b-${{ matrix.protocol }}" systemctl is-system-running || true
           docker exec \
             -e AWG_DISPOSABLE_HOST_TEST=1 \
             -e AWG_MIGRATION_OUT=/out \
             -e AWG_MIGRATION_PASSPHRASE_FILE=/out/passphrase \
-            awg-mig-b bash /workspace/tests/test-state-migration-live.sh target
+            -e AWG_MIGRATION_PROTOCOL=${{ matrix.protocol }} \
+            "awg-mig-b-${{ matrix.protocol }}" bash /workspace/tests/test-state-migration-live.sh target
 
       - name: Collect diagnostics
         if: failure()
         run: |
-          docker rm -f awg-mig-a >/dev/null 2>&1 || true
-          if docker exec awg-mig-b true >/dev/null 2>&1; then
+          docker rm -f "awg-mig-a-${{ matrix.protocol }}" >/dev/null 2>&1 || true
+          if docker exec "awg-mig-b-${{ matrix.protocol }}" true >/dev/null 2>&1; then
             {
               echo "=== container B"
-              docker exec awg-mig-b bash -c 'systemctl is-system-running || true; systemctl status awg-quick@awg0 --no-pager -l || true; journalctl -u awg-quick@awg0 -n 80 --no-pager || true; ip -4 addr; ip -4 route' || true
+              docker exec "awg-mig-b-${{ matrix.protocol }}" bash -c 'systemctl is-system-running || true; systemctl status awg-quick@awg0 --no-pager -l || true; journalctl -u awg-quick@awg0 -n 80 --no-pager || true; ip -4 addr; ip -4 route' || true
             } >>"$RUNNER_TEMP/mig-diagnostics.txt" 2>&1 || true
           fi
 
@@ -118,12 +125,12 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: state-migration-diagnostics
+          name: state-migration-diagnostics-awg-${{ matrix.protocol }}
           path: ${{ runner.temp }}/mig-diagnostics.txt
           retention-days: 7
 
       - name: Remove container B and the passphrase
         if: always()
         run: |
-          docker rm -f awg-mig-b >/dev/null 2>&1 || true
+          docker rm -f "awg-mig-b-${{ matrix.protocol }}" >/dev/null 2>&1 || true
           rm -f "$RUNNER_TEMP/mig/passphrase"
