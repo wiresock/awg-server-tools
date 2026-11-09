@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Vadim Smirnov (doing business as WireSock) -->
+<!-- SPDX-License-Identifier: MIT -->
+
 # Hyper-V live acceptance for PR #186
 
 Date: 2026-11-09. Tester: local Hyper-V lab on this Windows host. No commits were pushed, the PR was not merged, and GitHub issues were not updated.
