@@ -101,6 +101,14 @@ AWG_INSTALLER_CAPABILITY_BORINGTUN_IMITATION_AUTO="boringtun-imitation-auto-v1"
 # of that channel. Keep the marker unchanged for compatible installers.
 # shellcheck disable=SC2034
 AWG_INSTALLER_CAPABILITY_PROTOCOL_DIAGNOSTICS="protocol-diagnostics-v1"
+# The panel helper reads this marker before --export-state - --passphrase-fd.
+# An older installer has no streaming mode; executing that flag there can fall
+# through into the interactive menu. Keep the marker unchanged.
+# shellcheck disable=SC2034
+AWG_INSTALLER_CAPABILITY_STATE_EXPORT_STREAM="state-export-stream-v1"
+# The panel helper reads this marker before the read-only --endpoint-summary.
+# shellcheck disable=SC2034
+AWG_INSTALLER_CAPABILITY_ENDPOINT_SUMMARY="endpoint-summary-v1"
 
 # The immutable public BoringTun release that fresh BoringTun installs download.
 # These values are the installer's only trust anchor for the binary: they are
@@ -213,6 +221,7 @@ AMNEZIA_PPA_ARCHITECTURE=""
 _APT_IPV4_PREV_TRAP_EXIT=""
 _APT_IPV4_PREV_TRAP_INT=""
 _APT_IPV4_PREV_TRAP_TERM=""
+_APT_IPV4_PREV_TRAP_HUP=""
 # Return success when gai.conf has an active (uncommented) IPv4 precedence
 # rule for ::ffff:0:0/96 with value 100; commented defaults must not match.
 gai_conf_has_active_ipv4_rule() {
@@ -243,15 +252,25 @@ enable_apt_ipv4() {
 
 	# Save existing trap commands so we can chain them (not just restore).
 	# trap -p output is eval-safe by design (bash always emits: trap -- 'body' SIG).
+	# In a subshell that has not set any trap yet, `trap -p` still prints the
+	# PARENT's handlers (inactive here). Saving and later re-installing them
+	# would run e.g. the parent's EXIT cleanup inside this subshell. Setting
+	# any trap drops that inherited display (ignored signals stay listed and
+	# active); USR2 is unused by this script.
+	if [[ "${BASHPID}" != "$$" ]]; then
+		trap - USR2
+	fi
 	_APT_IPV4_PREV_TRAP_EXIT="$(trap -p EXIT || true)"
 	_APT_IPV4_PREV_TRAP_INT="$(trap -p INT || true)"
 	_APT_IPV4_PREV_TRAP_TERM="$(trap -p TERM || true)"
+	_APT_IPV4_PREV_TRAP_HUP="$(trap -p HUP || true)"
 	# Install traps that clean up *and* invoke any prior handler, so
 	# pre-existing cleanup logic still runs even if the script exits
 	# while IPv4 forcing is active.
 	trap '_cleanup_apt_ipv4_and_chain EXIT' EXIT
 	trap '_cleanup_apt_ipv4_and_chain INT'  INT
 	trap '_cleanup_apt_ipv4_and_chain TERM' TERM
+	trap '_cleanup_apt_ipv4_and_chain HUP'  HUP
 }
 # Internal: remove the APT ForceIPv4 config and revert gai.conf changes.
 _remove_ipv4_overrides() {
@@ -295,16 +314,27 @@ _cleanup_apt_ipv4_and_chain() {
 	if [[ -n "${prev_trap}" ]]; then
 		# Re-install the previous trap (e.g. trap -- 'handler' EXIT).
 		eval "${prev_trap}"
-		# Re-deliver the signal so bash invokes the just-restored handler.
 		if [[ "${sig}" == "EXIT" ]]; then
-			# For EXIT: exiting re-fires the EXIT trap with the original status.
+			# Bash does not run a newly installed EXIT trap while it is already
+			# exiting, so invoke the previous handler directly, with $? set to
+			# the original status, then exit with that status. trap -p output
+			# is eval-safe: "trap -- 'body' EXIT"; $3 is the body.
+			local prev_body
+			eval "set -- ${prev_trap}"
+			prev_body="${3-}"
+			if [[ -n "${prev_body}" ]]; then
+				( exit "${_saved_status}" )
+				eval "${prev_body}"
+			fi
 			exit "${_saved_status}"
 		else
-			# For INT/TERM: re-raise the signal to invoke the restored handler.
-			kill -s "${sig}" "$$" 2>/dev/null || {
+			# For INT/TERM/HUP: re-raise the signal in THIS (sub)shell, not
+			# the top-level $$, so the restored handler runs where it belongs.
+			kill -s "${sig}" "${BASHPID}" 2>/dev/null || {
 				case "${sig}" in
 					INT)  exit 130 ;;  # 128 + SIGINT(2)
 					TERM) exit 143 ;;  # 128 + SIGTERM(15)
+					HUP)  exit 129 ;;  # 128 + SIGHUP(1)
 				esac
 			}
 		fi
@@ -313,12 +343,13 @@ _cleanup_apt_ipv4_and_chain() {
 		if [[ "${sig}" == "EXIT" ]]; then
 			# Preserve the original exit status when no prior handler exists.
 			exit "${_saved_status}"
-		elif [[ "${sig}" == INT || "${sig}" == TERM ]]; then
+		elif [[ "${sig}" == INT || "${sig}" == TERM || "${sig}" == HUP ]]; then
 			# Re-raise the signal so default termination semantics are preserved.
-			kill -s "${sig}" "$$" 2>/dev/null || {
+			kill -s "${sig}" "${BASHPID}" 2>/dev/null || {
 				case "${sig}" in
 					INT)  exit 130 ;;  # 128 + SIGINT(2)
 					TERM) exit 143 ;;  # 128 + SIGTERM(15)
+					HUP)  exit 129 ;;  # 128 + SIGHUP(1)
 				esac
 			}
 		fi
@@ -341,6 +372,11 @@ disable_apt_ipv4() {
 		eval "${_APT_IPV4_PREV_TRAP_TERM}"
 	else
 		trap - TERM
+	fi
+	if [[ -n "${_APT_IPV4_PREV_TRAP_HUP:-}" ]]; then
+		eval "${_APT_IPV4_PREV_TRAP_HUP}"
+	else
+		trap - HUP
 	fi
 }
 
@@ -417,7 +453,7 @@ function getAmneziaPpaHttpStatus() {
 			END { print status }
 		')
 	elif command -v python3 &>/dev/null; then
-		STATUS=$(python3 - "${URL}" <<'PY'
+		STATUS=$(python3 -I - "${URL}" <<'PY'
 import sys
 import urllib.error
 import urllib.request
@@ -2956,16 +2992,15 @@ function isWebPanelInstalled() {
 	return 1
 }
 
-# Use the web database directory as the stable cross-process lifecycle lock.
-# Unlike AWG_CONFIG_DIR it exists for the panel's lifetime, including when no
-# client has been created yet. Standalone installer use (no panel env file)
-# retains the config-directory fallback.
+# The installer always locks its independent persistent directory first. When
+# a panel exists it additionally locks the database directory inode used by
+# native panel operations. Never create client/install directories for locking.
 function resolveClientLifecycleLockDir() {
 	local env_file database_path exec_database_path exec_setting_rc working_dir database_parent
 	env_file="$(resolveWebPanelEnvFile)" || return 1
 
 	if ! isWebPanelInstalled; then
-		resolveWebPanelConfigDir
+		printf '%s\n' "${INSTALLER_LIFECYCLE_LOCK_DIR}"
 		return
 	fi
 
@@ -3122,6 +3157,13 @@ function validateClientTransportBudget() { # [assumed outer budget, default1500]
 }
 
 function validateFreshInstallMtu() {
+	# A state import restores an existing, already-deployed MTU/S4 pair exactly;
+	# fresh-install admission does not apply. Keep syntax validation; the budget
+	# mismatch is reported as a warning by awgStateWarnMtuBudget.
+	if [[ -n "${_AWG_STATE_IMPORT_DIR:-}" ]]; then
+		validateClientMtu
+		return
+	fi
 	validateClientTransportBudget "$(freshOuterMtuBudget)"
 }
 
@@ -3337,6 +3379,3548 @@ EOF
 # equal to what serializeParams writes.
 AWG_PARAMS_KEYS="SERVER_PUB_IP SERVER_PUB_NIC SERVER_AWG_NIC SERVER_AWG_IPV4 SERVER_AWG_IPV6 SERVER_PORT SERVER_PRIV_KEY SERVER_PUB_KEY CLIENT_DNS_1 CLIENT_DNS_2 CLIENT_MTU ALLOWED_IPS ENABLE_IPV6 SERVER_AWG_JC SERVER_AWG_JMIN SERVER_AWG_JMAX SERVER_AWG_S1 SERVER_AWG_S2 SERVER_AWG_S3 SERVER_AWG_S4 SERVER_AWG_H1 SERVER_AWG_H2 SERVER_AWG_H3 SERVER_AWG_H4 AWG_BACKEND AWG_PROTOCOL_VERSION AWG_HEADER_PROTECTION_KEY AWG_CONTENT_PADDING_ADDITION AWG_REKEY_AFTER_TIME AWG_REKEY_TIMEOUT AWG_REJECT_AFTER_TIME AWG_KEEPALIVE_TIMEOUT AWG_RANDOM_TRAILERS AWG_DISABLE_COOKIES"
 AWG_PARAMS_BORINGTUN_KEYS="AWG_BORINGTUN_IMITATE_PROTOCOL AWG_BORINGTUN_IMITATE_DOMAIN"
+
+# State migration is an internal install mode, NEVER inherited from the environment.
+_AWG_STATE_IMPORT_DIR=""
+AWG_STATE_JOURNAL_DIR="/var/lib/amneziawg-install/state-imports"
+AWG_STATE_PROXY_CONFIG="/etc/amneziawg-proxy/proxy.toml"
+AWG_STATE_PROXY_DEFAULT_DATA="/var/lib/amneziawg-proxy"
+AWG_STATE_PROXY_DEFAULT_INSTALL="/usr/local/bin"
+AWG_STATE_PROXY_UNIT="/etc/systemd/system/amneziawg-proxy.service"
+
+# The proxy installer writes `ExecStart=<install-dir>/amneziawg-proxy <config>`
+# and `WorkingDirectory=<data-dir>`; read the real paths from that unit (the
+# same tokens the proxy installer itself compares), else the defaults.
+function awgStateProxyInstallPaths() { # prints config, data dir, install dir
+	local LINE EXEC CONFIG REST WORKDIR="${AWG_STATE_PROXY_DEFAULT_DATA}" INSTALL="${AWG_STATE_PROXY_DEFAULT_INSTALL}"
+	CONFIG="${AWG_STATE_PROXY_CONFIG}"
+	if [[ -f "${AWG_STATE_PROXY_UNIT}" && ! -L "${AWG_STATE_PROXY_UNIT}" ]]; then
+		LINE="$(grep -m1 '^ExecStart=' "${AWG_STATE_PROXY_UNIT}" || true)"
+		if [[ -n "${LINE}" ]]; then
+			read -r EXEC CONFIG REST <<<"${LINE#ExecStart=}" || true
+			EXEC="${EXEC//\"/}"; EXEC="${EXEC//\'/}"
+			CONFIG="${CONFIG//\"/}"; CONFIG="${CONFIG//\'/}"
+			[[ "${EXEC}" == /*/amneziawg-proxy && "${CONFIG}" == /* && -z "${REST}" ]] || {
+				echo "ERROR: cannot parse ExecStart in ${AWG_STATE_PROXY_UNIT}; refusing to guess the proxy config path." >&2
+				return 1
+			}
+			INSTALL="${EXEC%/amneziawg-proxy}"
+		fi
+		LINE="$(grep -m1 '^WorkingDirectory=' "${AWG_STATE_PROXY_UNIT}" || true)"
+		LINE="${LINE#WorkingDirectory=}"; LINE="${LINE//\"/}"; LINE="${LINE//\'/}"
+		[[ -z "${LINE}" ]] || WORKDIR="${LINE}"
+	fi
+	printf '%s\n' "${CONFIG}" "${WORKDIR}" "${INSTALL}"
+}
+
+# Foreign archives are data, including params and awg-quick shell hooks. Keep the
+# verifier embedded so curl/download users do not need a second helper file.
+function awgStateArchive() {
+	python3 -I - "${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}" "$@" <<'AWG_STATE_PY'
+# Standard-library only. This code is embedded so a downloaded installer stays standalone.
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
+from tempfile import TemporaryDirectory
+import base64
+import hashlib
+import io
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import sqlite3
+import stat
+import sys
+import tarfile
+import zlib
+
+MAX_FILE = 256 * 1024 * 1024
+MAX_TOTAL = 512 * 1024 * 1024
+KEYS = set(sys.argv[1].split())
+
+
+def require(ok, message):
+    if not ok:
+        raise ValueError(message)
+
+
+def key(value):
+    try:
+        return len(base64.b64decode(value, validate=True)) == 32
+    except (ValueError, TypeError):
+        return False
+
+
+def params(data, validate_public_key=True):
+    result = {}
+    for line in data.decode('utf-8').splitlines():
+        if not line or line.startswith('#'):
+            continue
+        name, sep, value = line.partition('=')
+        require(sep and name in KEYS and name not in result, 'unknown/duplicate params key')
+        # Only simple literals are accepted, not the shell language. No eval/source/shlex.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        require(re.fullmatch(r'[A-Za-z0-9_./+:=,\[\] -]*', value) is not None,
+                'nonliteral params value')
+        require(len(value) <= 4096, 'oversized params value')
+        result[name] = value
+    result.setdefault('AWG_BACKEND', 'kernel')
+    result.setdefault('AWG_PROTOCOL_VERSION', '2')
+    result.setdefault('CLIENT_MTU', '')
+    result.setdefault('ENABLE_IPV6', '')
+    result.setdefault('AWG_BORINGTUN_IMITATE_PROTOCOL', 'none')
+    result.setdefault('AWG_BORINGTUN_IMITATE_DOMAIN', '')
+    require(result['AWG_BACKEND'] in ('kernel', 'boringtun'), 'unsupported backend')
+    require(result['AWG_PROTOCOL_VERSION'] in ('2', '3', '3.1'), 'unsupported protocol')
+    for name in ('SERVER_AWG_NIC', 'SERVER_PUB_NIC'):
+        require(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}', result.get(name, '')),
+                'invalid interface name')
+    for name in (('SERVER_PRIV_KEY', 'SERVER_PUB_KEY') if validate_public_key else ('SERVER_PRIV_KEY',)):
+        require(key(result.get(name)), 'invalid server key')
+    for name, version in (('SERVER_AWG_IPV4', 4), ('SERVER_AWG_IPV6', 6)):
+        require(ipaddress.ip_address(result[name]).version == version, 'invalid server address')
+    require(re.fullmatch(r'[0-9]{1,5}', result['SERVER_PORT']) and
+            1 <= int(result['SERVER_PORT']) <= 65535, 'invalid port')
+    require(result['ENABLE_IPV6'] in ('', 'y', 'n'), 'invalid IPv6 flag')
+    for name, value in result.items():
+        if name.startswith('SERVER_AWG_') and name not in (
+                'SERVER_AWG_NIC', 'SERVER_AWG_IPV4', 'SERVER_AWG_IPV6'):
+            require(re.fullmatch(r'[0-9]{1,10}(?:-[0-9]{1,10})?', value),
+                    'invalid obfuscation value')
+        if name in ('CLIENT_MTU',) and value:
+            require(re.fullmatch(r'[0-9]{1,5}', value) and 576 <= int(value) <= 65535, 'invalid MTU')
+    require(result['AWG_BORINGTUN_IMITATE_PROTOCOL'] in
+            ('none', 'dns', 'quic', 'sip', 'stun', 'auto'), 'invalid imitation')
+    domain = result['AWG_BORINGTUN_IMITATE_DOMAIN']
+    require(not domain or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,252}', domain),
+            'invalid imitation domain')
+    return result
+
+
+INTERFACE = set('Address MTU ListenPort PrivateKey Jc Jmin Jmax S1 S2 S3 S4 H1 H2 H3 H4 I1 I2 I3 I4 I5 HeaderProtectionKey ContentPaddingAddition RekeyAfterTime RekeyTimeout RejectAfterTime KeepaliveTimeout RandomTrailers DisableCookies FwMark Table DNS SaveConfig'.split())
+PEER = set('PublicKey PresharedKey AllowedIPs Endpoint PersistentKeepalive'.split())
+HOOKS = set('PreUp PostUp PreDown PostDown'.split())
+
+
+def config(data, state=None, blocked=frozenset(), preserve_hooks=False, proxy=None):
+    text = data.decode('utf-8')
+    require('\x00' not in text and '\r' not in text, 'invalid config encoding')
+    # Carry leading peer-name comments with THAT peer when reconciling policy.
+    # Otherwise deleting peer A can leave A's marker attached to peer B.
+    groups, current = [], []
+    for line in text.splitlines(keepends=True):
+        if line.strip() in ('[Interface]', '[Peer]'):
+            leading = []
+            while current and (not current[-1].strip() or current[-1].lstrip().startswith('#')):
+                leading.insert(0, current.pop())
+            if current:
+                groups.append(''.join(current))
+            current = leading
+        current.append(line)
+    if current:
+        groups.append(''.join(current))
+    output, fields, sections, peer_keys = [], {}, [], set()
+    for group in groups:
+        values, kind, lines = {}, None, []
+        for line in group.splitlines(keepends=True):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                lines.append(line)
+                continue
+            if stripped in ('[Interface]', '[Peer]'):
+                require(kind is None, 'repeated config section')
+                kind = stripped[1:-1]
+                lines.append(line)
+                continue
+            name, sep, value = stripped.partition('=')
+            name, value = name.strip(), value.strip()
+            require(kind and sep, 'invalid config line')
+            # amneziawg-tools config.c accepts ListenPort, not ListenAddr.
+            # awg setconf prints "Line unrecognized" and awg-quick then fails
+            # to bring the interface up. Carrying the line would make the
+            # restored VPN unable to start. The proxy installer rewrites an
+            # existing ListenAddr but does not add one, and the tools this
+            # repository installs still reject it.
+            if name == 'ListenAddr':
+                raise StatePolicyError('ListenAddr is not accepted by amneziawg-tools (awg setconf reports '
+                                       '"Line unrecognized: ListenAddr"); remove it before export. These tools '
+                                       'listen on all addresses, and the proxy installer does not add ListenAddr.')
+            if name in HOOKS:
+                # Server hooks are stripped and never executed. A client or
+                # peer hook is a fixed refusal: the command text is not printed.
+                if kind != 'Interface' or state is None:
+                    raise StatePolicyError('client/peer hooks unsupported')
+                if preserve_hooks:
+                    lines.append(line)  # Only receipt-verified local generated hooks.
+                continue  # NEVER execute commands supplied by an archive.
+            require(name in (INTERFACE if kind == 'Interface' else PEER), 'unknown config field')
+            require(name not in values, 'duplicate config field')
+            require(value and len(value) <= 8192 and not any(ord(c) < 32 for c in value),
+                    'invalid config field')
+            values[name] = value
+            if name in ('PrivateKey', 'PublicKey', 'PresharedKey', 'HeaderProtectionKey'):
+                require(key(value), 'invalid config key')
+            if name in ('Address', 'AllowedIPs'):
+                for address in value.split(','):
+                    ipaddress.ip_interface(address.strip())
+            if name == 'Table':
+                require(value in ('auto', 'off') or value.isdecimal(), 'invalid table')
+            if name in ('MTU', 'ListenPort', 'PersistentKeepalive'):
+                require(re.fullmatch(r'[0-9]{1,5}', value) and int(value) <= 65535, 'invalid config number')
+            if name == 'SaveConfig':
+                require(value.lower() == 'false', 'SaveConfig=true is not supported for migration')
+            lines.append(line)
+        if kind:
+            sections.append(kind)
+            if kind == 'Interface':
+                require(not fields, 'multiple interfaces')
+                fields = values
+            else:
+                require('PublicKey' in values and values['PublicKey'] not in peer_keys, 'missing/duplicate peer public key')
+                peer_keys.add(values['PublicKey'])
+                if values['PublicKey'] in blocked:
+                    continue
+        output.extend(lines)
+    require(sections and sections[0] == 'Interface' and sections.count('Interface') == 1,
+            'single interface required')
+    if state is not None:
+        require(fields.get('PrivateKey') == state['SERVER_PRIV_KEY'], 'params/config mismatch')
+        listen_port_matches(fields.get('ListenPort'), state['SERVER_PORT'], proxy)
+        addresses = [ipaddress.ip_interface(v.strip()) for v in fields.get('Address', '').split(',')]
+        ipv4 = [v for v in addresses if v.version == 4]
+        ipv6 = [v for v in addresses if v.version == 6]
+        require(len(ipv4) == 1 and ipv4[0].ip == ipaddress.ip_address(state['SERVER_AWG_IPV4'])
+                and ipv4[0].network.prefixlen == 24, 'unsupported/mismatched IPv4 subnet')
+        require(len(ipv6) <= 1 and all(v.ip == ipaddress.ip_address(state['SERVER_AWG_IPV6'])
+                and v.network.prefixlen == 64 for v in ipv6), 'unsupported/mismatched IPv6 subnet')
+        for suffix in ('JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'):
+            field = {'JC': 'Jc', 'JMIN': 'Jmin', 'JMAX': 'Jmax'}.get(suffix, suffix)
+            require(fields.get(field) == state.get('SERVER_AWG_' + suffix), 'obfuscation mismatch')
+        protocol_fields = dict(HeaderProtectionKey='AWG_HEADER_PROTECTION_KEY',
+            ContentPaddingAddition='AWG_CONTENT_PADDING_ADDITION', RekeyAfterTime='AWG_REKEY_AFTER_TIME',
+            RekeyTimeout='AWG_REKEY_TIMEOUT', RejectAfterTime='AWG_REJECT_AFTER_TIME',
+            KeepaliveTimeout='AWG_KEEPALIVE_TIMEOUT', RandomTrailers='AWG_RANDOM_TRAILERS',
+            DisableCookies='AWG_DISABLE_COOKIES')
+        for field, name in protocol_fields.items():
+            expected = state.get(name, '')
+            require(fields.get(field, '') == expected, 'protocol fields mismatch')
+    return ''.join(output).encode()
+
+
+def proxy_ports(data):
+    # (public listen port, backend port) for the VPN topology check only.
+    # A proxy.toml outside the installer's flat subset (single quotes, integer
+    # underscores, unknown keys the proxy ignores) must not block VPN
+    # export/import. The proxy step keeps the strict parse in proxy_toml.
+    if not data:
+        return None
+    try:
+        text = data.decode('utf-8')
+    except UnicodeError:
+        return None
+    found = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        match = re.fullmatch(r'(listen|backend)\s*=\s*(?:"([^"\\]*)"|\'([^\'\\]*)\')\s*(?:#.*)?', stripped)
+        if match is None:
+            continue
+        name = match.group(1)
+        if name in found:
+            return None  # Do not guess which duplicate the proxy would keep.
+        value = match.group(2) if match.group(2) is not None else match.group(3)
+        try:
+            found[name] = socket_parts(value)[1]
+        except ValueError:
+            return None
+    if 'listen' not in found or 'backend' not in found:
+        return None
+    return found['listen'], found['backend']
+
+
+def listen_port_matches(listen, server_port, proxy):
+    # Direct: AWG listens on SERVER_PORT (clients' Endpoint port). Default
+    # amneziawg-proxy topology: the proxy installer moves AWG's ListenPort to the
+    # backend port and the proxy listens on SERVER_PORT, which it never edits.
+    if listen == server_port:
+        return 'direct'
+    if proxy is not None and listen == str(proxy[1]) and server_port == str(proxy[0]):
+        return 'proxy'
+    if proxy is None:
+        raise StatePolicyError('server ListenPort (%s) differs from SERVER_PORT (%s) in params and no amneziawg-proxy '
+                               'config explains it; fix the server config or params first' % (listen, server_port))
+    raise StatePolicyError('server ListenPort (%s) / SERVER_PORT (%s) match neither a direct setup nor the '
+                           'amneziawg-proxy topology (proxy listen %d, backend %d)' % (listen, server_port, proxy[0], proxy[1]))
+
+
+def member_name(name):
+    return (name in ('vpn/params', 'vpn/server.conf', 'web/database.sqlite', 'web/env.conf',
+                     'proxy/proxy.toml', 'proxy/install.json', 'manifest.json') or
+            re.fullmatch(r'clients/[A-Za-z0-9_][A-Za-z0-9_.-]{0,90}\.conf', name) is not None)
+
+
+def unique_json(pairs):
+    result = {}
+    for name, value in pairs:
+        require(name not in result, 'duplicate JSON key')
+        result[name] = value
+    return result
+
+
+def validate_manifest(manifest, files):
+    require(type(manifest) is dict, 'invalid manifest')
+    export_time(manifest, utc_now())
+    # Schema 2 adds the optional proxy/install.json member; schema 1 archives
+    # (without it) stay importable. Schema 1 never carried install.json.
+    require(type(manifest.get('schema_version')) is int and manifest['schema_version'] in (1, 2),
+            'unsupported schema')
+    require(manifest['schema_version'] == 2 or 'proxy/install.json' not in files, 'unsupported schema')
+    require(type(manifest.get('files')) is dict and set(manifest['files']) == set(files),
+            'manifest file inventory mismatch')
+    require({'vpn/params', 'vpn/server.conf'} <= set(files), 'missing VPN state')
+    for name, data in files.items():
+        require(manifest['files'][name] == hashlib.sha256(data).hexdigest(), 'checksum mismatch')
+    state = params(files['vpn/params'])
+    require(manifest.get('backend') == state['AWG_BACKEND'] and
+            manifest.get('protocol') == state['AWG_PROTOCOL_VERSION'] and
+            manifest.get('interface') == state['SERVER_AWG_NIC'], 'manifest/params mismatch')
+    config(files['vpn/server.conf'], state, proxy=proxy_ports(files.get('proxy/proxy.toml')))
+    for name in files:
+        if name.startswith('clients/'):
+            config(files[name])
+    return state
+
+
+def read_archive(path):
+    files, total = {}, 0
+    with tarfile.open(path, 'r:gz') as archive:
+        for index, member in enumerate(archive):
+            require(index < 20000 and member.isfile() and member_name(member.name) and
+                    member.name not in files and not member.pax_headers,
+                    'unsafe/duplicate tar member (paths, links and special files are forbidden)')
+            require(0 <= member.size <= MAX_FILE, 'oversized tar member')
+            total += member.size
+            require(total <= MAX_TOTAL, 'oversized archive')
+            files[member.name] = archive.extractfile(member).read()
+        # tarfile stops at the end-of-archive blocks; read the gzip stream to
+        # EOF so a missing/corrupt trailer (CRC, length) fails closed too.
+        rest = 0
+        while True:
+            chunk = archive.fileobj.read(65536)
+            if not chunk:
+                break
+            rest += len(chunk)
+            require(rest <= MAX_TOTAL, 'oversized archive')
+    require('manifest.json' in files, 'missing manifest')
+    manifest = json.loads(files.pop('manifest.json'), object_pairs_hook=unique_json)
+    require(type(manifest) is dict, 'invalid manifest')
+    state = validate_manifest(manifest, files)
+    return manifest, files, state
+
+
+class StatePolicyError(ValueError):
+    """Only fixed diagnostics or allowlisted column names, never foreign values."""
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def utc_text(value):
+    return value.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def parse_expiry(value):
+    # Panel expiration_from_days writes RFC3339. Never guess a timezone for a
+    # malformed/naive value; such a peer is dropped with an invalid-expiry reason.
+    if not isinstance(value, str) or not re.fullmatch(
+            r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})', value):
+        raise ValueError('invalid expiry')
+    # Python < 3.11 fromisoformat accepts only 3 or 6 fractional digits:
+    # normalize to exactly 6 (truncating nanoseconds) so all versions agree.
+    value = re.sub(r'\.(\d+)', lambda m: '.' + (m[1] + '000000')[:6], value.replace('Z', '+00:00'), count=1)
+    return datetime.fromisoformat(value).astimezone(timezone.utc)
+
+
+# Small tolerance for NTP drift between the old and new host; beyond it fail closed.
+CLOCK_SKEW_SECONDS = 300
+
+
+def export_time(manifest, now):
+    value = manifest.get('exported_at')
+    if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', value):
+        raise StatePolicyError('manifest exported_at must be UTC ISO 8601 (YYYY-MM-DDTHH:MM:SSZ); re-export timestamp-less prototype backups')
+    try:
+        exported = parse_expiry(value)
+    except ValueError:
+        raise StatePolicyError('manifest exported_at is not a valid UTC timestamp') from None
+    if exported > now + timedelta(seconds=CLOCK_SKEW_SECONDS):
+        raise StatePolicyError('archive export timestamp is more than 5 minutes in the future relative to this host; check both clocks before importing')
+    return exported
+
+
+def config_peer_names(data):
+    peers, pending, current, in_peer = {}, None, None, False
+    for line in data.decode('utf-8').splitlines():
+        stripped = line.strip()
+        marker = re.fullmatch(r'### Client ([A-Za-z0-9_-]{1,15})', stripped)
+        if marker:
+            pending = marker[1]
+        if stripped in ('[Interface]', '[Peer]'):
+            in_peer = stripped == '[Peer]'
+            current, pending = pending, None
+        if in_peer and re.match(r'^PublicKey\s*=', stripped):
+            public = stripped.partition('=')[2].strip()
+            require(key(public), 'invalid peer identity')
+            peers[public] = current
+    return peers
+
+
+def peer_policy(root):
+    db_path = root / 'web/database.sqlite'
+    if not db_path.exists():
+        return None
+    with closing(sqlite3.connect(db_path.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+        db.execute('PRAGMA trusted_schema=OFF')
+        if db.execute("SELECT type FROM sqlite_master WHERE name='peers'").fetchone() != ('table',):
+            raise StatePolicyError('panel peer policy requires a real peers table')
+        required = {'public_key', 'disabled', 'archived', 'removal_pending', 'expires_at'}
+        columns = {row[1] for row in db.execute('PRAGMA table_info(peers)')}
+        if not required <= columns:
+            raise StatePolicyError('panel peer policy schema missing required columns: ' +
+                                   ', '.join(sorted(required - columns)))
+        optional = [name for name in ('managed_client_name', 'friendly_name', 'display_name') if name in columns]
+        names = ['public_key', 'disabled', 'archived', 'removal_pending', 'expires_at'] + optional
+        result = {}
+        # Identifiers come only from the hardcoded lists above, never foreign SQL.
+        for row in db.execute('SELECT ' + ','.join(names) + ' FROM peers'):
+            item = dict(zip(names, row))
+            public = item['public_key']
+            if not isinstance(public, str) or not key(public) or public in result:
+                raise StatePolicyError('panel peer policy contains an invalid/duplicate public key')
+            result[public] = item
+        return result
+
+
+ENV_LINE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=(.*)')
+
+
+def panel_env(data):
+    # Parse KEY=VALUE lines like systemd EnvironmentFile; never execute them.
+    values = {}
+    for line in data.decode('utf-8').splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(('#', ';')):
+            continue
+        match = ENV_LINE.fullmatch(stripped)
+        require(match is not None, 'unsupported panel env.conf line')
+        value = match.group(2)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+            value = value[1:-1]
+        values[match.group(1)] = value
+    return values
+
+
+def panel_migrations(db):
+    if db.execute("SELECT type FROM sqlite_master WHERE name='_sqlx_migrations'").fetchone() != ('table',):
+        return []
+    return sorted(row[0] for row in db.execute('SELECT version FROM _sqlx_migrations WHERE success=1'))
+
+
+def known_migrations(directory):
+    if not directory:
+        return None
+    path = Path(directory)
+    if not path.is_dir():
+        return None
+    versions = [int(m.group(1)) for m in (re.fullmatch(r'(\d+)_.+\.sql', f.name) for f in path.iterdir()) if m]
+    return sorted(versions) or None
+
+
+def panel_plan(root, migrations_dir=None):
+    db_path = root / 'web/database.sqlite'
+    if not db_path.exists():
+        return dict(present=False)
+    with closing(sqlite3.connect(db_path.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+        db.execute('PRAGMA trusted_schema=OFF')
+        applied = panel_migrations(db)
+        pending = {}
+        if db.execute("SELECT type FROM sqlite_master WHERE name='email_jobs'").fetchone() == ('table',):
+            for state, count in db.execute("SELECT state, COUNT(*) FROM email_jobs WHERE state IN ('queued','sending') GROUP BY state"):
+                pending[state] = count
+    env_path = root / 'web/env.conf'
+    env = panel_env(env_path.read_bytes()) if env_path.exists() else None
+    known = known_migrations(migrations_dir)
+    plan = dict(present=True, env_present=env is not None,
+                password_hash_present=bool(env and env.get('AUTH_PASSWORD_HASH', '').startswith('$argon2')),
+                archive_schema=applied[-1] if applied else None,
+                panel_schema=known[-1] if known else None,
+                queued_mail_to_cancel=pending.get('queued', 0), sending_mail_to_mark_unknown=pending.get('sending', 0))
+    plan['schema_newer_than_panel'] = bool(known and applied and applied[-1] > known[-1])
+    plan['listen'] = (env or {}).get('AWG_WEB_LISTEN')
+    own = set()
+    server_conf = root / 'vpn/server.conf'
+    if server_conf.is_file():
+        try:
+            own = interface_addresses(server_conf.read_bytes())
+        except (OSError, UnicodeError):
+            own = set()
+    plan['listen_warning'] = listen_warning(plan['listen'], own)
+    return plan
+
+
+def interface_addresses(data):
+    # IPs from the VPN [Interface] Address lines. Companions run after the VPN
+    # is up, so the panel can bind these on the new host.
+    found = set()
+    in_interface = False
+    for line in data.decode('utf-8').splitlines():
+        stripped = line.split('#', 1)[0].strip()
+        if stripped.startswith('['):
+            in_interface = stripped == '[Interface]'
+            continue
+        if not in_interface:
+            continue
+        match = re.fullmatch(r'Address\s*=\s*(.+)', stripped)
+        if match is None:
+            continue
+        for part in match.group(1).split(','):
+            try:
+                found.add(ipaddress.ip_interface(part.strip()).ip)
+            except ValueError:
+                continue
+    return found
+
+
+def listen_warning(listen, own_addresses=()):
+    # AWG_WEB_LISTEN is restored verbatim: a specific old-host address fails to bind.
+    if not listen:
+        return None
+    host = listen.rpartition(':')[0].strip('[]')
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if address.is_loopback or address.is_unspecified or address in own_addresses:
+        return None
+    return ('AWG_WEB_LISTEN binds the old host address %s; the restored panel fails to start unless this host has it. '
+            'Edit the panel env after restore or use 127.0.0.1/0.0.0.0 on the old host before export.' % host)
+
+
+def panel_prepare(root, out, clients_dir, default_db, migrations_dir, approved=''):
+    # Builds the live-ready panel DB/env in private staging. Bash installs them.
+    plan = panel_plan(root, migrations_dir)
+    require(plan['present'], 'archive has no panel database')
+    if not plan['env_present'] or not plan['password_hash_present']:
+        raise StatePolicyError('archived panel env.conf with an Argon2 AUTH_PASSWORD_HASH is required for non-interactive panel restore')
+    if plan['schema_newer_than_panel']:
+        raise StatePolicyError('archived panel database schema (migration %d) is newer than this panel source (migration %d); '
+                               'use the same or a newer amneziawg-web' % (plan['archive_schema'], plan['panel_schema']))
+    if plan['panel_schema'] is None:
+        print('WARNING: panel migrations not found next to the panel installer; schema compatibility is checked by the panel at startup.', file=sys.stderr)
+    env = panel_env((root / 'web/env.conf').read_bytes())
+    username = env.get('AUTH_USERNAME', 'admin')
+    require(re.fullmatch(r'[A-Za-z0-9._@-]{1,64}', username) is not None, 'unsupported panel AUTH_USERNAME')
+    db_value = env.get('AWG_WEB_DB', '')
+    db_live = db_value if (db_value.startswith('/') and re.fullmatch(r'/[A-Za-z0-9._/-]+', db_value) and '/../' not in db_value + '/'
+                           and not db_value.endswith('/')) else default_db
+    # The installer gets the DB directory as --data-dir and chowns it to awg-web 0700.
+    target_dir_ok(db_live.rsplit('/', 1)[0], default_db.rsplit('/', 1)[0], 'data', [approved] if approved else [])
+    out.mkdir(mode=0o700)
+    lines = []
+    seen = set()
+    for line in (root / 'web/env.conf').read_text().splitlines():
+        match = ENV_LINE.fullmatch(line.strip())
+        name = match.group(1) if match else None
+        if name in ('AWG_CONFIG_DIR', 'AWG_WEB_DB'):
+            if name in seen:
+                continue
+            seen.add(name)
+            line = '%s=%s' % (name, clients_dir if name == 'AWG_CONFIG_DIR' else db_live)
+        lines.append(line)
+    for name, value in (('AWG_CONFIG_DIR', clients_dir), ('AWG_WEB_DB', db_live)):
+        if name not in seen:
+            lines.append('%s=%s' % (name, value))
+    env_out = out / 'env.conf'
+    with env_out.open('x') as handle:
+        handle.write('\n'.join(lines) + '\n')
+    env_out.chmod(0o600)
+    db_out = out / 'database.sqlite'
+    with closing(sqlite3.connect((root / 'web/database.sqlite').as_uri() + '?mode=ro&immutable=1', uri=True)) as source, \
+            closing(sqlite3.connect(str(db_out))) as dest:
+        source.backup(dest)
+        dest.execute('PRAGMA journal_mode=DELETE')
+        require(dest.execute('PRAGMA integrity_check').fetchone() == ('ok',), 'panel database integrity check failed')
+        if dest.execute("SELECT type FROM sqlite_master WHERE name='email_jobs'").fetchone() == ('table',):
+            # Never replay mail from the old host: queued jobs are cancelled and
+            # in-flight ones marked unknown (as after a crash mid-send).
+            now = int(utc_now().timestamp())
+            with dest:
+                dest.execute("UPDATE email_jobs SET state='cancelled', invalidated_at=COALESCE(invalidated_at, ?), "
+                             "invalidation_code=COALESCE(invalidation_code, 'state_migration') WHERE state='queued'", (now,))
+                dest.execute("UPDATE email_jobs SET state='unknown', error_code=COALESCE(error_code, 'state_migration') "
+                             "WHERE state='sending'")
+    db_out.chmod(0o600)
+    for suffix in ('-wal', '-shm', '-journal'):
+        require(not Path(str(db_out) + suffix).exists(), 'unexpected SQLite sidecar after panel prepare')
+    # The hash goes to the installer through a private file, never its argv.
+    hash_out = out / 'password-hash'
+    with hash_out.open('x') as handle:
+        handle.write(env['AUTH_PASSWORD_HASH'] + '\n')
+    hash_out.chmod(0o600)
+    sys.stdout.buffer.write(b'\0'.join(v.encode() for v in (username, db_live)) + b'\0')
+
+
+SAFE_PATH = re.compile(r'/[A-Za-z0-9._/-]+')
+PROXY_DEFAULTS = dict(config_path='/etc/amneziawg-proxy/proxy.toml', data_dir='/var/lib/amneziawg-proxy', install_dir='/usr/local/bin')
+PROXY_KEYS = {'listen': str, 'backend': str, 'session_ttl_secs': int, 'cleanup_interval_secs': int,
+              'rate_limit_per_sec': int, 'probe_reply_bytes_per_sec': int, 'imitate_protocol': str,
+              'quic_handshake_enabled': bool, 'quic_certificate_domain': str, 'dns_forward_enabled': bool,
+              'dns_upstream': str, 'dns_upstream_timeout_ms': int, 'buffer_size': int, 'relay_buffer_size': int,
+              'socket_buffer_bytes': int, 'max_sessions': int, 'status_file': str, 'status_interval_secs': int,
+              'awg_config': str}
+
+
+def safe_path(value):
+    return (isinstance(value, str) and SAFE_PATH.fullmatch(value) is not None and len(value) <= 255 and
+            not any(part in ('', '.', '..') for part in value[1:].split('/')))
+
+
+# Archive-controlled install paths are only accepted as the installers'
+# defaults or as a NEW directory below a root meant for service data/config/
+# binaries: the installers chown/chmod these directories (and write files
+# there), so an existing system directory such as /etc or /usr is refused.
+TARGET_ROOTS = dict(data=('/var/lib/', '/srv/', '/opt/'), config=('/etc/', '/srv/', '/opt/'),
+                    install=('/opt/', '/usr/local/'))
+
+
+def target_dir_ok(path, default, kind, approved=()):
+    if not safe_path(path):
+        raise StatePolicyError('unsafe %s path in the archive' % kind)
+    parts = path.split('/')
+    for depth in range(2, len(parts) + 1):
+        if os.path.islink('/'.join(parts[:depth])):
+            raise StatePolicyError('%s path %s has a symlink component; refused' % (kind, path))
+    if path == default:
+        return
+    roots = TARGET_ROOTS[kind]
+    if not any(path.startswith(root) and len(path) > len(root) for root in roots):
+        raise StatePolicyError('%s path %s is not the default and not below %s; refused' % (kind, path, ', '.join(roots)))
+    # An existing directory is accepted only when this migration recorded that
+    # exact path after an earlier check saw it absent (the installer may then
+    # have created it). A directory that already existed stays refused on rerun;
+    # `panel-installing` / `proxy-installing` alone do not approve it.
+    if os.path.lexists(path) and path not in set(approved or ()):
+        raise StatePolicyError('%s path %s already exists on this host and is not the default; refused '
+                               '(the installer would change its owner/mode)' % (kind, path))
+
+
+def proxy_toml(data):
+    # The proxy config is flat `key = value` TOML (what the proxy installer
+    # writes). Python 3.9/3.10 have no tomllib: parse only that subset and
+    # refuse anything else rather than guess. VPN export does not use this;
+    # a refusal here is the proxy step, and it names the key.
+    values = {}
+    for line in data.decode('utf-8').splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        match = re.fullmatch(r'([a-z_]+)\s*=\s*("([^"\\]*)"|true|false|[0-9]{1,12})\s*(#.*)?', stripped)
+        if match is None:
+            key_match = re.match(r'([A-Za-z_][A-Za-z0-9_]{0,63})\s*=', stripped)
+            if key_match:
+                raise StatePolicyError('unsupported proxy.toml value for key %s' % key_match.group(1))
+            raise StatePolicyError('unsupported proxy.toml line')
+        name, raw = match.group(1), match.group(2)
+        if name not in PROXY_KEYS:
+            raise StatePolicyError('unknown proxy.toml key %s' % name)
+        if name in values:
+            raise StatePolicyError('duplicate proxy.toml key %s' % name)
+        value = match.group(3) if raw.startswith('"') else (raw == 'true' if raw in ('true', 'false') else int(raw))
+        if type(value) is not PROXY_KEYS[name]:
+            raise StatePolicyError('proxy.toml type mismatch for key %s' % name)
+        values[name] = value
+    if 'listen' not in values or 'backend' not in values:
+        raise StatePolicyError('proxy.toml needs listen and backend')
+    return values
+
+
+def socket_parts(value):
+    match = re.fullmatch(r'(\[[0-9A-Fa-f:.]+\]|[0-9.]+):([0-9]{1,5})', value)
+    require(match is not None and 1 <= int(match.group(2)) <= 65535, 'invalid proxy socket address')
+    ipaddress.ip_address(match.group(1).strip('[]'))
+    return match.group(1), int(match.group(2))
+
+
+def awg_listen_port(data):
+    port = None
+    for line in data.decode('utf-8').splitlines():
+        match = re.fullmatch(r'\s*ListenPort\s*=\s*([0-9]{1,5})\s*', line)
+        if match:
+            port = int(match.group(1))
+            break
+    return port
+
+
+def proxy_install(root, defaults=None):
+    meta_path = root / 'proxy/install.json'
+    meta = dict(defaults or PROXY_DEFAULTS)
+    if meta_path.exists():
+        loaded = json.loads(meta_path.read_bytes(), object_pairs_hook=unique_json)
+        require(type(loaded) is dict and set(loaded) == set(PROXY_DEFAULTS) and all(map(safe_path, loaded.values())),
+                'invalid proxy/install.json')
+        meta = loaded
+    return meta
+
+
+def proxy_plan(root, defaults=None):
+    path = root / 'proxy/proxy.toml'
+    if not path.exists():
+        return dict(present=False)
+    try:
+        values = proxy_toml(path.read_bytes())
+    except StatePolicyError as error:
+        # The VPN archive is still valid. Inspect and dry-run show that plan
+        # and warn; only the proxy restore step refuses.
+        return dict(present=True, error=str(error), refusal='proxy restore would be refused')
+    for name in ('listen', 'backend'):
+        try:
+            socket_parts(values[name])
+        except ValueError:
+            return dict(present=True, error='unsupported proxy.toml address for key %s' % name,
+                        refusal='proxy restore would be refused')
+    _, listen_port = socket_parts(values['listen'])
+    _, backend_port = socket_parts(values['backend'])
+    awg_port = awg_listen_port((root / 'vpn/server.conf').read_bytes())
+    state = params((root / 'vpn/params').read_bytes())
+    plan = dict(present=True, listen=values['listen'], backend=values['backend'],
+                imitate_protocol=values.get('imitate_protocol', 'quic'),
+                awg_listen_port=awg_port, awg_matches_backend=awg_port == backend_port,
+                server_port=int(state['SERVER_PORT']),
+                topology='proxy' if awg_port == backend_port and str(awg_port) != state['SERVER_PORT'] else 'direct',
+                install_paths=proxy_install(root, defaults), https='not managed by this repository (not archived)')
+    plan['refusal'] = None if plan['awg_matches_backend'] else (
+        'archived server ListenPort is not the proxy backend port; proxy restore would be refused')
+    return plan
+
+
+def proxy_prepare(root, out, awg_conf, approved=(), defaults=None):
+    defaults = defaults or PROXY_DEFAULTS
+    plan = proxy_plan(root, defaults)
+    require(plan['present'], 'archive has no proxy config')
+    if plan.get('error'):
+        raise StatePolicyError(plan['error'])
+    if not plan['awg_matches_backend']:
+        raise StatePolicyError('archived server ListenPort (%s) is not the proxy backend port; restoring the proxy would '
+                               'rewrite the VPN config, refused' % plan['awg_listen_port'])
+    require(safe_path(awg_conf), 'unsafe AWG config path')
+    values = proxy_toml((root / 'proxy/proxy.toml').read_bytes())
+    meta = plan['install_paths']
+    # The proxy installer chowns/chmods the config file's directory and the data
+    # dir, and writes the binary into the install dir.
+    approved = set(approved or ())
+    target_dir_ok(meta['config_path'].rsplit('/', 1)[0], defaults['config_path'].rsplit('/', 1)[0], 'config', approved)
+    target_dir_ok(meta['data_dir'], defaults['data_dir'], 'data', approved)
+    target_dir_ok(meta['install_dir'], defaults['install_dir'], 'install', approved)
+    listen_host, listen_port = socket_parts(values['listen'])
+    backend_host, backend_port = socket_parts(values['backend'])
+    flags = ['--listen-host', listen_host, '--listen-port', str(listen_port),
+             '--backend-host', backend_host, '--backend-port', str(backend_port)]
+    protocol = values.get('imitate_protocol', 'quic')
+    require(protocol in ('quic', 'dns', 'stun', 'sip', 'auto'), 'unsupported proxy imitate_protocol')
+    flags += ['--protocol', protocol]
+    for key, flag in (('session_ttl_secs', '--session-ttl'), ('rate_limit_per_sec', '--rate-limit'),
+                      ('probe_reply_bytes_per_sec', '--probe-reply-bytes')):
+        if key in values:
+            flags += [flag, str(values[key])]
+    safe_word = re.compile(r'[A-Za-z0-9._:\[\]-]{1,253}')
+    if values.get('dns_forward_enabled'):
+        require(safe_word.fullmatch(values.get('dns_upstream', '1.1.1.1:53')) is not None, 'unsafe dns_upstream')
+        flags += ['--dns-forward', '--dns-upstream', values.get('dns_upstream', '1.1.1.1:53')]
+    if values.get('quic_handshake_enabled'):
+        require(safe_word.fullmatch(values.get('quic_certificate_domain', 'cloudflare.com')) is not None, 'unsafe quic domain')
+        flags += ['--quic-handshake', '--quic-domain', values.get('quic_certificate_domain', 'cloudflare.com')]
+    # Restore the archived file verbatim except for the local AWG config path.
+    out.mkdir(mode=0o700)
+    lines = []
+    replaced = False
+    for line in (root / 'proxy/proxy.toml').read_text().splitlines():
+        if re.fullmatch(r'\s*awg_config\s*=.*', line):
+            line, replaced = 'awg_config = "%s"' % awg_conf, True
+        lines.append(line)
+    if not replaced:
+        lines.append('awg_config = "%s"' % awg_conf)
+    target = out / 'proxy.toml'
+    with target.open('x') as handle:
+        handle.write('\n'.join(lines) + '\n')
+    target.chmod(0o600)
+    fields = [meta['config_path'], meta['data_dir'], meta['install_dir'], str(listen_port)] + flags
+    sys.stdout.buffer.write(b'\0'.join(v.encode() for v in fields) + b'\0')
+
+
+def companion_warnings(panel, proxy):
+    warnings = []
+    if panel.get('listen_warning'):
+        warnings.append(panel['listen_warning'])
+    if proxy.get('error'):
+        warnings.append('amneziawg-proxy: %s; %s.' % (proxy['error'], proxy.get('refusal') or 'proxy restore would be refused'))
+    elif proxy.get('refusal'):
+        warnings.append('amneziawg-proxy: ' + proxy['refusal'] + '.')
+    if proxy.get('topology') == 'proxy':
+        warnings.append('amneziawg-proxy topology: clients connect to UDP %d (the proxy) and AWG listens on backend UDP %d; '
+                        'until the proxy step succeeds after --activate-state, clients cannot reach the VPN.'
+                        % (proxy['server_port'], proxy['awg_listen_port']))
+    for warning in warnings:
+        print('WARNING: ' + warning, file=sys.stderr)
+
+
+def migration_plan(manifest, files, data, policy, phase):
+    now = utc_now()
+    exported = export_time(manifest, now)
+    has_panel = policy is not None
+    policy = policy or {}
+    active = config_peer_names(data)
+    archived = config_peer_names(files['vpn/server.conf'])
+    blocked, decisions = set(), []
+    for public in sorted(set(active) | set(archived) | set(policy)):
+        item = policy.get(public, {})
+        label = (active.get(public) or archived.get(public) or item.get('managed_client_name') or
+                 item.get('friendly_name') or item.get('display_name') or 'peer-' + hashlib.sha256(public.encode()).hexdigest()[:12])
+        # Names are data, not terminal control sequences; JSON escapes the output.
+        label = ''.join(c for c in str(label)[:128] if c.isprintable())
+        expiry, expiry_text, invalid = item.get('expires_at'), None, False
+        if expiry is not None:
+            try:
+                expiry = parse_expiry(expiry)
+                expiry_text = utc_text(expiry)
+            except (ValueError, TypeError):
+                invalid, expiry_text = True, 'invalid'
+        reason = None
+        for flag in ('disabled', 'archived', 'removal_pending'):
+            if item and item.get(flag) != 0:  # NULL/unknown flags fail closed too.
+                reason = flag
+                break
+        if reason is None and invalid:
+            reason = 'invalid_expiry'
+        if reason is None and expiry is not None and expiry <= now:
+            reason = 'expired'
+        if reason is None and has_panel and public not in policy:
+            reason = 'not_in_panel'
+        if reason is None and public not in active:
+            reason = 'not_present'  # Reconciliation NEVER resurrects a removed peer.
+        decision = 'drop' if reason else 'migrate'
+        if reason:
+            blocked.add(public)
+        decisions.append(dict(name=label, peer_id=hashlib.sha256(public.encode()).hexdigest()[:12],
+                              expires_at=expiry_text, decision=decision,
+                              reason=reason or ('future_expiry' if expiry is not None else 'no_expiry')))
+    age = max(0, int((now - exported).total_seconds()))
+    warnings = ['Archive is older than 7 days; policy and user inventory may be stale.'] if age > 7 * 86400 else []
+    if any(item['reason'] == 'future_expiry' and item['decision'] == 'migrate' for item in decisions):
+        warnings.append('Future-expiry peers migrate. After activation, ongoing expiry enforcement requires the restored panel or operator.')
+    report = dict(exported_at=manifest['exported_at'], evaluated_at_utc=utc_text(now),
+                  archive_age_seconds=age, phase=phase, warnings=warnings, peers=decisions,
+                  counts={name: sum(item['decision'] == name for item in decisions) for name in ('migrate', 'drop')})
+    return blocked, report
+
+
+def endpoint_host(value):
+    # Endpoint is host:port or [ipv6]:port. A literal address (v4 or v6) is
+    # what a ban strands; a hostname can follow DNS. ipaddress rejects the
+    # short, hex and octal forms glibc inet_aton accepts without asking DNS
+    # (123 -> 0.0.0.123, 1.2.3 -> 1.2.0.3, 0x7f.1 -> 127.0.0.1). Those are
+    # literals too.
+    value = value.strip()
+    if value.startswith('['):
+        match = re.fullmatch(r'\[([0-9A-Fa-f:.]+)\]:([0-9]{1,5})', value)
+        if match is None or not 1 <= int(match.group(2)) <= 65535:
+            return None
+        try:
+            ipaddress.ip_address(match.group(1))
+        except ValueError:
+            return None
+        return match.group(1), 'ip_literal'
+    host, sep, port = value.rpartition(':')
+    if not sep or not re.fullmatch(r'[0-9]{1,5}', port) or not 1 <= int(port) <= 65535:
+        return None
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            socket.inet_aton(host)
+        except OSError:
+            if (len(host) <= 253 and re.fullmatch(
+                    r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*', host)):
+                return host, 'hostname'
+            return None
+    return host, 'ip_literal'
+
+
+def endpoint_audit(files):
+    counts = {'hostname': 0, 'ip_literal': 0}
+    clients = []
+    for name in sorted(files):
+        if not (name.startswith('clients/') and name.endswith('.conf')):
+            continue
+        try:
+            text = files[name].decode('utf-8')
+        except UnicodeError:
+            continue
+        in_peer = False
+        found = None
+        for line in text.splitlines():
+            stripped = line.split('#', 1)[0].strip()
+            if stripped.startswith('['):
+                in_peer = stripped == '[Peer]'
+                continue
+            if not in_peer:
+                continue
+            match = re.fullmatch(r'Endpoint\s*=\s*(.+)', stripped)
+            if match is None:
+                continue
+            found = endpoint_host(match.group(1).strip())
+            break
+        if not found:
+            continue
+        host, kind = found
+        counts[kind] += 1
+        clients.append(dict(name=name[len('clients/'):-len('.conf')], host=host, kind=kind))
+    audit = dict(hostname=counts['hostname'], ip_literal=counts['ip_literal'], clients=clients)
+    if audit['ip_literal']:
+        listed = ', '.join('%s (%s)' % (item['name'], item['host']) for item in clients if item['kind'] == 'ip_literal')
+        audit['warning'] = ('%d client profile(s) use a literal IP in Endpoint and will need a new profile after an IP ban: %s'
+                            % (audit['ip_literal'], listed))
+    else:
+        audit['warning'] = None
+    return audit
+
+
+def endpoint_audit_dir(root):
+    files = {}
+    directory = root / 'clients'
+    if directory.is_dir():
+        for path in sorted(directory.iterdir()):
+            if path.is_file() and not path.is_symlink() and path.name.endswith('.conf'):
+                files['clients/' + path.name] = path.read_bytes()
+    return endpoint_audit(files)
+
+
+# The first Peer Endpoint line. The value is [ipv6]:port or host:port. The
+# suffix keeps a trailing comment. This is the only line a host switch rewrites.
+_ENDPOINT_LINE = re.compile(
+    r'(?P<prefix>[ \t]*Endpoint[ \t]*=[ \t]*)'
+    r'(?P<value>\[[0-9A-Fa-f:.]+\]:[0-9]{1,5}|[^[\]\s:#]+:[0-9]{1,5})'
+    r'(?P<suffix>[ \t]*(?:#.*)?)')
+_ENDPOINT_HOSTNAME = re.compile(
+    r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*')
+
+
+def read_nul_paths(path):
+    data = Path(path).read_bytes()
+    if not data:
+        return []
+    if data[-1:] != b'\0':
+        raise StatePolicyError('truncated profile list')
+    paths = []
+    for part in data.split(b'\0')[:-1]:
+        if not part or b'\n' in part or b'\r' in part:
+            raise StatePolicyError('refusing an unsafe profile path')
+        text = part.decode('utf-8', 'strict')
+        if not text.startswith('/') or text != os.path.normpath(text):
+            raise StatePolicyError('refusing an unsafe profile path')
+        paths.append(text)
+    return paths
+
+
+def read_profile_bytes(path):
+    # O_NOFOLLOW refuses a symlink at the final component. Do not read the target.
+    try:
+        info = os.lstat(path)
+    except OSError:
+        raise StatePolicyError('client profile is not readable') from None
+    if stat.S_ISLNK(info.st_mode):
+        raise StatePolicyError('symlink client profile')
+    if not stat.S_ISREG(info.st_mode):
+        raise StatePolicyError('client profile is not a regular file')
+    if info.st_size > 1024 * 1024:
+        raise StatePolicyError('client profile is too large')
+    try:
+        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        raise StatePolicyError('client profile is not readable') from None
+    try:
+        data = os.read(handle, info.st_size + 1)
+    finally:
+        os.close(handle)
+    if len(data) > 1024 * 1024:
+        raise StatePolicyError('client profile is too large')
+    return data
+
+
+def _line_core(line):
+    if line.endswith('\r\n'):
+        return line[:-2], line[-2:]
+    if line.endswith('\n') or line.endswith('\r'):
+        return line[:-1], line[-1:]
+    return line, ''
+
+
+def parse_profile(path, data):
+    try:
+        text = data.decode('utf-8')
+    except UnicodeError:
+        raise StatePolicyError('client profile is not valid text') from None
+    if '\x00' in text:
+        raise StatePolicyError('client profile is not valid text')
+    lines = text.splitlines(keepends=True)
+    # splitlines drops a trailing break only when keepends is false. Rejoining
+    # these lines is the original text, so a rewrite can change one line.
+    if ''.join(lines) != text:
+        raise StatePolicyError('client profile is not valid text')
+    in_peer = False
+    endpoint_index = None
+    for index, line in enumerate(lines):
+        core, _ending = _line_core(line)
+        stripped = core.split('#', 1)[0].strip()
+        if stripped.startswith('['):
+            in_peer = stripped == '[Peer]'
+            continue
+        if not in_peer:
+            continue
+        if re.fullmatch(r'Endpoint\s*=\s*(.+)', stripped) is None:
+            continue
+        endpoint_index = index
+        break
+    parsed = None
+    match = None
+    if endpoint_index is not None:
+        core, _ending = _line_core(lines[endpoint_index])
+        match = _ENDPOINT_LINE.fullmatch(core)
+        if match is not None:
+            parsed = endpoint_host(match.group('value').strip())
+            if parsed is None:
+                match = None
+    return dict(path=path, name=Path(path).name[:-5] if path.endswith('.conf') else Path(path).name,
+                base=Path(path).name, lines=lines, endpoint_index=endpoint_index, parsed=parsed, match=match)
+
+
+def comparable_profile(record):
+    # The Endpoint line itself may differ (host or port). Every other line must match.
+    lines = record['lines']
+    index = record['endpoint_index']
+    if index is None:
+        return tuple(lines)
+    return tuple(lines[:index] + ['<endpoint>\n'] + lines[index + 1:])
+
+
+def rewrite_endpoint_line(record, hostname):
+    if record['parsed'] is None or record['match'] is None:
+        return None
+    line = record['lines'][record['endpoint_index']]
+    core, ending = _line_core(line)
+    match = record['match']
+    if match.group(0) != core:
+        raise StatePolicyError('client profile endpoint could not be rewritten safely')
+    value = match.group('value')
+    if value.startswith('['):
+        _host, sep, port = value.partition(']:')
+        if not sep:
+            raise StatePolicyError('client profile endpoint could not be rewritten safely')
+    else:
+        _host, sep, port = value.rpartition(':')
+        if not sep:
+            raise StatePolicyError('client profile endpoint could not be rewritten safely')
+    new_core = match.group('prefix') + hostname + ':' + port + match.group('suffix')
+    new_line = new_core + ending
+    lines = list(record['lines'])
+    index = record['endpoint_index']
+    lines[index] = new_line
+    # Every line except that Endpoint line stays the original string.
+    if record['lines'][:index] + record['lines'][index + 1:] != lines[:index] + lines[index + 1:]:
+        raise StatePolicyError('client profile endpoint could not be rewritten safely')
+    if new_line != line:
+        start = match.start('value')
+        end = match.end('value')
+        written = hostname + ':' + port
+        # Compare the bytes outside the old value. A host that also occurs in
+        # the "Endpoint" label (for example "n") must not fail this check.
+        if core[:start] != new_core[:start] or core[end:] != new_core[start + len(written):]:
+            raise StatePolicyError('client profile endpoint could not be rewritten safely')
+        if new_core[start:start + len(written)] != written:
+            raise StatePolicyError('client profile endpoint could not be rewritten safely')
+    return ''.join(lines).encode('utf-8'), core, new_core
+
+
+def endpoint_hostname_status(value):
+    # One rule for the switch and for endpoint_host: a value glibc parses as
+    # IPv4 is not a hostname, even when the label grammar would accept it.
+    if not isinstance(value, str) or not value or ':' in value or '[' in value or ']' in value:
+        return 'no'
+    try:
+        socket.inet_aton(value)
+    except OSError:
+        pass
+    else:
+        return 'ipv4'
+    if len(value) <= 253 and _ENDPOINT_HOSTNAME.fullmatch(value) is not None:
+        return 'ok'
+    return 'no'
+
+
+def endpoint_hostname_ok(value):
+    return endpoint_hostname_status(value) == 'ok'
+
+
+def write_private_exact(directory, name, data):
+    dest = Path(directory) / name
+    if dest.parent != Path(directory):
+        raise StatePolicyError('endpoint output path escaped its directory')
+    handle = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        view = data
+        while view:
+            written = os.write(handle, view)
+            if written <= 0:
+                raise StatePolicyError('cannot stage a rewritten profile')
+            view = view[written:]
+    finally:
+        os.close(handle)
+    return dest
+
+
+def endpoint_plan(regular_list, symlink_list, out_dir, action, hostname, current_pub):
+    if action not in ('audit', 'rewrite'):
+        raise StatePolicyError('unknown endpoint operation')
+    symlinks = read_nul_paths(symlink_list)
+    if action == 'rewrite' and symlinks:
+        # Do not open any profile, symlink or regular, once a symlink is in the set.
+        print(json.dumps(dict(refused='symlink', symlinks=symlinks, hostname=0, ip_literal=0,
+                              clients=[], conflicts=[], files=[], params_from=current_pub, params_host=hostname),
+                         sort_keys=True))
+        return
+    if action == 'rewrite':
+        if not endpoint_hostname_ok(hostname):
+            raise StatePolicyError('hostname refused')
+        out_root = Path(out_dir)
+        if out_root.is_symlink() or not out_root.is_dir():
+            raise StatePolicyError('endpoint output directory is unsafe')
+    records = []
+    for path in read_nul_paths(regular_list):
+        records.append(parse_profile(path, read_profile_bytes(path)))
+    conflicts = []
+    grouped = {}
+    for record in records:
+        grouped.setdefault(record['base'], []).append(record)
+    for base, group in grouped.items():
+        bodies = {comparable_profile(record) for record in group}
+        if len(bodies) > 1:
+            conflicts.append(dict(name=base, files=sorted(record['path'] for record in group)))
+    if action == 'rewrite' and conflicts:
+        print(json.dumps(dict(refused='conflict', symlinks=symlinks, hostname=0, ip_literal=0,
+                              clients=[], conflicts=conflicts, files=[], params_from=current_pub, params_host=hostname),
+                         sort_keys=True))
+        return
+    counts = {'hostname': 0, 'ip_literal': 0}
+    clients = {}
+    file_rows = []
+    for number, record in enumerate(sorted(records, key=lambda item: item['path'])):
+        parsed = record['parsed']
+        row = dict(path=record['path'], status='skipped', out=None, old_line=None, new_line=None)
+        if parsed is not None:
+            host, kind = parsed
+            counts[kind] += 1
+            key = (record['name'], host, kind)
+            clients.setdefault(key, []).append(record['path'])
+            if action == 'rewrite':
+                rewritten, old_line, new_line = rewrite_endpoint_line(record, hostname)
+                row['old_line'] = old_line
+                row['new_line'] = new_line
+                original = ''.join(record['lines']).encode('utf-8')
+                if rewritten != original:
+                    write_private_exact(out_dir, str(number), rewritten)
+                    write_private_exact(out_dir, str(number) + '.before', original)
+                    row['status'] = 'update'
+                    row['out'] = str(number)
+                else:
+                    row['status'] = 'unchanged'
+        file_rows.append(row)
+    client_rows = [dict(name=name, host=host, kind=kind, files=sorted(paths))
+                   for (name, host, kind), paths in sorted(clients.items())]
+    print(json.dumps(dict(refused=None, symlinks=sorted(symlinks), hostname=counts['hostname'],
+                          ip_literal=counts['ip_literal'], clients=client_rows, conflicts=conflicts,
+                          files=file_rows, params_from=current_pub, params_host=hostname if action == 'rewrite' else ''),
+                     sort_keys=True))
+
+
+def emit_plan(report):
+    for warning in report['warnings']:
+        print('WARNING: ' + warning, file=sys.stderr)
+    print(json.dumps(report, sort_keys=True, indent=2))
+
+
+def staged_proxy_ports(root):
+    path = root / 'proxy/proxy.toml'
+    return proxy_ports(path.read_bytes()) if path.exists() else None
+
+
+def staged_plan(root, data, phase):
+    manifest = json.loads((root / 'manifest.json').read_bytes(), object_pairs_hook=unique_json)
+    files = {'vpn/server.conf': (root / 'vpn/server.conf').read_bytes()}
+    return migration_plan(manifest, files, data, peer_policy(root), phase)
+
+
+def local_identity_matches(expected_path, params_path, config_path):
+    # No source/eval and no backend tool needed after uninstall. Compare identity
+    # only: normal post-finalization port/address/peer/hook edits remain allowed.
+    try:
+        expected = params(Path(expected_path).read_bytes())
+        # Cached public metadata is not identity. Both installed private keys
+        # must still match the manifest-verified archive; no backend dependency.
+        local = params(Path(params_path).read_bytes(), validate_public_key=False)
+        for name in ('SERVER_AWG_NIC', 'SERVER_PRIV_KEY'):
+            require(local[name] == expected[name], 'identity mismatch')
+        text = Path(config_path).read_text(encoding='utf-8')
+        require('\x00' not in text and '\r' not in text, 'invalid config encoding')
+        section, interfaces, keys = None, 0, []
+        for line in text.splitlines():
+            line = line.split('#', 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith('['):
+                section = line
+                interfaces += line == '[Interface]'
+            elif section == '[Interface]':
+                name, sep, value = line.partition('=')
+                if sep and name.strip() == 'PrivateKey':
+                    keys.append(value.strip())
+        require(interfaces == 1 and keys == [expected['SERVER_PRIV_KEY']], 'config identity mismatch')
+        if local.get('SERVER_PUB_KEY') != expected['SERVER_PUB_KEY']:
+            print('WARNING: cached SERVER_PUB_KEY differs or is missing; ignoring public-key metadata only because interface and both private keys match the archive.', file=sys.stderr)
+    except (ValueError, OSError, UnicodeError, KeyError, TypeError):
+        raise StatePolicyError('finalized local params/server config are invalid or belong to a different server identity; refusing stale archive replay') from None
+
+
+def main():
+    mode, path, *args = sys.argv[2:]
+    if mode == 'params':
+        state = params(Path(path).read_bytes())
+        for name, value in state.items():
+            sys.stdout.buffer.write(name.encode() + b'\0' + value.encode() + b'\0')
+    elif mode == 'export-check':
+        # Fail before the passphrase prompt: the staged panel snapshot must have
+        # the schema import will require, and the server and client configs
+        # must parse. Client profiles use the same config() rules as pack.
+        root = Path(path)
+        state = params((root / 'vpn/params').read_bytes())
+        data = (root / 'vpn/server.conf').read_bytes()
+        config(data, state, set(), proxy=staged_proxy_ports(root))
+        client_dir = root / 'clients'
+        if client_dir.is_dir():
+            for client in sorted(client_dir.iterdir()):
+                if client.is_symlink():
+                    raise StatePolicyError('symlink in staging tree')
+                # Same names pack accepts. A file pack would reject must fail
+                # here, before the passphrase prompt.
+                if not member_name('clients/' + client.name):
+                    raise StatePolicyError('unknown staging file')
+                if client.is_file() and client.name.endswith('.conf'):
+                    config(client.read_bytes())
+        stamp = utc_text(utc_now().replace(microsecond=0))
+        migration_plan(dict(exported_at=stamp), {'vpn/server.conf': data}, data, peer_policy(root), 'export')
+    elif mode == 'identity':
+        # Server identity for the cross-archive tombstone: interface + public key.
+        root = Path(path)
+        state = params((root / 'vpn/params').read_bytes())
+        manifest = json.loads((root / 'manifest.json').read_bytes(), object_pairs_hook=unique_json)
+        export_time(manifest, utc_now())
+        identity = hashlib.sha256((state['SERVER_AWG_NIC'] + '\n' + state['SERVER_PUB_KEY']).encode()).hexdigest()
+        print(identity, manifest['exported_at'])
+    elif mode == 'local-identity':
+        local_identity_matches(path, args[0], args[1])
+    elif mode == 'pack':
+        root = Path(path)
+        files = {}
+        for file in root.rglob('*'):
+            require(not file.is_symlink(), 'symlink in staging tree')
+            if file.is_file():
+                name = file.relative_to(root).as_posix()
+                require(member_name(name) and name != 'manifest.json', 'unknown staging file')
+                require(file.stat().st_size <= MAX_FILE, 'oversized staging file')
+                files[name] = file.read_bytes()
+                require(sum(map(len, files.values())) <= MAX_TOTAL, 'oversized staging tree')
+        state = params(files['vpn/params'])
+        peer_policy(root)  # Same schema gate as export-check; never pack an unimportable DB.
+        # Schema 2 only when the archive needs it (proxy/install.json).
+        manifest = dict(schema_version=2 if 'proxy/install.json' in files else 1, exported_at=utc_text(utc_now().replace(microsecond=0)), backend=state['AWG_BACKEND'],
+                        protocol=state['AWG_PROTOCOL_VERSION'], interface=state['SERVER_AWG_NIC'],
+                        versions={'installer_format': 'state-v1', 'installer_sha256': args[2] if len(args) > 2 and re.fullmatch(r'[0-9a-f]{64}', args[2]) else 'unknown', 'awg_tools': args[1],
+                                  'panel': 'not-probed'},
+                        files={name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
+                        limitations=['Panel DB/env and the amneziawg-proxy config are restored by --activate-state --enable-at-boot when their installers are available; mail queue is not replayed.',
+                                     'No TLS keys, binaries, systemd units, sessions or firewall dumps.'])
+        validate_manifest(manifest, files)
+        files['manifest.json'] = json.dumps(manifest, sort_keys=True, indent=2).encode()
+        stream = args[0] == '-'
+        with tarfile.open(name=None if stream else args[0], fileobj=sys.stdout.buffer if stream else None,
+                          mode='w|gz' if stream else 'w:gz', format=tarfile.USTAR_FORMAT) as archive:
+            for name, data in sorted(files.items()):
+                member = tarfile.TarInfo(name)
+                member.size, member.mode = len(data), 0o600
+                archive.addfile(member, io.BytesIO(data))
+    elif mode in ('verify', 'unpack', 'inspect'):
+        manifest, files, state = read_archive(path)
+        if mode in ('unpack', 'inspect'):
+            with TemporaryDirectory(prefix='awg-state-inspect-') as scratch:
+                # All names/types/sizes/checksums are validated BEFORE the first write.
+                root = Path(args[0]) if args else Path(scratch) / 'inspect'
+                root.mkdir(mode=0o700)
+                for name, data in files.items():
+                    dest = root / name
+                    dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    with dest.open('xb') as handle:
+                        handle.write(data)
+                    dest.chmod(0o600)
+                (root / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
+                (root / 'manifest.json').chmod(0o600)
+                if mode == 'inspect':
+                    _, report = staged_plan(root, files['vpn/server.conf'], 'inspect')
+                    for warning in report['warnings']:
+                        print('WARNING: ' + warning, file=sys.stderr)
+                    panel, proxy = panel_plan(root, args[1] if len(args) > 1 else None), proxy_plan(root)
+                    companion_warnings(panel, proxy)
+                    audit = endpoint_audit(files)
+                    if audit.get('warning'):
+                        print('WARNING: ' + audit['warning'], file=sys.stderr)
+                    print(json.dumps(dict(manifest, peer_plan=report, panel_plan=panel, proxy_plan=proxy,
+                                          endpoint_audit=dict(hostname=audit['hostname'], ip_literal=audit['ip_literal'],
+                                                              clients=audit['clients'])), sort_keys=True, indent=2))
+    elif mode == 'panel-plan':
+        plan = panel_plan(Path(path), args[0] if args else None)
+        companion_warnings(plan, {})
+        print(json.dumps(plan, sort_keys=True))
+    elif mode == 'endpoint-summary':
+        audit = endpoint_audit_dir(Path(path))
+        print(audit['hostname'])
+        print(audit['ip_literal'])
+        print(audit['warning'] or '')
+    elif mode == 'endpoint-hostname':
+        # path is the candidate name. Prints ok, ipv4, or no. No other text.
+        print(endpoint_hostname_status(path))
+    elif mode == 'endpoint-plan':
+        # path is the NUL-terminated regular-file list. args are the symlink
+        # list, the private output directory, audit|rewrite, the new hostname
+        # and the current SERVER_PUB_IP. Rewritten bytes stay in that directory.
+        require(len(args) >= 5, 'endpoint plan arguments')
+        endpoint_plan(path, args[0], args[1], args[2], args[3], args[4])
+    elif mode == 'awg-port':
+        print(awg_listen_port((Path(path) / 'vpn/server.conf').read_bytes()) or '')
+    elif mode == 'proxy-plan':
+        plan = proxy_plan(Path(path))
+        companion_warnings({}, plan)
+        print(json.dumps(plan, sort_keys=True))
+    elif mode == 'proxy-prepare':
+        defaults = dict(zip(('config_path', 'data_dir', 'install_dir'), args[3:6])) if len(args) >= 6 else None
+        # args[2] is the journal's approved-directory record (one path per line),
+        # empty on the first attempt. It is not a blanket retry flag.
+        approved = [line for line in (args[2].split('\n') if len(args) > 2 else []) if line]
+        proxy_prepare(Path(path), Path(args[0]), args[1], approved, defaults)
+    elif mode == 'proxy-meta':
+        # Export: install paths discovered from the real proxy unit.
+        meta = dict(zip(('config_path', 'data_dir', 'install_dir'), [path] + args[:2]))
+        require(all(map(safe_path, meta.values())), 'unsafe proxy install path')
+        print(json.dumps(meta, sort_keys=True))
+    elif mode == 'panel-prepare':
+        panel_prepare(Path(path), Path(args[0]), args[1], args[2], args[3] or None, args[4] if len(args) > 4 else '')
+    elif mode == 'reconcile':
+        # Bash provides only freshly generated transaction state or a local file
+        # whose receipt it verified before reconciliation.
+        # Filter ONLY the current config, never rebuild peers from an old snapshot.
+        root = Path(args[0])
+        state = params((root / 'vpn/params').read_bytes())
+        data = Path(path).read_bytes()
+        blocked, report = staged_plan(root, data, 'reconcile')
+        clean = config(data, state, blocked, preserve_hooks=True, proxy=staged_proxy_ports(root))
+        emit_plan(report)
+        with Path(args[1]).open('xb') as handle:
+            handle.write(clean)
+    elif mode == 'prepare':
+        root = Path(path)
+        state = params((root / 'vpn/params').read_bytes())
+        data = (root / 'vpn/server.conf').read_bytes()
+        blocked, report = staged_plan(root, data, 'import')
+        audit = endpoint_audit_dir(root)
+        if audit.get('warning'):
+            report['warnings'].append(audit['warning'])
+        emit_plan(report)
+        # Hooks must remain in Interface, not be appended below the last Peer.
+        clean = config(data, state, blocked, proxy=staged_proxy_ports(root)).decode()
+        match = re.search(r'(?m)^\s*\[Peer\]\s*$', clean)
+        position = match.start() if match else len(clean)
+        if match:
+            prefix = clean[:position].splitlines(keepends=True)
+            while prefix and (not prefix[-1].strip() or prefix[-1].lstrip().startswith('#')):
+                position -= len(prefix.pop())
+        (root / 'interface.conf').write_text(clean[:position].rstrip() + '\n')
+        (root / 'peers.conf').write_text('\n' + clean[position:])
+    else:
+        raise ValueError('unknown archive operation')
+
+
+try:
+    main()
+except StatePolicyError as error:
+    print('ERROR: ' + str(error), file=sys.stderr)
+    sys.exit(1)
+except (ValueError, KeyError, OSError, UnicodeError, tarfile.TarError, sqlite3.Error, EOFError, TypeError, OverflowError, zlib.error):
+    # Do not echo foreign config, SQL, passphrases or private values in diagnostics.
+    print('ERROR: invalid or unsupported state archive/data', file=sys.stderr)
+    sys.exit(1)
+AWG_STATE_PY
+}
+
+# Read allowlisted, validated literals as NUL-delimited data; no imported file is
+# sourced, including during installation. Re-serialize only our in-memory values.
+function awgStateReadParams() {
+	local FILE="$1" RECORDS="$2" NAME VALUE
+	awgStateArchive params "${FILE}" >"${RECORDS}" || return 1
+	for NAME in ${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}; do
+		unset "${NAME}"
+	done
+	while IFS= read -r -d '' NAME && IFS= read -r -d '' VALUE; do
+		printf -v "${NAME}" '%s' "${VALUE}"
+	done <"${RECORDS}"
+	validatePersistedAwgBackendState && validatePersistedAwgProtocolState && validateClientMtu
+}
+
+function awgStateDependencies() { # <allow-install: 0|1>
+	local TOOL MISSING=0
+	for TOOL in age python3 sqlite3; do
+		command -v "${TOOL}" >/dev/null 2>&1 || MISSING=1
+	done
+	((MISSING)) || return 0
+	if [[ "$1" != 1 ]]; then
+		echo 'ERROR: install age, python3 and sqlite3 first (read-only operations do not install packages).' >&2
+		return 1
+	fi
+	enable_apt_ipv4
+	# stdout of a streaming export is the ciphertext. apt progress stays on stderr.
+	apt-get update >&2 && apt-get install -y age python3 sqlite3 >&2
+	local STATUS=$?
+	disable_apt_ipv4
+	return "${STATUS}"
+}
+
+function awgStateWriteInstallState() {
+	local OLD_UMASK
+	OLD_UMASK="$(umask)"
+	umask 077
+	mkdir -p "${AMNEZIAWG_DIR}/clients" || return 1
+	chmod 700 "${AMNEZIAWG_DIR}" "${AMNEZIAWG_DIR}/clients" || return 1
+	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	serializeParams "${AMNEZIAWG_DIR}/params" || return 1
+	local DERIVED_KEY
+	DERIVED_KEY="$(printf '%s\n' "${SERVER_PRIV_KEY}" | awg pubkey)" || return 1
+	[[ "${DERIVED_KEY}" == "${SERVER_PUB_KEY}" ]] || {
+		echo 'ERROR: server public/private key mismatch.' >&2
+		return 1
+	}
+	# The original config is retained only in the encrypted archive.
+	# Only host hooks change; keys, peers, addresses, MTU and protocol fields do not.
+	cat "${_AWG_STATE_IMPORT_DIR}/interface.conf" >"${SERVER_AWG_CONF}" || return 1
+	writeFirewallRules >>"${SERVER_AWG_CONF}" || return 1
+	cat "${_AWG_STATE_IMPORT_DIR}/peers.conf" >>"${SERVER_AWG_CONF}" || return 1
+	local FILE
+	for FILE in "${_AWG_STATE_IMPORT_DIR}/clients/"*.conf; do
+		[[ -f "${FILE}" ]] || continue
+		install -m 600 -- "${FILE}" "${AMNEZIAWG_DIR}/clients/" || return 1
+	done
+	chmod 600 "${AMNEZIAWG_DIR}/params" "${SERVER_AWG_CONF}" || return 1
+	umask "${OLD_UMASK}"
+	mkdir -p "$(dirname "${AWG_SYSCTL_FILE}")" || return 1
+	printf 'net.ipv4.ip_forward = 1\n' >"${AWG_SYSCTL_FILE}" || return 1
+	if [[ "${ENABLE_IPV6}" == y ]]; then
+		printf 'net.ipv6.conf.all.forwarding = 1\n' >>"${AWG_SYSCTL_FILE}" || return 1
+	fi
+	chmod 644 "${AWG_SYSCTL_FILE}"
+	# Do not apply forwarding or firewall rules until the operator verifies/fences.
+}
+
+# Export expects the normal service locations. A custom DB/env is resolved from
+# the effective unit using existing read-only resolvers, not by sourcing env.conf.
+function awgStateSnapshotPanel() {
+	local STAGE="$1" DB ENV_FILE WORKDIR SETTING_RC
+	isWebPanelInstalled || return 0
+	if DB="$(readWebPanelExecStartSetting --database-url)"; then
+		[[ -n "${DB}" ]] || { echo 'ERROR: empty panel --database-url.' >&2; return 1; }
+	else
+		SETTING_RC=$?
+		[[ "${SETTING_RC}" -eq 1 ]] || return "${SETTING_RC}"
+		DB="$(readWebPanelSetting AWG_WEB_DB)" || return 1
+		# Clap's database_url default in amneziawg-web/src/main.rs, relative to
+		# the effective service WorkingDirectory (not the installer's cwd).
+		[[ -n "${DB}" ]] || DB=awg-web.db
+	fi
+	if [[ "${DB}" != /* ]]; then
+		WORKDIR="$(resolveWebPanelWorkingDirectory)" || return 1
+		DB="${WORKDIR}/${DB}"
+	fi
+	# URL/query DB formats need an explicit resolver; never guess and omit peers.
+	if [[ "${DB}" == *'?'* || "${DB}" == *'sqlite:'* || ! -f "${DB}" || -L "${DB}" ]]; then
+		echo 'ERROR: panel database path is unsupported/missing; export refused.' >&2
+		return 1
+	fi
+	command -v sqlite3 >/dev/null 2>&1 || {
+		echo 'ERROR: sqlite3 is required for the panel online backup.' >&2
+		return 1
+	}
+	mkdir -p "${STAGE}/web" || return 1
+	# Use .backup, never copy a live WAL-mode DB. Destination is a private mktemp path.
+	sqlite3 -readonly "${DB}" ".timeout 10000" ".backup '${STAGE}/web/database.sqlite'" || return 1
+	# .backup keeps the source's WAL mode; a later non-immutable open would
+	# create -wal/-shm sidecars that pack rejects. Make the copy a plain
+	# rollback-journal DB and prove no sidecar exists (readers use immutable=1).
+	sqlite3 "${STAGE}/web/database.sqlite" 'PRAGMA journal_mode=DELETE;' >/dev/null || return 1
+	local SIDECAR
+	for SIDECAR in -wal -shm -journal; do
+		if [[ -e "${STAGE}/web/database.sqlite${SIDECAR}" || -L "${STAGE}/web/database.sqlite${SIDECAR}" ]]; then
+			echo "ERROR: unexpected SQLite sidecar database.sqlite${SIDECAR} in staging." >&2
+			return 1
+		fi
+	done
+	ENV_FILE="$(resolveWebPanelEnvFile)" || return 1
+	if [[ -n "${ENV_FILE}" && -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]]; then
+		install -m 600 -- "${ENV_FILE}" "${STAGE}/web/env.conf" || return 1
+	fi
+	echo 'NOTE: panel DB/env and the proxy config stay inside the encrypted archive. --activate-state --enable-at-boot restores them when this checkout has the installers; queued mail is not replayed.' >&2
+}
+
+# Copy installer-managed client profiles. The first copy of a name wins.
+# A later different copy is skipped and named; it does not replace the first.
+function awgStateStageClientCopies() { # <destination clients directory>
+	local DEST="$1" FILE BASE
+	local -a CANDIDATES=()
+	mkdir -p -- "${DEST}" || return 1
+	collectAwgClientConfigCandidates CANDIDATES || return 1
+	for FILE in "${CANDIDATES[@]}"; do
+		BASE="${FILE##*/}"
+		# Candidates come root-owned directory first. Keep that first copy and
+		# never let a later same-name (e.g. user-writable home) copy replace or
+		# abort it; the operator is told which file was skipped.
+		if [[ -f "${DEST}/${BASE}" ]]; then
+			if ! cmp -s -- "${FILE}" "${DEST}/${BASE}"; then
+				echo 'WARNING: skipped a conflicting same-name client config copy (the first, preferred copy is exported):' >&2
+				LC_ALL=C printf '  %q\n' "${FILE}" >&2
+			fi
+		else
+			install -m 600 -- "${FILE}" "${DEST}/${BASE}" || return 1
+		fi
+	done
+}
+
+# Read-only. Prints two integers: hostname endpoints, then literal-IP endpoints.
+# The lifecycle lock is held only while profiles are copied into tmpfs and is
+# released before the counts are printed. Keys and Endpoint values are not printed.
+function awgStateEndpointSummary() (
+	set +x
+	umask 077
+	isRoot || exit 1
+	checkOS
+	[[ "${OS:-}" == debian || "${OS:-}" == ubuntu ]] || {
+		echo 'ERROR: state migration supports Debian/Ubuntu (and their supported derivatives) only.' >&2
+		exit 1
+	}
+	# The count is a python3 read of staged profiles. It does not encrypt, so
+	# age and sqlite3 are not required and must not be installed from here.
+	command -v python3 >/dev/null 2>&1 || {
+		echo 'ERROR: python3 is required to count client endpoints.' >&2
+		exit 1
+	}
+	local WORK TEXT HOST_COUNT IP_COUNT
+	local -a LINES=()
+	WORK="$(awgStateWorkDir)" || exit 1
+	trap 'rm -rf -- "${WORK}"; releaseClientLifecycleLock' EXIT
+	acquireClientLifecycleLock || exit 1
+	awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || { echo 'ERROR: unsafe source params path.' >&2; exit 1; }
+	awgStateReadParams "${AMNEZIAWG_DIR}/params" "${WORK}/records" || exit 1
+	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	[[ -f "${SERVER_AWG_CONF}" && ! -L "${SERVER_AWG_CONF}" ]] || {
+		echo 'ERROR: endpoint summary requires the server interface config.' >&2
+		exit 1
+	}
+	awgStateStageClientCopies "${WORK}/clients" || exit 1
+	TEXT="$(awgStateArchive endpoint-summary "${WORK}" 2>/dev/null)" || {
+		echo 'ERROR: could not count client endpoints.' >&2
+		exit 1
+	}
+	mapfile -t LINES <<<"${TEXT}"
+	HOST_COUNT="${LINES[0]:-}"
+	IP_COUNT="${LINES[1]:-}"
+	[[ "${HOST_COUNT}" =~ ^[0-9]+$ && "${IP_COUNT}" =~ ^[0-9]+$ ]] || {
+		echo 'ERROR: could not count client endpoints.' >&2
+		exit 1
+	}
+	# A blocked stdout must not keep the lifecycle lock.
+	releaseClientLifecycleLock
+	printf '%s\n%s\n' "${HOST_COUNT}" "${IP_COUNT}"
+)
+
+# Snapshot, validate and count. The lifecycle lock is released before return
+# so the caller can encrypt without holding it. Informative lines stay on
+# stdout; refusals and the literal-IP warning stay on stderr.
+function awgStatePrepareExport() { # <private work directory>
+	local WORK="$1"
+	acquireClientLifecycleLock || return 1
+	awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || { echo 'ERROR: unsafe source params path.' >&2; return 1; }
+	awgStateReadParams "${AMNEZIAWG_DIR}/params" "${WORK}/records" || return 1
+	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	local -a CONFIGS=("${AMNEZIAWG_DIR}/"*.conf)
+	[[ ${#CONFIGS[@]} -eq 1 && -f "${SERVER_AWG_CONF}" && ! -L "${SERVER_AWG_CONF}" ]] || {
+		echo 'ERROR: export requires exactly one server interface.' >&2
+		return 1
+	}
+	mkdir -p "${WORK}/stage/vpn" "${WORK}/stage/clients" || return 1
+	install -m 600 -- "${AMNEZIAWG_DIR}/params" "${WORK}/stage/vpn/params" || return 1
+	install -m 600 -- "${SERVER_AWG_CONF}" "${WORK}/stage/vpn/server.conf" || return 1
+	awgStateStageClientCopies "${WORK}/stage/clients" || return 1
+	awgStateSnapshotPanel "${WORK}/stage" || return 1
+	local PROXY_PATHS=()
+	awgStateProxyInstallPaths >"${WORK}/proxy.paths" || return 1
+	mapfile -t PROXY_PATHS <"${WORK}/proxy.paths"
+	if [[ ${#PROXY_PATHS[@]} -eq 3 && -f "${PROXY_PATHS[0]}" && ! -L "${PROXY_PATHS[0]}" ]]; then
+		mkdir -p "${WORK}/stage/proxy" || return 1
+		install -m 600 -- "${PROXY_PATHS[0]}" "${WORK}/stage/proxy/proxy.toml" || return 1
+		awgStateArchive proxy-meta "${PROXY_PATHS[@]}" >"${WORK}/stage/proxy/install.json" || return 1
+		chmod 600 "${WORK}/stage/proxy/install.json" || return 1
+	fi
+	# Validate the panel policy schema, the server config and every staged
+	# client profile now, before the prompt.
+	awgStateArchive export-check "${WORK}/stage" || {
+		echo 'ERROR: staged state would not be importable; export refused before encryption.' >&2
+		return 1
+	}
+	# Count before the prompt. A counting failure warns and continues: export
+	# must not fail after the archive has been published, and must not fail
+	# here either once the staged state itself is valid.
+	local ENDPOINT_AUDIT_TEXT=""
+	local -a ENDPOINT_AUDIT=()
+	if ENDPOINT_AUDIT_TEXT="$(awgStateArchive endpoint-summary "${WORK}/stage" 2>/dev/null)" \
+		&& mapfile -t ENDPOINT_AUDIT <<<"${ENDPOINT_AUDIT_TEXT}" \
+		&& [[ ${#ENDPOINT_AUDIT[@]} -ge 2 && "${ENDPOINT_AUDIT[0]}" =~ ^[0-9]+$ && "${ENDPOINT_AUDIT[1]}" =~ ^[0-9]+$ ]]; then
+		echo "Client endpoints in this archive: ${ENDPOINT_AUDIT[0]} hostname, ${ENDPOINT_AUDIT[1]} literal IP."
+		if [[ -n "${ENDPOINT_AUDIT[2]:-}" ]]; then
+			echo "WARNING: ${ENDPOINT_AUDIT[2]}" >&2
+		fi
+	else
+		echo 'WARNING: could not count client endpoints; export will continue.' >&2
+	fi
+	# The private staging copy is a complete, consistent snapshot. Do not hold
+	# the lifecycle locks (blocking panel/CLI operations) during the prompt.
+	releaseClientLifecycleLock
+}
+
+function awgStateExport() { # <destination> <private work directory>
+	local DEST="$1" WORK="$2" VERSION INSTALLER_SHA256
+	[[ ! -e "${DEST}" && ! -L "${DEST}" ]] || {
+		echo 'ERROR: export destination already exists.' >&2
+		return 1
+	}
+	awgStatePrepareExport "${WORK}" || return 1
+	VERSION="$(awg --version 2>/dev/null || printf unknown)"
+	INSTALLER_SHA256="$(awgStateInstallerSha256)"
+	# Stream plaintext tar directly into age. Its passphrase still comes only
+	# from /dev/tty, never argv/environment/logs. Check BOTH sides of the pipe.
+	if ! (set -o pipefail; awgStateArchive pack "${WORK}/stage" - "${VERSION}" "${INSTALLER_SHA256}" |
+		age --passphrase --output "${WORK}/encrypted"); then
+		rm -f -- "${WORK}/encrypted"
+		return 1
+	fi
+	# Link publishes atomically without overwriting a concurrent destination.
+	local PUBLISH
+	PUBLISH="$(mktemp "$(dirname -- "${DEST}")/.awg-state.XXXXXXXX")" || return 1
+	if ! install -m 600 -- "${WORK}/encrypted" "${PUBLISH}" || ! ln -- "${PUBLISH}" "${DEST}"; then
+		rm -f -- "${PUBLISH}"
+		return 1
+	fi
+	rm -f -- "${PUBLISH}"
+	echo 'Encrypted state archive created. Keep it offline; it grants full VPN access.'
+}
+
+# Ciphertext on stdout, and only after pack and age both succeed. Bash never
+# reads the passphrase: python3 -I reads descriptor N once, then closes it.
+# age 1.1.1 (Debian 12; the same prompts on the Ubuntu targets that ship it)
+# treats an empty entry as a request to invent a passphrase and print it on
+# the terminal, so an empty value is refused before age is started. Interactive
+# --export-state <file> is unchanged and still uses the caller's terminal.
+function awgStateExportStream() { # <private work directory> <passphrase-fd>
+	local WORK="$1" PASSFD="$2" VERSION INSTALLER_SHA256 PASS_COPY
+	[[ "${PASSFD}" =~ ^[0-9]+$ ]] || { echo 'ERROR: --passphrase-fd must be a descriptor number.' >&2; return 1; }
+	[[ -f "${BASH_SOURCE[0]:-}" && -r "${BASH_SOURCE[0]}" ]] || {
+		echo 'ERROR: streaming export requires the installer to be a regular file.' >&2
+		return 1
+	}
+	# Counts and warnings are not part of the archive.
+	awgStatePrepareExport "${WORK}" >&2 || return 1
+	VERSION="$(awg --version 2>/dev/null || printf unknown)"
+	INSTALLER_SHA256="$(awgStateInstallerSha256)"
+	# Duplicate first so the driver's own program text can use stdin.
+	exec {PASS_COPY}<&"${PASSFD}" || { echo 'ERROR: --passphrase-fd is not open for reading.' >&2; return 1; }
+	if ! awgStatePassphraseAge "${PASS_COPY}" "${WORK}/encrypted" "${WORK}/stage" "${VERSION}" "${INSTALLER_SHA256}" >/dev/null; then
+		exec {PASS_COPY}>&- || true
+		rm -f -- "${WORK}/encrypted"
+		return 1
+	fi
+	exec {PASS_COPY}>&- || true
+	[[ -f "${WORK}/encrypted" && ! -L "${WORK}/encrypted" && -s "${WORK}/encrypted" ]] || {
+		rm -f -- "${WORK}/encrypted"
+		echo 'ERROR: state encryption produced no archive.' >&2
+		return 1
+	}
+	cat -- "${WORK}/encrypted"
+}
+
+function awgStatePassphraseAge() { # <fd> <outfile> <stage> <awg-version> <installer-sha256>
+	python3 -I - "$1" "$2" "$3" "$4" "$5" "${BASH_SOURCE[0]}" <<'AWG_STATE_AGE_PY'
+# Reads the passphrase from a pipe, answers age's two /dev/tty prompts, and
+# writes ciphertext to the outfile. Nothing from the terminal is logged.
+import os
+import select
+import signal
+import stat
+import subprocess
+import sys
+import time
+import traceback
+
+try:
+    import pty
+    import termios
+except ImportError:
+    sys.stderr.write("ERROR: python3 pty support is required for streaming export.\n")
+    raise SystemExit(1)
+
+PASS_MIN = 16
+PASS_MAX = 1024
+PASS_READ_S = 30
+DEADLINE_S = 300
+PROMPTS = (
+    b"Enter passphrase (leave empty to autogenerate a secure one): ",
+    b"Confirm passphrase: ",
+)
+passphrase = bytearray()
+children = []
+out_fd = None
+out_path = None
+pty_fd = None
+success = False
+
+
+def wipe(buf):
+    if isinstance(buf, bytearray):
+        for index in range(len(buf)):
+            buf[index] = 0
+
+
+def stop_children():
+    for kind, pid in children:
+        try:
+            if kind == "group":
+                os.killpg(pid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    for kind, pid in children:
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+    children.clear()
+
+
+def fail(message):
+    sys.stderr.write("ERROR: %s\n" % message)
+    raise SystemExit(1)
+
+
+def strip_controls(data):
+    out = bytearray()
+    index = 0
+    while index < len(data):
+        if data.startswith(b"\x1b[F", index) or data.startswith(b"\x1b[K", index):
+            index += 3
+            continue
+        if data[index] in (0x0d, 0x0a):
+            index += 1
+            continue
+        if data[index] == 0x1b:
+            return None
+        out.append(data[index])
+        index += 1
+    return bytes(out)
+
+
+def write_all(fd, data):
+    view = data
+    while view:
+        wrote = os.write(fd, view)
+        if wrote <= 0:
+            raise OSError("short write")
+        view = view[wrote:]
+
+
+try:
+    pass_fd = int(sys.argv[1])
+    out_path = sys.argv[2]
+    stage = sys.argv[3]
+    version = sys.argv[4]
+    installer_sha = sys.argv[5]
+    installer = sys.argv[6]
+    def on_stop(_signum, _frame):
+        # finally kills age and pack and unlinks a partial ciphertext file.
+        raise SystemExit(1)
+
+    signal.signal(signal.SIGTERM, on_stop)
+    signal.signal(signal.SIGHUP, on_stop)
+    signal.signal(signal.SIGINT, on_stop)
+    info = os.fstat(pass_fd)
+    if not stat.S_ISFIFO(info.st_mode):
+        fail("passphrase descriptor must be a pipe, not a terminal or a file")
+    # Stop waiting if the caller never sends the passphrase. This is before
+    # age, and before any ciphertext exists.
+    read_deadline = time.monotonic() + PASS_READ_S
+    while len(passphrase) <= PASS_MAX:
+        remaining = read_deadline - time.monotonic()
+        if remaining <= 0:
+            fail("timed out waiting for the passphrase")
+        ready, _, _ = select.select([pass_fd], [], [], min(remaining, 1.0))
+        if not ready:
+            continue
+        chunk = os.read(pass_fd, PASS_MAX + 1 - len(passphrase))
+        if not chunk:
+            break
+        passphrase += chunk
+    os.close(pass_fd)
+    pass_fd = -1
+    if len(passphrase) > PASS_MAX:
+        fail("passphrase is longer than 1024 bytes")
+    if not passphrase:
+        fail("passphrase is empty")
+    # Canonical tty processing would apply C0 controls and DEL before age
+    # saw the line (^U kills the line, ^W deletes a word, ^H/DEL erase).
+    if any(byte < 32 or byte == 127 for byte in passphrase):
+        fail("passphrase contains a control character")
+    try:
+        decoded = passphrase.decode("utf-8")
+    except UnicodeError:
+        fail("passphrase is not valid UTF-8")
+    if len(decoded) < PASS_MIN:
+        fail("passphrase is shorter than 16 characters")
+    del decoded
+
+    # RDWR so the header can be read back. O_WRONLY makes that read fail with EBADF.
+    out_fd = os.open(out_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    tar_r, tar_w = os.pipe()
+    pack_err_r, pack_err_w = os.pipe()
+    pack_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C", "LANG": "C"}
+    pack = subprocess.Popen(
+        ["bash", "-c", 'source "$1" || exit 97; shift; awgStateArchive "$@"',
+         "awg-state-pack", installer, "pack", stage, "-", version, installer_sha],
+        stdin=subprocess.DEVNULL, stdout=tar_w, stderr=pack_err_w,
+        env=pack_env, start_new_session=True, close_fds=True)
+    os.close(tar_w)
+    os.close(pack_err_w)
+    children.append(("group", pack.pid))
+    cipher_r, cipher_w = os.pipe()
+    err_r, err_w = os.pipe()
+    age_pid, pty_fd = pty.fork()
+    if age_pid == 0:
+        try:
+            settings = termios.tcgetattr(0)
+            settings[3] &= ~termios.ECHO
+            termios.tcsetattr(0, termios.TCSANOW, settings)
+            # Keep one open slave fd. Closing the last one drops the
+            # controlling terminal, the kernel sends SIGHUP, and age dies
+            # before it can open /dev/tty. os.dup() is close-on-exec, so the
+            # extra fd must be made inheritable or exec closes it too.
+            # dup2 onto 0/1/2 clears close-on-exec; set it again explicitly.
+            slave = os.dup(0)
+            os.dup2(tar_r, 0)
+            os.dup2(cipher_w, 1)
+            os.dup2(err_w, 2)
+            os.set_inheritable(slave, True)
+            os.set_inheritable(0, True)
+            os.set_inheritable(1, True)
+            os.set_inheritable(2, True)
+            keep = {0, 1, 2, slave}
+            for name in os.listdir("/proc/self/fd"):
+                if name.isdigit() and int(name) not in keep:
+                    try:
+                        os.close(int(name))
+                    except OSError:
+                        pass
+            os.execvpe("age", ["age", "--passphrase"], pack_env)
+        except OSError as exc:
+            try:
+                os.write(2, ("age failed to start: %s\n" % exc).encode())
+            except OSError:
+                pass
+            os._exit(127)
+    children.append(("pid", age_pid))
+    os.close(tar_r)
+    os.close(cipher_w)
+    os.close(err_w)
+    streams = {pty_fd: "pty", cipher_r: "cipher", err_r: "err", pack_err_r: "packerr"}
+    terminal = bytearray()
+    err_buf = bytearray()
+    stage_n = 0
+    echoed = False
+    unexpected = False
+    deadline = time.monotonic() + DEADLINE_S
+    while streams and time.monotonic() < deadline and not unexpected and not echoed:
+        while stage_n < 2:
+            visible = strip_controls(terminal)
+            prompt = PROMPTS[stage_n]
+            if visible is None:
+                unexpected = True
+                break
+            if visible.startswith(prompt):
+                write_all(pty_fd, bytes(passphrase) + b"\n")
+                terminal = bytearray(visible[len(prompt):])
+                stage_n += 1
+                continue
+            if prompt.startswith(visible):
+                break
+            unexpected = True
+            break
+        if stage_n >= 2 and terminal:
+            visible = strip_controls(terminal)
+            if visible is None or visible:
+                unexpected = True
+            terminal = bytearray()
+        if unexpected:
+            break
+        readable, _, _ = select.select(list(streams), [], [], 0.2)
+        if not readable:
+            continue
+        for fd in readable:
+            kind = streams.get(fd)
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                data = b""
+            if not data:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                streams.pop(fd, None)
+                continue
+            if kind == "cipher":
+                os.write(out_fd, data)
+            elif kind in ("err", "packerr"):
+                err_buf += data
+                if len(err_buf) > 8192:
+                    del err_buf[:-8192]
+            else:
+                if bytes(passphrase) in data:
+                    echoed = True
+                    break
+                terminal += data
+                if stage_n >= 2:
+                    visible = strip_controls(terminal)
+                    if visible is None or visible:
+                        unexpected = True
+                        break
+                    terminal = bytearray()
+    if time.monotonic() >= deadline and (stage_n < 2 or streams):
+        fail("state encryption timed out")
+    if echoed:
+        fail("passphrase was echoed by the terminal")
+    if unexpected or stage_n != 2:
+        visible = strip_controls(terminal)
+        if not isinstance(visible, (bytes, bytearray)):
+            visible = b""
+        secret = bytes(passphrase)
+        if secret:
+            visible = visible.replace(secret, b"[redacted]")
+        diag = bytes(err_buf)
+        if secret:
+            diag = diag.replace(secret, b"[redacted]")
+        if stage_n != 2 and not unexpected:
+            try:
+                done, status = os.waitpid(age_pid, os.WNOHANG)
+            except OSError:
+                done = 0
+            if done:
+                children[:] = [item for item in children if item[1] != age_pid]
+                fail("age exited before the passphrase prompts (status %s): %r" % (
+                    os.waitstatus_to_exitcode(status), diag[:240]))
+        fail("age produced unexpected terminal output (%r / %r)" % (bytes(visible[:120]), diag[:240]))
+    age_pid_done, age_status = os.waitpid(age_pid, 0)
+    children = [item for item in children if item[1] != age_pid]
+    pack_status = pack.wait(timeout=30)
+    children = [item for item in children if item[1] != pack.pid]
+    age_code = os.waitstatus_to_exitcode(age_status) if age_pid_done else 1
+    if age_code != 0 or pack_status != 0:
+        fail("state encryption failed")
+    if os.fstat(out_fd).st_size < 32:
+        fail("state encryption produced no archive")
+    os.lseek(out_fd, 0, os.SEEK_SET)
+    if not os.read(out_fd, 32).startswith(b"age-encryption.org/"):
+        fail("state encryption produced an unexpected archive")
+    success = True
+except SystemExit:
+    raise
+except Exception:
+    detail = traceback.format_exc()
+    if passphrase and bytes(passphrase) in detail.encode():
+        detail = "ERROR: state encryption failed.\n"
+    else:
+        detail = "ERROR: state encryption failed.\n" + detail
+    sys.stderr.write(detail)
+    raise SystemExit(1)
+finally:
+    wipe(passphrase)
+    if not success:
+        stop_children()
+        if out_fd is not None:
+            try:
+                os.close(out_fd)
+            except OSError:
+                pass
+            out_fd = None
+        if out_path:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+    else:
+        if out_fd is not None:
+            os.close(out_fd)
+        if pty_fd is not None:
+            try:
+                os.close(pty_fd)
+            except OSError:
+                pass
+AWG_STATE_AGE_PY
+}
+
+# Hash the installer only when it runs from a regular file. Under
+# `bash <(curl ...)` BASH_SOURCE is an already-consumed pipe; report unknown
+# rather than the hash of empty/partial input.
+function awgStateInstallerSha256() {
+	local SOURCE="${BASH_SOURCE[0]:-}" SUM
+	if [[ -n "${SOURCE}" && -f "${SOURCE}" && -r "${SOURCE}" ]] &&
+		SUM="$(sha256sum -- "${SOURCE}" 2>/dev/null)" && [[ "${SUM%% *}" =~ ^[0-9a-f]{64}$ ]]; then
+		printf '%s\n' "${SUM%% *}"
+	else
+		printf 'unknown\n'
+	fi
+}
+
+# No symlink components or non-root-writable ancestors for privileged output.
+function awgStateTrustedPath() {
+	local NODE="$1" OWNER MODE
+	[[ "${NODE}" == /* ]] || return 1
+	while [[ "${NODE}" != / ]]; do
+		[[ ! -L "${NODE}" ]] || return 1
+		if [[ -e "${NODE}" ]]; then
+			OWNER="$(stat -c %u -- "${NODE}")" || return 1
+			MODE="$(stat -c %a -- "${NODE}")" || return 1
+			[[ "${OWNER}" == 0 ]] && (( (8#${MODE} & 022) == 0 )) || return 1
+		fi
+		NODE="$(dirname -- "${NODE}")"
+	done
+}
+
+function awgStateImportPreflight() {
+	local NIC="$1" WORK="$2" FILE
+	for FILE in "${AWG_SYSCTL_FILE}" "${AWG_MODULES_LOAD_FILE}" "${AWG_BT_MODPROBE_OVERRIDE}" "${AWG_SYSTEMD_UNIT_DIR}"; do
+		awgStateTrustedPath "${FILE}" || { echo 'ERROR: unsafe privileged output path.' >&2; return 1; }
+	done
+	if systemctl is-active --quiet "awg-quick@${SERVER_AWG_NIC}" || systemctl is-enabled --quiet "awg-quick@${SERVER_AWG_NIC}"; then
+		echo 'ERROR: target VPN service is already active/enabled.' >&2
+		return 1
+	fi
+	awgStateTrustedPath "${AMNEZIAWG_DIR}" || { echo 'ERROR: unsafe target config path.' >&2; return 1; }
+	[[ "${NIC}" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,14}$ ]] || {
+		echo 'ERROR: set SERVER_PUB_NIC to the target public interface.' >&2
+		return 1
+	}
+	ip link show dev "${NIC}" >/dev/null 2>&1 || {
+		echo 'ERROR: target public interface does not exist.' >&2
+		return 1
+	}
+	# An import never replaces another installation, even with the same backend.
+	# The only exception is a verified, unchanged successful rerun (checked first).
+	if [[ -d "${AMNEZIAWG_DIR}" ]]; then
+		for FILE in "${AMNEZIAWG_DIR}/"* "${AMNEZIAWG_DIR}/".[!.]* "${AMNEZIAWG_DIR}/"..?*; do
+			[[ ! -e "${FILE}" && ! -L "${FILE}" ]] || {
+				echo 'ERROR: target configuration directory is not empty; refusing to replace an installation.' >&2
+				return 1
+			}
+		done
+	fi
+	if ip link show dev "${SERVER_AWG_NIC}" >/dev/null 2>&1; then
+		echo 'ERROR: target VPN interface is already in use.' >&2
+		return 1
+	fi
+	command -v ss >/dev/null 2>&1 || { echo 'ERROR: iproute2 (ss) is required.' >&2; return 1; }
+	ss -H -lun "sport = :${SERVER_PORT}" >"${WORK}/ports" || return 1
+	[[ ! -s "${WORK}/ports" ]] || { echo 'ERROR: target UDP port is already in use.' >&2; return 1; }
+	# amneziawg-proxy topology: AWG itself listens on the proxy backend port.
+	if [[ -n "${AWG_STATE_AWG_PORT:-}" && "${AWG_STATE_AWG_PORT}" != "${SERVER_PORT}" ]]; then
+		ss -H -lun "sport = :${AWG_STATE_AWG_PORT}" >"${WORK}/ports" || return 1
+		[[ ! -s "${WORK}/ports" ]] || { echo "ERROR: target UDP port ${AWG_STATE_AWG_PORT} (AWG behind amneziawg-proxy) is already in use." >&2; return 1; }
+	fi
+	# A pre-existing unit/drop-in could run arbitrary local commands on activation.
+	for FILE in "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service" "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service.d"; do
+		[[ ! -e "${FILE}" && ! -L "${FILE}" ]] || {
+			echo 'ERROR: target VPN unit/drop-in already exists.' >&2
+			return 1
+		}
+	done
+}
+
+# Transaction owns a fresh config directory and newly generated units only.
+# Packages, signed apt sources and verified BoringTun binaries are deliberately
+# not uninstalled on failure; no VPN service is enabled or started by import.
+function awgStateImportTransaction() (
+	local STAGE="$1" JOURNAL="$2" COMMITTED=0 CONFIG_EXISTED=0 FILE INDEX=0
+	local -a TRACKED=("${AWG_SYSCTL_FILE}" "${AWG_MODULES_LOAD_FILE}" "${AWG_BT_MODPROBE_OVERRIDE}")
+	[[ -d "${AMNEZIAWG_DIR}" ]] && CONFIG_EXISTED=1
+	# After an INCOMPLETE rollback the host is in an unknown mixed state:
+	# a new before-image would capture it as "before" and lose the real one.
+	# Refuse until the operator has inspected/restored and purged the journal.
+	awgStateRefuseIncompleteRollback "${JOURNAL}" || exit 1
+	# Take a complete fresh before-image for THIS attempt (absence = no slot
+	# file), then swap it in. A failed snapshot keeps the previous image intact;
+	# a retry never restores a stale backup of a since-removed file.
+	rm -rf --one-file-system -- "${JOURNAL}/before.new" "${JOURNAL}/before.old" || exit 1
+	mkdir -p "${JOURNAL}/before.new" || exit 1
+	for FILE in "${TRACKED[@]}"; do
+		[[ ! -L "${FILE}" ]] || exit 1
+		if [[ -e "${FILE}" ]]; then
+			[[ -f "${FILE}" ]] || exit 1
+			cp -p -- "${FILE}" "${JOURNAL}/before.new/${INDEX}" || exit 1
+		fi
+		INDEX=$((INDEX + 1))
+	done
+	if [[ -e "${JOURNAL}/before" ]]; then
+		mv -T -- "${JOURNAL}/before" "${JOURNAL}/before.old" || exit 1
+	fi
+	mv -T -- "${JOURNAL}/before.new" "${JOURNAL}/before" || exit 1
+	rm -rf --one-file-system -- "${JOURNAL}/before.old" || exit 1
+	function stateImportFinish() {
+		local STATUS=$? FILE INDEX=0 INCOMPLETE=0
+		# Cleanup must run to the end: no errexit, no re-entrant signals, and
+		# every step is attempted even when an earlier one (or logging) fails.
+		set +e
+		trap '' INT TERM HUP
+		if (( ! COMMITTED )); then
+			awgStateJournalStep "${JOURNAL}" rollback
+			rm -f -- "${JOURNAL}/receipt" || INCOMPLETE=1
+			# The clean install hook returns before systemctl enable/start.
+			rm -rf -- "${AMNEZIAWG_DIR}" "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service.d" || INCOMPLETE=1
+			rm -f -- "${AWG_SYSTEMD_UNIT_DIR}/awg-quick@${SERVER_AWG_NIC}.service" || INCOMPLETE=1
+			if ((CONFIG_EXISTED)); then
+				{ mkdir -p "${AMNEZIAWG_DIR}" && chmod 700 "${AMNEZIAWG_DIR}"; } || INCOMPLETE=1
+			fi
+			for FILE in "${TRACKED[@]}"; do
+				if [[ -f "${JOURNAL}/before/${INDEX}" ]]; then
+					cp -p -- "${JOURNAL}/before/${INDEX}" "${FILE}" || INCOMPLETE=1
+				else
+					rm -f -- "${FILE}" || INCOMPLETE=1
+				fi
+				INDEX=$((INDEX + 1))
+			done
+			systemctl daemon-reload || true
+			if ((INCOMPLETE)); then
+				echo "ERROR: import rollback was INCOMPLETE; inspect ${AMNEZIAWG_DIR}, the unit directory and ${JOURNAL}/before, restore manually, then run --purge-state-journal ${JOURNAL##*/} --force." >&2
+				if : 2>/dev/null >"${JOURNAL}/rollback-incomplete"; then
+					echo 'New import/activation attempts for this archive are refused until then.' >&2
+				else
+					echo "WARNING: could not write ${JOURNAL}/rollback-incomplete; later attempts are NOT blocked automatically. Do not rerun before the manual check: a rerun would record the current mixed state as its before-image." >&2
+				fi
+			else
+				echo "ERROR: import rolled back config/unit changes; inspect ${JOURNAL}/steps. Packages may remain installed." >&2
+			fi
+			((STATUS)) || STATUS=1
+		fi
+		return "${STATUS}"
+	}
+	trap stateImportFinish EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	trap 'exit 129' HUP
+	# The install/validation work runs in its own subshell. Nested helpers
+	# (e.g. the APT IPv4 scope) may replace EXIT/INT/TERM/HUP traps there; they
+	# can never replace or bypass this transaction's rollback trap. Run it as a
+	# plain command (not under `if`/`!`) so errexit propagates inside it.
+	(
+		trap 'exit 130' INT
+		trap 'exit 143' TERM
+		trap 'exit 129' HUP
+		set -e
+		printf '%s\n' install-packages >>"${JOURNAL}/steps"
+		_AWG_STATE_IMPORT_DIR="${STAGE}"
+		installAmneziaWG
+		printf '%s\n' validate-installed-protocol >>"${JOURNAL}/steps"
+		ensureAwgBackendReady 0
+		mkdir -p "${STAGE}/validate"
+		validateStagedAwgConfigs "${STAGE}/validate" --label imported-server "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+		# Installation can take minutes; refresh expiration at import completion too.
+		awgStateArchive reconcile "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" "${STAGE}" "${STAGE}/post-install.conf"
+		replaceFileExactly "${STAGE}/post-install.conf" "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" 600
+		printf '%s\n' restore-complete-quarantined >>"${JOURNAL}/steps"
+		# The encrypted archive IS the recovery copy: never keep plaintext keys,
+		# panel DB/env or proxy config in the journal. Never source env.conf, start
+		# the panel, replay the mail queue or expose a proxy listener.
+		# Receipt includes the target NIC and archive identity, plus target file hashes.
+		printf '%s\n' "${SERVER_PUB_NIC}" >"${JOURNAL}/nic"
+		sha256sum "${AMNEZIAWG_DIR}/params" "${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf" >"${JOURNAL}/receipt"
+		for FILE in "${AMNEZIAWG_DIR}/clients/"*.conf; do
+			[[ ! -f "${FILE}" ]] || sha256sum "${FILE}" >>"${JOURNAL}/receipt"
+		done
+		printf '%s\n' committed >>"${JOURNAL}/steps"
+	)
+	FILE=$?
+	((FILE == 0)) || exit "${FILE}"
+	COMMITTED=1
+)
+
+# Receipts are local root-owned state, never supplied by an archive. Publish a
+# complete new receipt atomically after a monotonic (removals-only) reconcile.
+function awgStateWriteReceipt() { # <journal> <private temporary output>
+	local JOURNAL="$1" OUTPUT="$2" FILE
+	sha256sum "${AMNEZIAWG_DIR}/params" "${SERVER_AWG_CONF}" >"${OUTPUT}" || return 1
+	for FILE in "${AMNEZIAWG_DIR}/clients/"*.conf; do
+		[[ ! -f "${FILE}" ]] || sha256sum "${FILE}" >>"${OUTPUT}" || return 1
+	done
+	replaceFileExactly "${OUTPUT}" "${JOURNAL}/receipt" 600
+}
+
+# Root-private persistent tombstone; no archived policy may be replayed after
+# finalization. It survives purging all secret/recovery material from the journal.
+function awgStateIsFinalized() { # <journal> <interface>
+	local MARKER="$1/finalized" INTERFACE="$2"
+	[[ -f "${MARKER}" && ! -L "${MARKER}" ]] && awgStateTrustedPath "${MARKER}" &&
+		[[ "$(<"${MARKER}")" == "${INTERFACE}" ]]
+}
+
+# Cross-archive tombstone, keyed by server identity (interface + public key),
+# under the journal directory that uninstall keeps. A finalized migration
+# records its archive exported_at; an archive of the same server that is not
+# newer could resurrect removed peers and needs an explicit reset.
+function awgStateIdentityDir() {
+	printf '%s\n' "${AWG_STATE_JOURNAL_DIR}/identities"
+}
+
+function awgStateCheckIdentityTombstone() { # <stage>
+	local IDENTITY EXPORTED MARKER LINE OLD_EXPORTED OLD_DIGEST OUTPUT
+	# Separate command: a failing verifier must fail here, not yield empty input.
+	OUTPUT="$(awgStateArchive identity "${1}")" || return 1
+	read -r IDENTITY EXPORTED <<<"${OUTPUT}"
+	[[ "${IDENTITY}" =~ ^[0-9a-f]{64}$ && "${EXPORTED}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+	MARKER="$(awgStateIdentityDir)/${IDENTITY}"
+	[[ -e "${MARKER}" || -L "${MARKER}" ]] || return 0
+	if [[ -L "${MARKER}" || ! -f "${MARKER}" ]] || ! awgStateTrustedPath "${MARKER}"; then
+		echo 'ERROR: unsafe server-identity tombstone; refusing import.' >&2
+		return 1
+	fi
+	LINE="$(<"${MARKER}")"
+	read -r OLD_EXPORTED OLD_DIGEST <<<"${LINE}"
+	if [[ ! "${OLD_EXPORTED}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ || ! "${OLD_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+		echo 'ERROR: invalid server-identity tombstone; refusing import.' >&2
+		return 1
+	fi
+	# Fixed-width UTC timestamps order lexicographically.
+	if [[ ! "${EXPORTED}" > "${OLD_EXPORTED}" ]]; then
+		echo "ERROR: a migration of this server from an archive exported at ${OLD_EXPORTED} was already finalized here; this archive (${EXPORTED}) is not newer and could resurrect removed peers." >&2
+		echo "After uninstalling, deliberately allow it with --reset-state-journal ${OLD_DIGEST} --confirm-policy-replay." >&2
+		return 1
+	fi
+}
+
+# Idempotent: keeps an entry that is already as new or newer, so a rerun of
+# --activate-state on a finalized journal retries a previously failed write.
+function awgStateRecordIdentityTombstone() { # <stage> <digest> <work>
+	local IDENTITY EXPORTED DIR OUTPUT LINE OLD_EXPORTED OLD_DIGEST
+	OUTPUT="$(awgStateArchive identity "${1}")" || return 1
+	read -r IDENTITY EXPORTED <<<"${OUTPUT}"
+	[[ "${IDENTITY}" =~ ^[0-9a-f]{64}$ && "${EXPORTED}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ && "${2}" =~ ^[0-9a-f]{64}$ ]] || return 1
+	DIR="$(awgStateIdentityDir)"
+	if [[ -f "${DIR}/${IDENTITY}" && ! -L "${DIR}/${IDENTITY}" ]]; then
+		LINE="$(<"${DIR}/${IDENTITY}")"
+		read -r OLD_EXPORTED OLD_DIGEST <<<"${LINE}"
+		if [[ "${OLD_EXPORTED}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ && "${OLD_DIGEST}" =~ ^[0-9a-f]{64}$ ]] &&
+			[[ ! "${EXPORTED}" > "${OLD_EXPORTED}" ]]; then
+			return 0
+		fi
+	fi
+	[[ ! -L "${DIR}" ]] || return 1
+	[[ -d "${DIR}" ]] || mkdir -m 700 -- "${DIR}" || return 1
+	awgStateTrustedPath "${DIR}" || return 1
+	printf '%s %s\n' "${EXPORTED}" "${2}" >"${3}/identity" || return 1
+	replaceFileExactly "${3}/identity" "${DIR}/${IDENTITY}" 600
+}
+
+# Append an audit-only step; the receipt/finalized marker carry state.
+function awgStateJournalStep() { # <journal> <step>
+	if ! { printf '%s\n' "$2" >>"$1/steps"; } 2>/dev/null; then
+		echo "WARNING: could not append '$2' to $1/steps (audit log only; state is unaffected)." >&2
+	fi
+}
+
+# Activation guard state (set only while an activation may have started the unit).
+_AWG_STATE_ACTIVATION_UNIT=""
+_AWG_STATE_ACTIVATION_JOURNAL=""
+
+# Undo a not-yet-finalized activation: disable (harmless if never enabled) and
+# stop. A published finalized marker means the terminal state was reached.
+function awgStateActivationAbort() {
+	local UNIT="${_AWG_STATE_ACTIVATION_UNIT}" JOURNAL="${_AWG_STATE_ACTIVATION_JOURNAL}"
+	[[ -n "${UNIT}" ]] || return 0
+	if [[ -n "${JOURNAL}" && -f "${JOURNAL}/finalized" && ! -L "${JOURNAL}/finalized" ]]; then
+		awgStateActivationDisarm
+		return 0
+	fi
+	systemctl disable "${UNIT}" >/dev/null 2>&1 || true
+	systemctl stop "${UNIT}" || true
+	awgStateActivationDisarm
+}
+
+function awgStateActivationDisarm() {
+	_AWG_STATE_ACTIVATION_UNIT=""
+	_AWG_STATE_ACTIVATION_JOURNAL=""
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	trap 'exit 129' HUP
+}
+
+function awgStateActivationInterrupted() { # <exit status>
+	trap '' INT TERM HUP
+	local JOURNAL="${_AWG_STATE_ACTIVATION_JOURNAL}"
+	echo 'ERROR: activation interrupted before finalization; stopping and disabling the VPN. The import stays quarantined; rerun --activate-state to retry.' >&2
+	awgStateActivationAbort
+	[[ -z "${JOURNAL}" ]] || awgStateJournalStep "${JOURNAL}" activation-interrupted
+	exit "$1"
+}
+
+function awgStateWarnIdentityTombstone() {
+	echo "WARNING: could not write the server-identity tombstone in $(awgStateIdentityDir)/. The migration IS finalized, but older archives of this server are NOT blocked from a later import. Fix the cause and rerun --activate-state <same-archive> to retry the write." >&2
+}
+
+function awgStateDropIdentityTombstones() { # <digest>
+	local DIR FILE LINE OLD_EXPORTED OLD_DIGEST
+	DIR="$(awgStateIdentityDir)"
+	[[ -d "${DIR}" && ! -L "${DIR}" ]] || return 0
+	for FILE in "${DIR}/"*; do
+		[[ -f "${FILE}" && ! -L "${FILE}" ]] || continue
+		LINE="$(<"${FILE}")"
+		read -r OLD_EXPORTED OLD_DIGEST <<<"${LINE}"
+		[[ "${OLD_DIGEST}" != "${1}" ]] || rm -f -- "${FILE}" || return 1
+	done
+}
+
+# Warn when the restored server MTU or client MTU does not fit this host's
+# outer budget. Keys/configs are restored exactly; the operator decides.
+function awgStateWarnMtuBudget() { # <server.conf>
+	local BUDGET SERVER_MTU LIMIT
+	BUDGET="$(freshOuterMtuBudget)"
+	warnIfClientMtuUnsafe "${BUDGET}"
+	SERVER_MTU="$(awk -F= '/^[[:space:]]*\[/ {s=$0; gsub(/[[:space:]]/, "", s)} s == "[Interface]" && $1 ~ /^[[:space:]]*MTU[[:space:]]*$/ {v=$2; gsub(/[[:space:]]/, "", v); print v; exit}' "${1}")"
+	[[ "${SERVER_MTU}" =~ ^[0-9]{1,5}$ ]] || return 0
+	LIMIT="$(recommendedMtuForS4 "$((10#${SERVER_AWG_S4:-0}))" "${BUDGET}" 2>/dev/null)" || return 0
+	if (( 10#${SERVER_MTU} > LIMIT )); then
+		echo "WARNING: restored server MTU ${SERVER_MTU} exceeds ${LIMIT}, the largest that fits this host's ${BUDGET}-byte outer budget with S4=${SERVER_AWG_S4:-0}. Lower MTU in the server config after import if large packets stall." >&2
+	fi
+}
+
+# SERVER_PUB_IP override for imports. A hostname/IPv4 never contains ':', so
+# host:port is rejected; a value with ':' must be a bare or bracketed IPv6
+# address. Brackets are stripped: the installer adds them itself when it
+# builds Endpoint="[v6]:port", exactly as for interactive installs.
+# Returns 1 for malformed/unspecified values, 2 for loopback/multicast.
+function awgStateNormalizePubHost() { # <value>; prints the normalized value
+	local VALUE="$1" LABEL OCTET
+	local -a PARTS
+	if [[ "${VALUE}" == '['* || "${VALUE}" == *']' ]]; then
+		# Brackets only as one balanced pair around an IPv6 address.
+		[[ "${VALUE}" == '['*']' ]] || return 1
+		VALUE="${VALUE:1:${#VALUE}-2}"
+		[[ "${VALUE}" == *:* ]] || return 1
+	fi
+	if [[ "${VALUE}" == *:* ]]; then
+		[[ "${VALUE}" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+		# Valid IPv6; unspecified (::, ::ffff:0.0.0.0 ...) is invalid (1);
+		# loopback/multicast, also IPv4-mapped, cannot be an endpoint (2).
+		python3 -I -c 'import ipaddress, sys
+try:
+    a = ipaddress.IPv6Address(sys.argv[1])
+except ValueError:
+    sys.exit(1)
+m = a.ipv4_mapped
+if a.is_unspecified or (m is not None and m.is_unspecified):
+    sys.exit(1)
+if any(x is not None and (x.is_loopback or x.is_multicast) for x in (a, m)):
+    sys.exit(2)' "${VALUE}" 2>/dev/null || return $?
+	elif [[ "${VALUE}" =~ ^[0-9.]+$ ]]; then
+		# All digits and dots: must be a dotted-quad IPv4, octets 0-255, no
+		# leading zeros (ambiguous octal), not the unspecified 0.0.0.0.
+		IFS=. read -r -a PARTS <<<"${VALUE}"
+		[[ ${#PARTS[@]} -eq 4 && "${VALUE}" != *. && "${VALUE}" != 0.0.0.0 ]] || return 1
+		for OCTET in "${PARTS[@]}"; do
+			[[ "${OCTET}" =~ ^(0|[1-9][0-9]{0,2})$ ]] && ((10#${OCTET} <= 255)) || return 1
+		done
+		# Loopback 127.0.0.0/8 and multicast 224.0.0.0/4.
+		((PARTS[0] != 127 && (PARTS[0] < 224 || PARTS[0] > 239))) || return 2
+	else
+		# DNS hostname: 1-253 chars; labels 1-63 chars, alnum at both ends,
+		# letters/digits/hyphens inside, no empty labels. A trailing root dot
+		# is not accepted (profiles keep the name as written).
+		[[ ${#VALUE} -ge 1 && ${#VALUE} -le 253 ]] || return 1
+		[[ "${VALUE}" != .* && "${VALUE}" != *. && "${VALUE}" != *..* ]] || return 1
+		IFS=. read -r -a PARTS <<<"${VALUE}"
+		for LABEL in "${PARTS[@]}"; do
+			[[ ${#LABEL} -le 63 && "${LABEL}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+		done
+	fi
+	printf '%s\n' "${VALUE}"
+}
+
+# After an INCOMPLETE rollback the host is in an unknown mixed state: a new
+# before-image would record it as "before", and a rerun/activation would act
+# on it. Refuse until the operator has inspected and purged the journal.
+function awgStateRefuseIncompleteRollback() { # <journal>
+	local JOURNAL="$1"
+	[[ -e "${JOURNAL}/rollback-incomplete" || -L "${JOURNAL}/rollback-incomplete" ]] || return 0
+	echo "ERROR: a previous import rollback was INCOMPLETE; refusing (including --dry-run and --activate-state). Inspect ${AMNEZIAWG_DIR}, the unit directory and ${JOURNAL}/before, restore manually, then run --purge-state-journal ${JOURNAL##*/} --force before retrying." >&2
+	return 1
+}
+
+# ── Panel restore (amneziawg-web) ────────────────────────────────────────────
+# Runs only after the VPN migration is finalized. It reuses the panel's own
+# installer non-interactively (repository checkout layout), then installs the
+# archived DB/env and starts the panel; the panel applies its own migrations at
+# startup and enforces peer expiries from then on. A failure never touches the
+# running VPN: the panel is stopped, the journal keeps `panel-installing`, and
+# rerunning `--activate-state <archive> [--enable-at-boot]` retries only this.
+AWG_STATE_PANEL_UNIT="amneziawg-web"
+AWG_STATE_PANEL_DEFAULT_DB="/var/lib/amneziawg-web/awg-web.db"
+
+function awgStatePanelInstaller() {
+	local DIR
+	DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
+	[[ -f "${DIR}/amneziawg-web/scripts/amneziawg-web-install.sh" ]] || return 1
+	printf '%s\n' "${DIR}/amneziawg-web/scripts/amneziawg-web-install.sh"
+}
+
+function awgStatePanelPlan() { # <stage>; human-readable plan for dry-run
+	local STAGE="$1" INSTALLER MIGRATIONS="" PLAN
+	[[ -f "${STAGE}/web/database.sqlite" ]] || { echo 'Panel: none in archive.'; return 0; }
+	if INSTALLER="$(awgStatePanelInstaller)"; then
+		MIGRATIONS="${INSTALLER%/scripts/*}/migrations"
+	fi
+	PLAN="$(awgStateArchive panel-plan "${STAGE}" "${MIGRATIONS}")" || return 1
+	echo "Panel plan (after finalization with --activate-state --enable-at-boot): ${PLAN}"
+	if [[ -z "${INSTALLER}" ]]; then
+		echo 'Panel: installer not found next to this script (run from a repository checkout); panel restore would be refused.'
+	elif [[ -n "${AWG_STATE_PANEL_BINARY:-}" ]]; then
+		echo "Panel: install ${AWG_STATE_PANEL_BINARY} via ${INSTALLER} --non-interactive."
+	else
+		echo "Panel: build from source via ${INSTALLER} --non-interactive (needs cargo, or set AWG_STATE_PANEL_BINARY)."
+	fi
+}
+
+function awgStatePanelHealthy() { # <env file>; waits for GET /api/health
+	python3 -I - "$1" <<'AWG_PANEL_HEALTH'
+import re, sys, time, urllib.request
+# Local health check: never through http_proxy/https_proxy from the environment.
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+values = {}
+for line in open(sys.argv[1], encoding='utf-8'):
+    m = re.fullmatch(r'\s*([A-Za-z_][A-Za-z0-9_]*)=(.*?)\s*', line.rstrip('\n'))
+    if m:
+        v = m.group(2)
+        values[m.group(1)] = v[1:-1] if len(v) >= 2 and v[0] == v[-1] and v[0] in '"\'' else v
+listen = values.get('AWG_WEB_LISTEN', '0.0.0.0:8080')
+host, _, port = listen.rpartition(':')
+host = {'0.0.0.0': '127.0.0.1', '[::]': '[::1]', '': '127.0.0.1'}.get(host, host)
+base = values.get('AWG_WEB_BASE_PATH', '').rstrip('/')
+url = 'http://%s:%s%s/api/health' % (host, port, base)
+for _ in range(30):
+    try:
+        with opener.open(url, timeout=2) as response:
+            if response.status == 200:
+                sys.exit(0)
+    except OSError:
+        pass
+    time.sleep(1)
+sys.exit(1)
+AWG_PANEL_HEALTH
+}
+
+function awgStatePanelFail() { # <journal> <message>
+	systemctl stop "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
+	awgStateJournalStep "$1" panel-restore-failed
+	echo "ERROR: panel restore failed: $2" >&2
+	echo 'The finalized VPN is unaffected and keeps running. Fix the cause, then rerun --activate-state <same-archive> --enable-at-boot to retry only the unfinished steps.' >&2
+	echo "Diagnostics: journalctl -u ${AWG_STATE_PANEL_UNIT} -n 100" >&2
+	return 1
+}
+
+function awgStateRestorePanel() { # <stage> <journal> <work>
+	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER MIGRATIONS DB DATA_DIR SIDECAR APPROVED=""
+	local CLIENTS="${AMNEZIAWG_DIR}/clients"
+	local -a FIELDS=() ARGS=()
+	[[ -f "${STAGE}/web/database.sqlite" ]] || return 0
+	if [[ -e "${JOURNAL}/panel-restored" ]]; then
+		echo 'Panel already restored by this migration; nothing to do.'
+		return 0
+	fi
+	INSTALLER="$(awgStatePanelInstaller)" || {
+		echo 'ERROR: the archive contains panel data but amneziawg-web/scripts/amneziawg-web-install.sh was not found next to this script. Run from a repository checkout to restore the panel; the VPN is unaffected.' >&2
+		return 1
+	}
+	if [[ ! -e "${JOURNAL}/panel-installing" ]] &&
+		[[ -e "${WEB_PANEL_ENV_FILE}" || -e "${WEB_PANEL_SYSTEMD_UNIT}" ]]; then
+		echo "ERROR: a panel is already installed on this host (${WEB_PANEL_ENV_FILE} or ${WEB_PANEL_SYSTEMD_UNIT} exists); not overwriting it with the archived panel. The VPN is unaffected." >&2
+		return 1
+	fi
+	MIGRATIONS="${INSTALLER%/scripts/*}/migrations"
+	# panel-installing means "our attempt", not "approve whatever directory
+	# exists". Only a path recorded after it passed the absent-directory check
+	# may exist on a rerun.
+	if [[ -L "${JOURNAL}/panel-approved-dir" ]]; then
+		echo 'ERROR: unsafe panel path record in the journal.' >&2
+		return 1
+	fi
+	if [[ -f "${JOURNAL}/panel-approved-dir" ]]; then
+		IFS= read -r APPROVED <"${JOURNAL}/panel-approved-dir" || true
+	fi
+	: >"${JOURNAL}/panel-installing" || { echo 'ERROR: cannot write the panel journal marker.' >&2; return 1; }
+	awgStateJournalStep "${JOURNAL}" panel-restore-started
+	rm -rf -- "${WORK}/panel" "${WORK}/panel.fields"
+	awgStateArchive panel-prepare "${STAGE}" "${WORK}/panel" "${CLIENTS}" "${AWG_STATE_PANEL_DEFAULT_DB}" "${MIGRATIONS}" "${APPROVED}" >"${WORK}/panel.fields" ||
+		{ awgStatePanelFail "${JOURNAL}" 'archived panel data was refused (see above).'; return 1; }
+	mapfile -d '' FIELDS <"${WORK}/panel.fields"
+	[[ ${#FIELDS[@]} -eq 2 ]] || { awgStatePanelFail "${JOURNAL}" 'internal panel prepare error.'; return 1; }
+	DB="${FIELDS[1]}"
+	DATA_DIR="${DB%/*}"
+	if [[ -L "${JOURNAL}/panel-approved-dir" ]]; then
+		awgStatePanelFail "${JOURNAL}" 'unsafe panel path record in the journal.'
+		return 1
+	fi
+	if [[ ! -e "${JOURNAL}/panel-approved-dir" ]]; then
+		printf '%s\n' "${DATA_DIR}" >"${WORK}/panel-approved-dir" &&
+			install -m 600 -- "${WORK}/panel-approved-dir" "${JOURNAL}/panel-approved-dir" || {
+			awgStatePanelFail "${JOURNAL}" 'cannot record the approved panel data directory.'
+			return 1
+		}
+	fi
+	# Retry: never run the installer against a running half-restored panel.
+	systemctl stop "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
+	# The archived env is installed first, so the panel installer keeps it
+	# (it never overwrites an existing env file without --force).
+	if ! install -d -m 700 -o root -g root -- "${WEB_PANEL_ENV_FILE%/*}" ||
+		! install -m 600 -o root -g root -- "${WORK}/panel/env.conf" "${WEB_PANEL_ENV_FILE}"; then
+		awgStatePanelFail "${JOURNAL}" "cannot install ${WEB_PANEL_ENV_FILE}."
+		return 1
+	fi
+	ARGS=(--non-interactive --username "${FIELDS[0]}" --password-hash-file "${WORK}/panel/password-hash" --data-dir "${DATA_DIR}"
+		--env-file "${WEB_PANEL_ENV_FILE}" --config-dir "${CLIENTS}" --no-start --no-enable)
+	[[ -z "${AWG_STATE_PANEL_BINARY:-}" ]] || ARGS+=(--binary-src "${AWG_STATE_PANEL_BINARY}")
+	awgStateJournalStep "${JOURNAL}" panel-install
+	bash "${INSTALLER}" "${ARGS[@]}" </dev/null ||
+		{ awgStatePanelFail "${JOURNAL}" "${INSTALLER} --non-interactive failed."; return 1; }
+	for SIDECAR in -wal -shm -journal; do
+		rm -f -- "${DB}${SIDECAR}" || { awgStatePanelFail "${JOURNAL}" "cannot remove stale ${DB}${SIDECAR}."; return 1; }
+	done
+	if ! install -m 600 -o awg-web -g awg-web -- "${WORK}/panel/database.sqlite" "${DB}.awg-state-new" ||
+		! mv -f -- "${DB}.awg-state-new" "${DB}"; then
+		rm -f -- "${DB}.awg-state-new"
+		awgStatePanelFail "${JOURNAL}" "cannot install the panel database at ${DB}."
+		return 1
+	fi
+	awgStateJournalStep "${JOURNAL}" panel-database-installed
+	systemctl start "${AWG_STATE_PANEL_UNIT}" ||
+		{ awgStatePanelFail "${JOURNAL}" "${AWG_STATE_PANEL_UNIT} did not start."; return 1; }
+	awgStatePanelHealthy "${WEB_PANEL_ENV_FILE}" ||
+		{ awgStatePanelFail "${JOURNAL}" "${AWG_STATE_PANEL_UNIT} did not become healthy (/api/health); a schema newer than this panel or a migration error is reported in its log."; return 1; }
+	systemctl enable "${AWG_STATE_PANEL_UNIT}" ||
+		{ awgStatePanelFail "${JOURNAL}" "cannot enable ${AWG_STATE_PANEL_UNIT} at boot."; return 1; }
+	: >"${JOURNAL}/panel-restored" || echo 'WARNING: cannot write the panel-restored journal marker; a rerun will repeat the panel restore.' >&2
+	rm -f -- "${JOURNAL}/panel-installing" || true
+	awgStateJournalStep "${JOURNAL}" panel-restored
+	echo "Panel restored and healthy (${AWG_STATE_PANEL_UNIT}, DB ${DB}); it now enforces peer expiries. Queued mail from the old host was cancelled, not replayed."
+}
+
+# ── amneziawg-proxy restore ──────────────────────────────────────────────────
+# After the panel step. Reuses amneziawg-proxy-install.sh --non-interactive with
+# flags derived from the archived proxy.toml and the archived install paths,
+# then installs the archived proxy.toml (only awg_config rebound), starts the
+# service and checks it stays active and listens before enabling it. The proxy
+# installer leaves the AWG config alone when it already listens on the backend
+# port; restore refuses otherwise, so it never rewrites the finalized VPN config.
+AWG_STATE_PROXY_SERVICE="amneziawg-proxy"
+
+function awgStateProxyInstaller() {
+	local DIR
+	DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
+	[[ -f "${DIR}/amneziawg-proxy/scripts/amneziawg-proxy-install.sh" ]] || return 1
+	printf '%s\n' "${DIR}/amneziawg-proxy/scripts/amneziawg-proxy-install.sh"
+}
+
+function awgStateProxyPlan() { # <stage>
+	local STAGE="$1" PLAN
+	[[ -f "${STAGE}/proxy/proxy.toml" ]] || { echo 'Proxy: none in archive.'; return 0; }
+	PLAN="$(awgStateArchive proxy-plan "${STAGE}")" || return 1
+	echo "Proxy plan (after the panel step): ${PLAN}"
+	if ! awgStateProxyInstaller >/dev/null; then
+		echo 'Proxy: installer not found next to this script (run from a repository checkout); proxy restore would be refused.'
+	fi
+	echo 'HTTPS/reverse proxy for the panel is operator-managed (nginx/Caddy) and is not archived or restored.'
+}
+
+function awgStateProxyHealthy() { # <udp port>
+	local TRY
+	for TRY in 1 2 3 4 5 6 7 8 9 10; do
+		sleep 1
+		systemctl is-active --quiet "${AWG_STATE_PROXY_SERVICE}" || return 1
+		if ((TRY >= 3)) && [[ -n "$(ss -Hlun "sport = :$1" 2>/dev/null)" ]]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+function awgStateProxyFail() { # <journal> <message>
+	systemctl stop "${AWG_STATE_PROXY_SERVICE}" >/dev/null 2>&1 || true
+	awgStateJournalStep "$1" proxy-restore-failed
+	echo "ERROR: proxy restore failed: $2" >&2
+	echo 'The finalized VPN and the panel are unaffected, but clients that connect through the proxy port cannot reach the VPN until it runs. Fix the cause, then rerun --activate-state <same-archive> --enable-at-boot to retry only the unfinished steps.' >&2
+	echo "Diagnostics: journalctl -u ${AWG_STATE_PROXY_SERVICE} -n 100" >&2
+	return 1
+}
+
+function awgStateRestoreProxy() { # <stage> <journal> <work>
+	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER CONFIG CONFIG_DIR DATA_DIR INSTALL_DIR PORT APPROVED=""
+	local -a FIELDS=() ARGS=()
+	[[ -f "${STAGE}/proxy/proxy.toml" ]] || return 0
+	if [[ -e "${JOURNAL}/proxy-restored" ]]; then
+		echo 'Proxy already restored by this migration; nothing to do.'
+		return 0
+	fi
+	INSTALLER="$(awgStateProxyInstaller)" || {
+		echo 'ERROR: the archive contains an amneziawg-proxy config but amneziawg-proxy/scripts/amneziawg-proxy-install.sh was not found next to this script. Run from a repository checkout to restore the proxy.' >&2
+		return 1
+	}
+	rm -rf -- "${WORK}/proxy" "${WORK}/proxy.fields"
+	if [[ -L "${JOURNAL}/proxy-approved-dirs" ]]; then
+		echo 'ERROR: unsafe proxy path record in the journal.' >&2
+		return 1
+	fi
+	if [[ -f "${JOURNAL}/proxy-approved-dirs" ]]; then
+		APPROVED="$(<"${JOURNAL}/proxy-approved-dirs")"
+	fi
+	awgStateArchive proxy-prepare "${STAGE}" "${WORK}/proxy" "${SERVER_AWG_CONF}" "${APPROVED}" \
+		"${AWG_STATE_PROXY_CONFIG}" "${AWG_STATE_PROXY_DEFAULT_DATA}" "${AWG_STATE_PROXY_DEFAULT_INSTALL}" >"${WORK}/proxy.fields" || {
+		echo 'ERROR: archived proxy config was refused (see above); the VPN and panel are unaffected.' >&2
+		return 1
+	}
+	mapfile -d '' FIELDS <"${WORK}/proxy.fields"
+	[[ ${#FIELDS[@]} -gt 4 ]] || { echo 'ERROR: internal proxy prepare error.' >&2; return 1; }
+	CONFIG="${FIELDS[0]}" DATA_DIR="${FIELDS[1]}" INSTALL_DIR="${FIELDS[2]}" PORT="${FIELDS[3]}"
+	CONFIG_DIR="${CONFIG%/*}"
+	if [[ ! -e "${JOURNAL}/proxy-installing" ]] &&
+		[[ -e "${CONFIG}" || -e "${AWG_STATE_PROXY_UNIT}" ]]; then
+		echo "ERROR: an amneziawg-proxy is already installed on this host (${CONFIG} or ${AWG_STATE_PROXY_UNIT} exists); not overwriting it. The VPN and panel are unaffected." >&2
+		return 1
+	fi
+	: >"${JOURNAL}/proxy-installing" || { echo 'ERROR: cannot write the proxy journal marker.' >&2; return 1; }
+	awgStateJournalStep "${JOURNAL}" proxy-restore-started
+	if [[ -L "${JOURNAL}/proxy-approved-dirs" ]]; then
+		echo 'ERROR: unsafe proxy path record in the journal.' >&2
+		return 1
+	fi
+	# Record the directories prepare just accepted, before the installer creates
+	# them. A rerun accepts only these exact paths, not every existing directory.
+	if [[ ! -e "${JOURNAL}/proxy-approved-dirs" ]]; then
+		printf '%s\n' "${CONFIG_DIR}" "${DATA_DIR}" "${INSTALL_DIR}" >"${WORK}/proxy-approved-dirs" &&
+			install -m 600 -- "${WORK}/proxy-approved-dirs" "${JOURNAL}/proxy-approved-dirs" || {
+			echo 'ERROR: cannot record the approved proxy directories.' >&2
+			return 1
+		}
+	fi
+	systemctl stop "${AWG_STATE_PROXY_SERVICE}" >/dev/null 2>&1 || true
+	# A retry starts from a clean generated config (the installer keeps an
+	# existing one without --force and would then skip unit installation).
+	if [[ -f "${CONFIG}" ]]; then
+		rm -f -- "${CONFIG}" || { awgStateProxyFail "${JOURNAL}" "cannot reset ${CONFIG} for retry."; return 1; }
+	fi
+	ARGS=(--non-interactive "${FIELDS[@]:4}" --config-file "${CONFIG}" --data-dir "${DATA_DIR}"
+		--install-dir "${INSTALL_DIR}" --awg-dir "${AMNEZIAWG_DIR}" --no-start --no-enable)
+	[[ -z "${AWG_STATE_PROXY_BINARY:-}" ]] || ARGS+=(--binary-src "${AWG_STATE_PROXY_BINARY}")
+	awgStateJournalStep "${JOURNAL}" proxy-install
+	bash "${INSTALLER}" "${ARGS[@]}" </dev/null ||
+		{ awgStateProxyFail "${JOURNAL}" "${INSTALLER} --non-interactive failed."; return 1; }
+	if ! install -m 600 -o root -g root -- "${WORK}/proxy/proxy.toml" "${CONFIG}"; then
+		awgStateProxyFail "${JOURNAL}" "cannot install ${CONFIG}."
+		return 1
+	fi
+	awgStateJournalStep "${JOURNAL}" proxy-config-installed
+	systemctl start "${AWG_STATE_PROXY_SERVICE}" ||
+		{ awgStateProxyFail "${JOURNAL}" "${AWG_STATE_PROXY_SERVICE} did not start."; return 1; }
+	awgStateProxyHealthy "${PORT}" ||
+		{ awgStateProxyFail "${JOURNAL}" "${AWG_STATE_PROXY_SERVICE} did not stay active/listen on UDP ${PORT}."; return 1; }
+	systemctl enable "${AWG_STATE_PROXY_SERVICE}" ||
+		{ awgStateProxyFail "${JOURNAL}" "cannot enable ${AWG_STATE_PROXY_SERVICE} at boot."; return 1; }
+	: >"${JOURNAL}/proxy-restored" || echo 'WARNING: cannot write the proxy-restored journal marker; a rerun will repeat the proxy restore.' >&2
+	rm -f -- "${JOURNAL}/proxy-installing" || true
+	awgStateJournalStep "${JOURNAL}" proxy-restored
+	echo "Proxy restored (${AWG_STATE_PROXY_SERVICE}, UDP ${PORT}, config ${CONFIG})."
+}
+
+# Companion steps run after the VPN lifecycle lock is released (the panel
+# installer and the panel itself take that lock). A separate non-blocking
+# flock on the journal directory itself, taken BEFORE that release, serializes
+# concurrent --activate-state reruns and --purge-state-journal/--reset-state-journal.
+# The lock is the directory inode, so purge can delete a leftover
+# companions.lock file without releasing it.
+AWG_STATE_COMPANION_LOCK_FD=""
+
+function awgStateAcquireCompanionLock() { # <journal>
+	local DIR="$1"
+	[[ -z "${AWG_STATE_COMPANION_LOCK_FD}" ]] || return 0
+	if [[ -L "${DIR}" || ! -d "${DIR}" ]]; then
+		echo 'ERROR: unsafe companion lock in the migration journal.' >&2
+		return 1
+	fi
+	command -v flock >/dev/null 2>&1 || { echo 'ERROR: flock is required for companion restore.' >&2; return 1; }
+	exec {AWG_STATE_COMPANION_LOCK_FD}<"${DIR}" || { AWG_STATE_COMPANION_LOCK_FD=""; echo 'ERROR: cannot open the companion lock.' >&2; return 1; }
+	if ! flock -xn "${AWG_STATE_COMPANION_LOCK_FD}"; then
+		exec {AWG_STATE_COMPANION_LOCK_FD}>&-
+		AWG_STATE_COMPANION_LOCK_FD=""
+		echo 'ERROR: another panel/proxy restore (--activate-state) or journal purge for this archive is in progress; wait for it to finish, then rerun.' >&2
+		return 1
+	fi
+}
+
+function awgStateReleaseCompanionLock() {
+	[[ -n "${AWG_STATE_COMPANION_LOCK_FD}" ]] || return 0
+	exec {AWG_STATE_COMPANION_LOCK_FD}>&- || true
+	AWG_STATE_COMPANION_LOCK_FD=""
+}
+
+# Post-finalization companions: panel, then proxy. Each is independent and
+# retried on rerun; a failure of one never undoes the VPN or the other.
+function awgStateRestoreCompanions() { # <stage> <journal> <work>
+	local STATUS=0
+	awgStateAcquireCompanionLock "$2" || return 1
+	awgStateRestorePanel "$@" || STATUS=1
+	awgStateRestoreProxy "$@" || STATUS=1
+	awgStateReleaseCompanionLock
+	return "${STATUS}"
+}
+
+function awgStateWorkDir() {
+	local BASE TYPE WORK
+	for BASE in /dev/shm /run; do
+		[[ -d "${BASE}" && ! -L "${BASE}" ]] || continue
+		TYPE="$(stat -f -c %T -- "${BASE}")" || continue
+		[[ "${TYPE}" == tmpfs || "${TYPE}" == ramfs ]] || continue
+		if WORK="$(mktemp -d "${BASE}/awg-state.XXXXXXXX")"; then
+			printf '%s\n' "${WORK}"
+			return 0
+		fi
+	done
+	# Never fall back to disk-backed /tmp: decrypted keys must not touch disk.
+	echo 'ERROR: RAM-backed staging unavailable (neither /dev/shm nor /run is a usable tmpfs); refusing to stage decrypted state on disk.' >&2
+	return 1
+}
+
+function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized]
+	set +x
+	umask 077
+	local DIGEST="$1" OPTION="${2:-}" JOURNAL ENTRY FINALIZED=0 INTERFACE ACTIVE UNIT_STATE
+	local -a BLOCKING_CONFIGS=()
+	isRoot || exit 1
+	[[ "${DIGEST}" =~ ^[0-9a-f]{64}$ ]] || exit 1
+	# Purge and reset share the same lock as import. Acquire before examining
+	# journal/installation/service preconditions and retain it through deletion.
+	acquireClientLifecycleLock || exit 1
+	trap releaseClientLifecycleLock EXIT
+	JOURNAL="${AWG_STATE_JOURNAL_DIR}/${DIGEST}"
+	awgStateTrustedPath "${JOURNAL}" && [[ -d "${JOURNAL}" && ! -L "${JOURNAL}" ]] || exit 1
+	# Never purge/reset under a running panel/proxy restore of this journal.
+	awgStateAcquireCompanionLock "${JOURNAL}" || exit 1
+	if [[ -f "${JOURNAL}/finalized" && ! -L "${JOURNAL}/finalized" ]] &&
+		awgStateTrustedPath "${JOURNAL}/finalized" && [[ -s "${JOURNAL}/finalized" ]]; then
+		FINALIZED=1
+	elif [[ "${OPTION}" == --reset-finalized ]]; then
+		echo "ERROR: journal is not finalized; there is no finalization to reset. To abandon this quarantine import, use --purge-state-journal ${DIGEST} --force." >&2
+		exit 1
+	elif [[ "${OPTION}" != --force ]]; then
+		echo 'ERROR: journal is not finalized; --force explicitly abandons quarantine/rollback recovery.' >&2
+		exit 1
+	fi
+	if [[ "${OPTION}" == --reset-finalized ]]; then
+		INTERFACE="$(<"${JOURNAL}/finalized")"
+		[[ "${INTERFACE}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}$ ]] || { echo 'ERROR: invalid finalized interface marker.' >&2; exit 1; }
+		if [[ -e "${AMNEZIAWG_DIR}/params" || -L "${AMNEZIAWG_DIR}/params" ]]; then
+			echo 'ERROR: finish uninstalling the local installation before resetting its finalized journal.' >&2
+			exit 1
+		fi
+		for ENTRY in "${AMNEZIAWG_DIR}/"*.conf; do
+			[[ ! -e "${ENTRY}" && ! -L "${ENTRY}" ]] || BLOCKING_CONFIGS+=("${ENTRY}")
+		done
+		if (( ${#BLOCKING_CONFIGS[@]} )); then
+			echo 'ERROR: local server configuration remains; reset never removes or overwrites an installation. Blocking file(s):' >&2
+			# Escape whitespace/control characters; filenames are data, not logs
+			# that may inject terminal escapes. Never print configuration contents.
+			LC_ALL=C printf '  %q\n' "${BLOCKING_CONFIGS[@]}" >&2
+			exit 1
+		fi
+		# Unknown service state is NOT proof that an old interface is stopped.
+		if ! ACTIVE="$(systemctl show --property=ActiveState --value "awg-quick@${INTERFACE}.service")" ||
+			! UNIT_STATE="$(systemctl show --property=UnitFileState --value "awg-quick@${INTERFACE}.service")"; then
+			echo 'ERROR: cannot establish VPN service state; refusing journal reset.' >&2
+			exit 1
+		fi
+		case "${ACTIVE}" in inactive|failed) ;; *) echo 'ERROR: stop the VPN before journal reset.' >&2; exit 1 ;; esac
+		case "${UNIT_STATE}" in ''|disabled|not-found|masked|masked-runtime) ;; *) echo 'ERROR: disable the VPN before journal reset.' >&2; exit 1 ;; esac
+		echo 'WARNING: resetting finalization explicitly permits fresh archive import. Expired/disabled/removal-pending policy will be re-evaluated against the current host clock; this can differ from the original import. Post-export local bans/removals may be lost.' >&2
+	fi
+	# Fail closed on unexpected top-level entries. rm never follows symlinks;
+	# --one-file-system also prevents descending into a nested mounted filesystem.
+	shopt -s nullglob dotglob
+	for ENTRY in "${JOURNAL}/"*; do
+		case "${ENTRY##*/}" in
+			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete|panel-installing|panel-restored|panel-approved-dir|proxy-installing|proxy-restored|proxy-approved-dirs|companions.lock) ;;
+			*) echo 'ERROR: unexpected journal entry; refusing purge.' >&2; exit 1 ;;
+		esac
+	done
+	for ENTRY in before before.new before.old recovery receipt nic steps rollback-incomplete panel-installing panel-approved-dir proxy-installing proxy-approved-dirs companions.lock; do
+		rm -rf --one-file-system -- "${JOURNAL:?}/${ENTRY:?}" || exit 1
+	done
+	if (( FINALIZED )) && [[ "${OPTION}" != --reset-finalized ]]; then
+		echo 'Purged rollback/receipt material (and any legacy plaintext recovery copies); retained only the non-secret finalized (and panel-/proxy-restored) markers.'
+	else
+		rm -f -- "${JOURNAL}/finalized" "${JOURNAL}/panel-restored" "${JOURNAL}/proxy-restored" && rmdir -- "${JOURNAL}" || exit 1
+		if [[ "${OPTION}" == --reset-finalized ]]; then
+			awgStateDropIdentityTombstones "${DIGEST}" || exit 1
+			echo 'Finalized journal reset after uninstall. Fresh import may proceed through normal preflight and current-clock policy checks.'
+		else
+			echo 'Purged unfinalized journal by explicit force; this archive can no longer reconcile/activate that import.'
+		fi
+	fi
+	echo 'Deletion is not secure erasure; old disk/swap/backup copies may remain.'
+)
+
+function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> <nic>
+	local STAGE="$1" JOURNAL="$2" WORK="$3" MODE="$4" OPTION="$5" NIC="$6"
+	[[ "${OPTION}" == --dry-run ]] || acquireClientLifecycleLock || return 1
+	if awgStateIsFinalized "${JOURNAL}" "${SERVER_AWG_NIC}"; then
+		if [[ ! -f "${AMNEZIAWG_DIR}/params" || -L "${AMNEZIAWG_DIR}/params" ||
+			! -f "${SERVER_AWG_CONF}" || -L "${SERVER_AWG_CONF}" ]] ||
+			! awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || ! awgStateTrustedPath "${SERVER_AWG_CONF}"; then
+			echo 'ERROR: finalized migration local params/server config are missing or unsafe; nothing was restored.' >&2
+			echo "After completing uninstall, explicitly reset with --reset-state-journal ${JOURNAL##*/} --confirm-policy-replay, then import again." >&2
+			return 1
+		fi
+		if ! awgStateArchive local-identity "${STAGE}/vpn/params" "${AMNEZIAWG_DIR}/params" "${SERVER_AWG_CONF}"; then
+			echo "No files changed. After uninstalling the conflicting installation, use --reset-state-journal ${JOURNAL##*/} --confirm-policy-replay for deliberate fresh recovery." >&2
+			return 1
+		fi
+		# Retry a server-identity tombstone write that failed at finalization.
+		if [[ "${OPTION}" != --dry-run ]]; then
+			awgStateRecordIdentityTombstone "${STAGE}" "${JOURNAL##*/}" "${WORK}" || awgStateWarnIdentityTombstone
+		fi
+		echo 'Migration already finalized; archived policy is not replayed. Manage the VPN with systemctl normally.'
+		if [[ "${OPTION}" == --dry-run ]]; then
+			awgStatePanelPlan "${STAGE}"
+			awgStateProxyPlan "${STAGE}"
+		elif [[ "${MODE}" == --activate-state ]]; then
+			awgStateAcquireCompanionLock "${JOURNAL}" || return 1
+			releaseClientLifecycleLock
+			awgStateRestoreCompanions "${STAGE}" "${JOURNAL}" "${WORK}" || return 1
+		fi
+		return 0
+	fi
+	[[ ! -e "${JOURNAL}/finalized" && ! -L "${JOURNAL}/finalized" ]] || { echo 'ERROR: invalid finalized journal marker.' >&2; return 1; }
+	awgStateTrustedPath "${JOURNAL}/receipt" && awgStateTrustedPath "${SERVER_AWG_CONF}" &&
+		awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || return 1
+	if [[ ! -f "${JOURNAL}/nic" || "$(<"${JOURNAL}/nic")" != "${NIC}" ]] ||
+		! sha256sum -c --status "${JOURNAL}/receipt"; then
+		echo 'ERROR: previous import differs from current target state; refusing to overwrite.' >&2
+		return 1
+	fi
+	# This is a quarantine/activation workflow, not a live configuration editor.
+	# Never rewrite a running interface or leave an enabled unit racing a check.
+	if systemctl is-active --quiet "awg-quick@${SERVER_AWG_NIC}" || systemctl is-enabled --quiet "awg-quick@${SERVER_AWG_NIC}"; then
+		echo 'ERROR: stop and disable the imported VPN before reconciliation/activation.' >&2
+		return 1
+	fi
+	awgStateArchive reconcile "${SERVER_AWG_CONF}" "${STAGE}" "${WORK}/reconciled.conf" || return 1
+	echo 'Policy: future-expiry peers migrate; expired/disabled/archived/removal-pending peers are excluded. Ongoing expiry enforcement needs the restored panel or operator.'
+	if [[ "${OPTION}" == --dry-run ]]; then
+		echo 'Plan: re-reconcile the unchanged import without reinstalling or activating.'
+		awgStatePanelPlan "${STAGE}"
+		awgStateProxyPlan "${STAGE}"
+		return 0
+	fi
+	# Activation validates the candidate with the installed backend before making
+	# it live. Reimport also reconciles: an unchanged receipt is NOT a policy bypass.
+	if [[ "${MODE}" == --activate-state ]]; then
+		ensureAwgBackendReady 0 || return 1
+		mkdir -p "${WORK}/validate" || return 1
+		validateStagedAwgConfigs "${WORK}/validate" --label activation-server "${WORK}/reconciled.conf" || return 1
+		awgStateTrustedPath "${AWG_SYSCTL_FILE}" || return 1
+		sysctl -p "${AWG_SYSCTL_FILE}" || return 1
+		# Backend validation may take time: evaluate expiry again immediately
+		# before publishing the final candidate and starting the interface.
+		awgStateArchive reconcile "${SERVER_AWG_CONF}" "${STAGE}" "${WORK}/at-start.conf" || return 1
+		mv -- "${WORK}/at-start.conf" "${WORK}/reconciled.conf" || return 1
+	fi
+	# Config and receipt change together: on receipt failure restore the
+	# previous config, so the unchanged old receipt still verifies on retry.
+	# INT/TERM/HUP are deferred (recorded, not lost) across this window, so
+	# an interruption can never separate the config from its receipt.
+	local CONFIG_CHANGED=0 PENDING_SIGNAL=""
+	trap 'PENDING_SIGNAL=130' INT
+	trap 'PENDING_SIGNAL=143' TERM
+	trap 'PENDING_SIGNAL=129' HUP
+	if ! cmp -s -- "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}"; then
+		if ! cp -p -- "${SERVER_AWG_CONF}" "${WORK}/previous.conf"; then
+			echo "ERROR: could not save a copy of ${SERVER_AWG_CONF}; it was not changed." >&2
+			awgStateActivationDisarm
+			[[ -z "${PENDING_SIGNAL}" ]] || exit "${PENDING_SIGNAL}"
+			return 1
+		fi
+		if ! replaceFileExactly "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}" 600; then
+			# The replacement may have landed before failing: never leave a
+			# reconciled config without its receipt.
+			if cmp -s -- "${WORK}/reconciled.conf" "${SERVER_AWG_CONF}" &&
+				! replaceFileExactly "${WORK}/previous.conf" "${SERVER_AWG_CONF}" 600; then
+				echo "ERROR: config update failed and the previous ${SERVER_AWG_CONF} could not be restored; restore it from the encrypted archive before retrying." >&2
+			elif [[ -n "${PENDING_SIGNAL}" ]]; then
+				echo "ERROR: interrupted while updating ${SERVER_AWG_CONF}; the previous config was kept. Rerun the import." >&2
+			else
+				echo "ERROR: could not update ${SERVER_AWG_CONF} (I/O error, e.g. no free space); the previous config was kept." >&2
+			fi
+			awgStateActivationDisarm
+			[[ -z "${PENDING_SIGNAL}" ]] || exit "${PENDING_SIGNAL}"
+			return 1
+		fi
+		CONFIG_CHANGED=1
+	fi
+	if ! awgStateWriteReceipt "${JOURNAL}" "${WORK}/receipt"; then
+		if ((CONFIG_CHANGED)) && ! replaceFileExactly "${WORK}/previous.conf" "${SERVER_AWG_CONF}" 600; then
+			echo "ERROR: receipt publication failed and the previous ${SERVER_AWG_CONF} could not be restored; restore it from the encrypted archive before retrying." >&2
+		else
+			if [[ -n "${PENDING_SIGNAL}" ]]; then
+				echo 'ERROR: interrupted while publishing the import receipt; the previous config was kept. Rerun the import.' >&2
+			else
+				echo 'ERROR: could not publish the import receipt; the previous config was kept. Fix the cause (e.g. free space) and rerun.' >&2
+			fi
+		fi
+		awgStateActivationDisarm
+		[[ -z "${PENDING_SIGNAL}" ]] || exit "${PENDING_SIGNAL}"
+		return 1
+	fi
+	# Config and receipt are committed together; now honour a deferred signal
+	# (before any service start).
+	awgStateActivationDisarm
+	if [[ -n "${PENDING_SIGNAL}" ]]; then
+		echo 'Interrupted after a consistent config/receipt update; the VPN was not started.' >&2
+		exit "${PENDING_SIGNAL}"
+	fi
+	awgStateJournalStep "${JOURNAL}" reconciled
+	if [[ "${MODE}" == --activate-state ]]; then
+		# From before start until the intended terminal state, an INT/TERM/HUP
+		# stops (and disables) the unit, exactly like the post-start failure
+		# branches: an interrupted activation leaves a stopped, unfinalized,
+		# retryable import, never a running/enabled one.
+		_AWG_STATE_ACTIVATION_UNIT="awg-quick@${SERVER_AWG_NIC}"
+		_AWG_STATE_ACTIVATION_JOURNAL="${JOURNAL}"
+		trap 'awgStateActivationInterrupted 130' INT
+		trap 'awgStateActivationInterrupted 143' TERM
+		trap 'awgStateActivationInterrupted 129' HUP
+		if ! systemctl start "awg-quick@${SERVER_AWG_NIC}"; then
+			awgStateActivationAbort
+			awgStateJournalStep "${JOURNAL}" activation-failed
+			return 1
+		fi
+		# After a successful start, every fatal path below stops (and, once
+		# enabled, disables) the unit. The steps log is audit-only: its append
+		# failures warn and never strand a running, unfinalized VPN.
+		awgStateJournalStep "${JOURNAL}" activated
+		if [[ "${OPTION}" == --enable-at-boot ]]; then
+			if ! printf '%s\n' "${SERVER_AWG_NIC}" >"${WORK}/finalized"; then
+				awgStateActivationAbort
+				return 1
+			fi
+			if ! systemctl enable "awg-quick@${SERVER_AWG_NIC}"; then
+				awgStateActivationAbort
+				return 1
+			fi
+			if ! replaceFileExactly "${WORK}/finalized" "${JOURNAL}/finalized" 600 ||
+				! awgStateIsFinalized "${JOURNAL}" "${SERVER_AWG_NIC}"; then
+				rm -f -- "${JOURNAL}/finalized" || true
+				awgStateActivationAbort
+				return 1
+			fi
+			awgStateActivationDisarm
+			awgStateJournalStep "${JOURNAL}" finalized
+			echo 'Finalized: VPN enabled at boot. Normal systemctl management no longer requires the archive/passphrase.'
+			awgStateRecordIdentityTombstone "${STAGE}" "${JOURNAL##*/}" "${WORK}" ||
+				awgStateWarnIdentityTombstone
+			echo "Journal ${JOURNAL} holds no keys (the encrypted archive is the recovery copy). Optional cleanup: --purge-state-journal ${JOURNAL##*/}."
+			# The VPN is final; the panel never runs under the VPN lifecycle lock.
+			awgStateAcquireCompanionLock "${JOURNAL}" || return 1
+			releaseClientLifecycleLock
+			awgStateRestoreCompanions "${STAGE}" "${JOURNAL}" "${WORK}" || return 1
+		else
+			awgStateActivationDisarm
+			echo 'Activated for testing only; still disabled at boot. Stop/disable it, then activate with --enable-at-boot to finalize.'
+		fi
+	else
+		echo 'Existing import re-reconciled without reinstalling; VPN remains stopped/disabled.'
+	fi
+}
+
+# A hostname only. awgStateNormalizePubHost also accepts IP literals; the switch
+# refuses those before calling it, because the point is to stop depending on an IP.
+function awgStateEndpointRequireHostname() {
+	local VALUE="$1" STATUS
+	# Fast refusals for the forms that are never a DNS name. inet_aton,
+	# including 123, 1.2.3 and 0x7f.1, is decided by the same Python rule
+	# as endpoint_host. An accepted name keeps the spelling that was typed.
+	if [[ "${VALUE}" == *:* || "${VALUE}" == *'['* || "${VALUE}" == *']'* ]]; then
+		echo 'ERROR: --set-endpoint-host accepts a hostname, not an IP address.' >&2
+		return 1
+	fi
+	STATUS="$(awgStateArchive endpoint-hostname "${VALUE}")" || return 1
+	if [[ "${STATUS}" == ipv4 ]]; then
+		echo 'ERROR: --set-endpoint-host would be read as an IPv4 address.' >&2
+		return 1
+	fi
+	if [[ "${STATUS}" != ok ]]; then
+		echo 'ERROR: --set-endpoint-host requires a DNS hostname.' >&2
+		return 1
+	fi
+	printf '%s\n' "${VALUE}"
+}
+
+# Same files as collectAwgClientConfigCandidates, plus symlink profiles.
+# collect skips symlinks. The switch refuses them instead of following them.
+function awgStateEndpointProfileList() {
+	local REGULAR="$1" SYMLINKS="$2"
+	local -a SEARCH_ROOTS=()
+	local ROOT CANDIDATE CANONICAL
+	local -A SEEN=()
+	local NULLGLOB_WAS_SET=0
+	awgStateClientConfigSearchRoots SEARCH_ROOTS || return 1
+	: >"${REGULAR}" || return 1
+	: >"${SYMLINKS}" || return 1
+	local -A MANAGED=()
+	local CLIENT_NAME BASE
+	# Same marker grammar as collectActiveAwgClientConfigs. A private key is
+	# not required: a profile without one is still a managed client here.
+	while IFS= read -r CLIENT_NAME; do
+		[[ -n "${CLIENT_NAME}" ]] || continue
+		MANAGED["${CLIENT_NAME}"]=1
+	done < <(grep -E '^### Client [A-Za-z0-9_-]{1,15}$' "${SERVER_AWG_CONF}" | cut -d ' ' -f 3)
+	shopt -q nullglob && NULLGLOB_WAS_SET=1
+	shopt -s nullglob
+	for ROOT in "${SEARCH_ROOTS[@]}"; do
+		# A trailing slash from getent would make a symlink path contain
+		# "//", which the plan then refuses as a whole.
+		ROOT="${ROOT%/}"
+		[[ -n "${ROOT}" && -d "${ROOT}" && ! -L "${ROOT}" ]] || continue
+		for CANDIDATE in "${ROOT}/${SERVER_AWG_NIC}-client-"*.conf; do
+			BASE="${CANDIDATE##*/}"
+			CLIENT_NAME="${BASE#"${SERVER_AWG_NIC}-client-"}"
+			CLIENT_NAME="${CLIENT_NAME%.conf}"
+			[[ -n "${MANAGED[${CLIENT_NAME}]+present}" ]] || continue
+			if [[ -L "${CANDIDATE}" ]]; then
+				printf '%s\0' "${CANDIDATE}" >>"${SYMLINKS}"
+				continue
+			fi
+			[[ -f "${CANDIDATE}" ]] || continue
+			CANONICAL="$(readlink -f -- "${CANDIDATE}" 2>/dev/null || true)"
+			[[ -n "${CANONICAL}" && -z "${SEEN[${CANONICAL}]+present}" ]] || continue
+			[[ -f "${CANONICAL}" && ! -L "${CANONICAL}" ]] || continue
+			SEEN["${CANONICAL}"]=1
+			printf '%s\0' "${CANONICAL}" >>"${REGULAR}"
+		done
+	done
+	(( NULLGLOB_WAS_SET )) || shopt -u nullglob
+}
+
+# Replace one regular profile through file descriptors. The destination's
+# directory may be writable by another user, so this never creates, writes,
+# chmod or chown by path there.
+function awgStateInstallRewrittenProfile() {
+	local SRC="$1" DEST="$2" BEFORE="$3"
+	[[ -f "${SRC}" && ! -L "${SRC}" && -f "${BEFORE}" && ! -L "${BEFORE}" && -n "${DEST}" ]] || return 1
+	python3 -I - "${SRC}" "${DEST}" "${BEFORE}" <<'AWG_ENDPOINT_INSTALL_PY'
+import errno
+import os
+import secrets
+import stat
+import sys
+
+def fail(message):
+    sys.stderr.write('ERROR: %s\n' % message)
+    raise SystemExit(1)
+
+src_path, dest_path, before_path = sys.argv[1:]
+if (not dest_path.startswith('/') or '\0' in dest_path or
+        not src_path.startswith('/') or not before_path.startswith('/')):
+    fail('could not install rewritten profile')
+parent, name = os.path.split(dest_path)
+if not parent or not name or name in ('.', '..') or '/' in name or name.startswith('.awg-endpoint.'):
+    fail('could not install rewritten profile')
+
+def read_regular(path):
+    try:
+        info = os.lstat(path)
+    except OSError:
+        fail('could not install rewritten profile')
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_size > 1024 * 1024:
+        fail('could not install rewritten profile')
+    handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        data = os.read(handle, info.st_size + 1)
+    finally:
+        os.close(handle)
+    if len(data) != info.st_size or len(data) > 1024 * 1024:
+        fail('could not install rewritten profile')
+    return data
+
+new_bytes = read_regular(src_path)
+expected = read_regular(before_path)
+dir_fd = None
+temp_name = None
+temp_fd = None
+replaced = False
+try:
+    dir_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.lstat(name, dir_fd=dir_fd)
+    except OSError:
+        fail('could not install rewritten profile')
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        fail('could not install rewritten profile')
+    current_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    try:
+        current = os.read(current_fd, info.st_size + 1)
+    finally:
+        os.close(current_fd)
+    if current != expected:
+        fail('profile changed since the plan; rerun')
+    # A name that is no longer our inode was swapped for a symlink. Unlink
+    # that name and try another. Never rename it onto the destination.
+    installed = False
+    for _attempt in range(100):
+        candidate = '.awg-endpoint.' + secrets.token_hex(8)
+        try:
+            temp_fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                              0o600, dir_fd=dir_fd)
+        except OSError as exc:
+            if exc.errno == errno.EEXIST:
+                continue
+            raise
+        temp_name = candidate
+        swapped = False
+        try:
+            view = new_bytes
+            while view:
+                wrote = os.write(temp_fd, view)
+                if wrote <= 0:
+                    fail('could not install rewritten profile')
+                view = view[wrote:]
+            if os.geteuid() == 0:
+                os.fchown(temp_fd, info.st_uid, info.st_gid)
+            os.fchmod(temp_fd, stat.S_IMODE(info.st_mode))
+            os.fsync(temp_fd)
+            ours = os.fstat(temp_fd)
+            try:
+                listed = os.lstat(temp_name, dir_fd=dir_fd)
+            except OSError:
+                swapped = True
+            else:
+                swapped = (not stat.S_ISREG(listed.st_mode) or listed.st_ino != ours.st_ino or
+                           listed.st_dev != ours.st_dev)
+            if not swapped:
+                os.replace(temp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                replaced = True
+                landed = os.lstat(name, dir_fd=dir_fd)
+                if (not stat.S_ISREG(landed.st_mode) or landed.st_ino != ours.st_ino or
+                        landed.st_dev != ours.st_dev):
+                    # rename moved a symlink onto the destination. Remove that
+                    # directory entry without following it, put the bytes we
+                    # read back, and try again.
+                    try:
+                        os.unlink(name, dir_fd=dir_fd)
+                    except OSError:
+                        pass
+                    replaced = False
+                    restore = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                      0o600, dir_fd=dir_fd)
+                    try:
+                        pending = expected
+                        while pending:
+                            wrote = os.write(restore, pending)
+                            if wrote <= 0:
+                                fail('could not install rewritten profile')
+                            pending = pending[wrote:]
+                        if os.geteuid() == 0:
+                            os.fchown(restore, info.st_uid, info.st_gid)
+                        os.fchmod(restore, stat.S_IMODE(info.st_mode))
+                        os.fsync(restore)
+                    finally:
+                        os.close(restore)
+                    swapped = True
+                else:
+                    os.fsync(dir_fd)
+                    installed = True
+        finally:
+            if temp_fd is not None:
+                try:
+                    os.close(temp_fd)
+                except OSError:
+                    pass
+                temp_fd = None
+            if temp_name and not replaced:
+                try:
+                    os.unlink(temp_name, dir_fd=dir_fd)
+                except OSError:
+                    pass
+                temp_name = None
+        if installed:
+            break
+        if not swapped:
+            fail('could not install rewritten profile')
+    if not installed:
+        fail('could not install rewritten profile')
+except SystemExit:
+    raise
+except OSError:
+    fail('could not install rewritten profile')
+finally:
+    if temp_fd is not None:
+        try:
+            os.close(temp_fd)
+        except OSError:
+            pass
+    if temp_name and not replaced:
+        try:
+            os.unlink(temp_name, dir_fd=dir_fd)
+        except OSError:
+            pass
+    if dir_fd is not None:
+        try:
+            os.close(dir_fd)
+        except OSError:
+            pass
+AWG_ENDPOINT_INSTALL_PY
+}
+
+# User-facing text from a plan. Kinds: audit, diff, result, symlink, conflict.
+# The plan's file rows carry Endpoint lines only, never the rest of a profile.
+function awgStateEndpointPrintPlan() {
+	local PLAN="$1" KIND="$2"
+	python3 -I - "${PLAN}" "${KIND}" <<'AWG_ENDPOINT_PY'
+import json, sys
+plan = json.load(open(sys.argv[1], encoding='utf-8'))
+kind = sys.argv[2]
+if kind == 'audit':
+    public = dict(hostname=plan['hostname'], ip_literal=plan['ip_literal'],
+                  clients=plan['clients'], symlinks=plan.get('symlinks') or [])
+    print(json.dumps(public, indent=2, sort_keys=True))
+elif kind == 'diff':
+    updates = [item for item in plan['files'] if item.get('status') == 'update']
+    if plan.get('params_from') != plan.get('params_host'):
+        sys.stdout.write('SERVER_PUB_IP %s -> %s\n' % (plan.get('params_from') or '', plan.get('params_host') or ''))
+    if not updates and plan.get('params_from') == plan.get('params_host'):
+        print('No Endpoint lines need to change.')
+    for item in updates:
+        print('--- ' + item['path'])
+        print('+++ ' + item['path'])
+        print('-' + item['old_line'])
+        print('+' + item['new_line'])
+    for item in plan['files']:
+        if item.get('status') == 'skipped':
+            print('skipped ' + item['path'])
+elif kind == 'result':
+    for item in plan['files']:
+        label = 'updated' if item.get('status') == 'update' else item.get('status')
+        print('%s %s' % (label, item['path']))
+    if plan.get('params_from') != plan.get('params_host'):
+        sys.stdout.write('SERVER_PUB_IP %s -> %s\n' % (plan.get('params_from') or '', plan.get('params_host') or ''))
+    elif plan.get('params_host'):
+        print('SERVER_PUB_IP %s' % plan['params_host'])
+elif kind == 'symlink':
+    for path in plan.get('symlinks') or []:
+        print(path)
+elif kind == 'conflict':
+    for item in plan.get('conflicts') or []:
+        print(item.get('name', ''))
+        for path in item.get('files') or []:
+            print('  ' + path)
+else:
+    sys.exit(1)
+AWG_ENDPOINT_PY
+}
+
+# Read-only audit, or a one-time Endpoint host switch. Does not regenerate keys.
+function awgStateEndpointCommand() (
+	set +x
+	umask 077
+	local ACTION="$1" HOST_ARG="${2:-}" DRY="${3:-}" HOST="" WORK DECISION FAILED=0
+	local STATUS PROFILE OUT_NAME PARAMS TMP PY_ACTION="audit"
+	isRoot || exit 1
+	checkOS
+	[[ "${OS:-}" == debian || "${OS:-}" == ubuntu ]] || {
+		echo 'ERROR: endpoint changes support Debian/Ubuntu (and their supported derivatives) only.' >&2
+		exit 1
+	}
+	if [[ "${ACTION}" == set ]]; then
+		HOST="$(awgStateEndpointRequireHostname "${HOST_ARG}")" || exit 1
+	elif [[ "${ACTION}" != audit ]]; then
+		echo 'ERROR: unknown endpoint operation.' >&2
+		exit 1
+	fi
+	command -v python3 >/dev/null 2>&1 || {
+		echo 'ERROR: python3 is required.' >&2
+		exit 1
+	}
+	WORK="$(awgStateWorkDir)" || exit 1
+	[[ -n "${WORK}" && "${WORK}" == /* && "${WORK}" != / && -d "${WORK}" && ! -L "${WORK}" ]] || {
+		echo 'ERROR: refusing an unsafe staging directory.' >&2
+		exit 1
+	}
+	trap 'rm -rf -- "${WORK}"; releaseClientLifecycleLock' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	trap 'exit 129' HUP
+	acquireClientLifecycleLock || exit 1
+	awgStateTrustedPath "${AMNEZIAWG_DIR}/params" || {
+		echo 'ERROR: unsafe source params path.' >&2
+		exit 1
+	}
+	awgStateReadParams "${AMNEZIAWG_DIR}/params" "${WORK}/records" || exit 1
+	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	[[ -f "${SERVER_AWG_CONF}" && ! -L "${SERVER_AWG_CONF}" ]] || {
+		echo 'ERROR: server config is missing.' >&2
+		exit 1
+	}
+	[[ "${SERVER_AWG_NIC}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}$ ]] || {
+		echo 'ERROR: refusing unsafe interface name.' >&2
+		exit 1
+	}
+	mkdir -p -- "${WORK}/out" || exit 1
+	chmod 700 "${WORK}/out" || exit 1
+	awgStateEndpointProfileList "${WORK}/regular" "${WORK}/symlinks" || exit 1
+	[[ "${ACTION}" == set ]] && PY_ACTION="rewrite"
+	awgStateArchive endpoint-plan "${WORK}/regular" "${WORK}/symlinks" "${WORK}/out" "${PY_ACTION}" "${HOST}" "${SERVER_PUB_IP}" >"${WORK}/plan.json" || exit 1
+	DECISION="$(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); print(d.get("refused") or "ok")' "${WORK}/plan.json")" || exit 1
+	if [[ "${DECISION}" != ok ]]; then
+		releaseClientLifecycleLock
+		if [[ "${DECISION}" == symlink ]]; then
+			echo 'ERROR: a client profile is a symlink; not following it and not changing any profile.' >&2
+		elif [[ "${DECISION}" == conflict ]]; then
+			echo 'ERROR: client profile copies disagree outside the Endpoint line; nothing was changed.' >&2
+		else
+			echo 'ERROR: endpoint update refused.' >&2
+		fi
+		awgStateEndpointPrintPlan "${WORK}/plan.json" "${DECISION}" >&2 || true
+		exit 1
+	fi
+	if [[ "${ACTION}" == audit ]]; then
+		# Drop the lock before printing. A blocked reader must not stall client changes.
+		releaseClientLifecycleLock
+		awgStateEndpointPrintPlan "${WORK}/plan.json" audit
+		exit $?
+	fi
+	if [[ "${DRY}" == --dry-run ]]; then
+		releaseClientLifecycleLock
+		awgStateEndpointPrintPlan "${WORK}/plan.json" diff
+		exit $?
+	fi
+	python3 -I -c 'import json,sys
+d=json.load(open(sys.argv[1], encoding="utf-8"))
+out=open(sys.argv[2], "wb")
+for item in d["files"]:
+    out.write((item["status"] + "\0" + item["path"] + "\0" + (item.get("out") or "") + "\0").encode())
+' "${WORK}/plan.json" "${WORK}/actions" || exit 1
+	while IFS= read -r -d '' STATUS; do
+		IFS= read -r -d '' PROFILE || { echo 'ERROR: truncated endpoint plan.' >&2; exit 1; }
+		IFS= read -r -d '' OUT_NAME || { echo 'ERROR: truncated endpoint plan.' >&2; exit 1; }
+		case "${STATUS}" in
+			update)
+				[[ -n "${OUT_NAME}" && "${OUT_NAME}" != */* && "${OUT_NAME}" != *..* ]] || { FAILED=1; break; }
+				awgStateInstallRewrittenProfile "${WORK}/out/${OUT_NAME}" "${PROFILE}" "${WORK}/out/${OUT_NAME}.before" || { FAILED=1; break; }
+				;;
+			unchanged|skipped) ;;
+			*) FAILED=1; break ;;
+		esac
+	done <"${WORK}/actions"
+	if ((FAILED)); then
+		echo 'ERROR: endpoint update stopped after a partial write. Rerun the same command to finish; profiles already updated stay on the new hostname.' >&2
+		exit 1
+	fi
+	if [[ "${SERVER_PUB_IP}" != "${HOST}" ]]; then
+		PARAMS="${AMNEZIAWG_DIR}/params"
+		[[ -f "${PARAMS}" && ! -L "${PARAMS}" ]] || {
+			echo 'ERROR: params is missing. Rerun the same command to finish.' >&2
+			exit 1
+		}
+		TMP="$(mktemp -- "${AMNEZIAWG_DIR}/.params.awg-endpoint.XXXXXX")" || exit 1
+		SERVER_PUB_IP="${HOST}"
+		if ! serializeParams "${TMP}"; then
+			rm -f -- "${TMP}"
+			echo 'ERROR: could not write params. Client profiles that were updated already use the new hostname. Rerun the same command to finish.' >&2
+			exit 1
+		fi
+		chmod --reference="${PARAMS}" "${TMP}" || { rm -f -- "${TMP}"; exit 1; }
+		if [[ "${EUID}" -eq 0 ]]; then
+			chown --reference="${PARAMS}" "${TMP}" || { rm -f -- "${TMP}"; exit 1; }
+		fi
+		[[ -f "${PARAMS}" && ! -L "${PARAMS}" ]] || {
+			rm -f -- "${TMP}"
+			echo 'ERROR: params changed during the update. Rerun the same command to finish.' >&2
+			exit 1
+		}
+		if ! mv -fT -- "${TMP}" "${PARAMS}"; then
+			rm -f -- "${TMP}"
+			echo 'ERROR: could not replace params. Rerun the same command to finish.' >&2
+			exit 1
+		fi
+	fi
+	releaseClientLifecycleLock
+	awgStateEndpointPrintPlan "${WORK}/plan.json" result
+)
+
+function awgStateCommand() (
+	# xtrace must not echo imported private keys during printf -v/serialization.
+	set +x
+	umask 077
+	local MODE="$1" ARCHIVE="$2" OPTION="${3:-}" PASSFD="${4:-}" WORK NIC="${SERVER_PUB_NIC:-}" PUB_IP="${SERVER_PUB_IP:-}" STATE_ID JOURNAL
+	isRoot || exit 1
+	checkOS
+	# checkOS normalizes Raspbian to debian and Linux Mint to ubuntu.
+	[[ "${OS:-}" == debian || "${OS:-}" == ubuntu ]] || {
+		echo 'ERROR: state migration supports Debian/Ubuntu (and their supported derivatives) only.' >&2
+		exit 1
+	}
+	local ALLOW_INSTALL=1
+	[[ "${MODE}" == --inspect-state || "${MODE}" == --activate-state || "${OPTION}" == --dry-run ]] && ALLOW_INSTALL=0
+	awgStateDependencies "${ALLOW_INSTALL}" || exit 1
+	WORK="$(awgStateWorkDir)" || exit 1
+	trap 'rm -rf -- "${WORK}"; releaseClientLifecycleLock' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	trap 'exit 129' HUP
+	if [[ "${MODE}" == --export-state ]]; then
+		if [[ "${ARCHIVE}" == - ]]; then
+			[[ "${OPTION}" == --passphrase-fd ]] || { echo 'ERROR: streaming export requires --passphrase-fd.' >&2; exit 1; }
+			awgStateExportStream "${WORK}" "${PASSFD}"
+			exit $?
+		fi
+		awgStateExport "${ARCHIVE}" "${WORK}"
+		exit $?
+	fi
+	[[ -f "${ARCHIVE}" && ! -L "${ARCHIVE}" ]] || { echo 'ERROR: archive must be a regular file.' >&2; exit 1; }
+	# Bound decrypted staging even before inspecting the tar headers.
+	(ulimit -f 614400; age --decrypt --output "${WORK}/state.tar.gz" "${ARCHIVE}") || exit 1
+	if [[ "${MODE}" == --inspect-state ]]; then
+		local PANEL_INSTALLER PANEL_MIGRATIONS=""
+		if PANEL_INSTALLER="$(awgStatePanelInstaller)"; then
+			PANEL_MIGRATIONS="${PANEL_INSTALLER%/scripts/*}/migrations"
+		fi
+		awgStateArchive inspect "${WORK}/state.tar.gz" "${WORK}/inspect" "${PANEL_MIGRATIONS}"
+		exit $?
+	fi
+	awgStateArchive unpack "${WORK}/state.tar.gz" "${WORK}/stage" || exit 1
+	awgStateReadParams "${WORK}/stage/vpn/params" "${WORK}/records" || exit 1
+	AWG_STATE_AWG_PORT="$(awgStateArchive awg-port "${WORK}/stage")" || exit 1
+	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	SERVER_AWG_IPV6="$(normalizeIPv6 "${SERVER_AWG_IPV6}")" || exit 1
+	# Derive IPv6 routing from the exact server config rather than stale params.
+	if serverConfigHasIPv6Address "${WORK}/stage/vpn/server.conf"; then ENABLE_IPV6=y; else ENABLE_IPV6=n; fi
+	if [[ -z "${NIC}" ]]; then
+		NIC="$(ip -4 route show default | awk '{for(i=1;i<NF;i++) if($i=="dev") {print $(i+1); exit}}')"
+		[[ -n "${NIC}" ]] || NIC="$(ip -6 route show default | awk '{for(i=1;i<NF;i++) if($i=="dev") {print $(i+1); exit}}')"
+	fi
+	STATE_ID="$(sha256sum "${WORK}/stage/manifest.json")"; STATE_ID="${STATE_ID%% *}"
+	JOURNAL="${AWG_STATE_JOURNAL_DIR}/${STATE_ID}"
+	awgStateTrustedPath "${JOURNAL}" || { echo 'ERROR: unsafe journal path.' >&2; exit 1; }
+	# Applies to every path (fresh import, rerun/activation, dry-run).
+	awgStateRefuseIncompleteRollback "${JOURNAL}" || exit 1
+	if [[ -f "${JOURNAL}/receipt" || -e "${JOURNAL}/finalized" || -L "${JOURNAL}/finalized" ]]; then
+		awgStateReconcileImport "${WORK}/stage" "${JOURNAL}" "${WORK}" "${MODE}" "${OPTION}" "${NIC}"
+		exit $?
+	fi
+	if [[ "${MODE}" == --activate-state ]]; then
+		echo 'ERROR: this archive has no completed local import; import it into quarantine first.' >&2
+		exit 1
+	fi
+	awgStateCheckIdentityTombstone "${WORK}/stage" || exit 1
+	# Endpoint for profiles generated after cutover. Restored profiles keep
+	# their own Endpoint lines unchanged.
+	if [[ -n "${PUB_IP}" ]]; then
+		PUB_IP="$(awgStateNormalizePubHost "${PUB_IP}")" || {
+			if [[ $? -eq 2 ]]; then
+				echo 'ERROR: SERVER_PUB_IP must not be a loopback or multicast address; clients cannot reach the server there.' >&2
+			else
+				echo 'ERROR: SERVER_PUB_IP must be a hostname, IPv4 or IPv6 address (no port).' >&2
+			fi
+			exit 1
+		}
+		# shellcheck disable=SC2030 # consumed only inside this awgStateCommand subshell (install hook, serializeParams)
+		SERVER_PUB_IP="${PUB_IP}"
+	fi
+	if endpointIsIPv4 "${SERVER_PUB_IP}" || [[ "${SERVER_PUB_IP}" == *:* ]]; then
+		echo 'WARNING: SERVER_PUB_IP is an IP literal; new profiles will not follow a DNS switch. Set SERVER_PUB_IP=<hostname> for seamless failover.' >&2
+	fi
+	awgStateImportPreflight "${NIC}" "${WORK}" || exit 1
+	awgStateArchive prepare "${WORK}/stage" || exit 1
+	SERVER_PUB_NIC="${NIC}"
+	awgStateWarnMtuBudget "${WORK}/stage/vpn/server.conf"
+	printf 'Plan: install %s backend, AWG %s, interface %s, UDP %s, uplink %s.\n' "${AWG_BACKEND}" "${AWG_PROTOCOL_VERSION}" "${SERVER_AWG_NIC}" "${SERVER_PORT}" "${NIC}"
+	if [[ -n "${AWG_STATE_AWG_PORT}" && "${AWG_STATE_AWG_PORT}" != "${SERVER_PORT}" ]]; then
+		echo "amneziawg-proxy topology: AWG listens on UDP ${AWG_STATE_AWG_PORT} (proxy backend); the firewall hooks open the public UDP ${SERVER_PORT} for the proxy, as on the old host. Clients reach the VPN only after the proxy step of --activate-state succeeds."
+	fi
+	echo 'Restore original keys/profiles; replace host hooks; migrate future-expiry peers and exclude already-expired/disabled/archived/removal-pending peers.'
+	echo 'Leave VPN stopped/disabled. The panel and amneziawg-proxy (if archived) are restored only after finalization by --activate-state --enable-at-boot.'
+	if [[ "${OPTION}" == --dry-run ]]; then
+		awgStatePanelPlan "${WORK}/stage"
+		awgStateProxyPlan "${WORK}/stage"
+		exit 0
+	fi
+	acquireClientLifecycleLock || exit 1
+	# Repeat under lock to close the preflight/installation race.
+	awgStateCheckIdentityTombstone "${WORK}/stage" || exit 1
+	awgStateImportPreflight "${NIC}" "${WORK}" || exit 1
+	mkdir -p "${AWG_STATE_JOURNAL_DIR}" || exit 1
+	[[ ! -L "${AWG_STATE_JOURNAL_DIR}" && ! -L "${JOURNAL}" ]] || exit 1
+	mkdir -p "${JOURNAL}" || exit 1
+	chmod 700 "${AWG_STATE_JOURNAL_DIR}" "${JOURNAL}" || exit 1
+	awgStateImportTransaction "${WORK}/stage" "${JOURNAL}"
+	local STATUS=$?
+	[[ ${STATUS} -eq 0 ]] || exit "${STATUS}"
+	echo "Imported in quarantine. Journal (no plaintext keys): ${JOURNAL}"
+	echo 'Before DNS cutover: fence the old server, inspect firewall hooks, and test a client handshake.'
+	echo "After fencing the old server, use: bash amneziawg-install.sh --activate-state <same-archive> --enable-at-boot"
+	echo 'Before finalization, do not start/enable the unit manually: activation must re-reconcile peer policy.'
+	echo 'Clients using literal IP endpoints still need updated profiles; DNS re-resolution depends on the client.'
+)
 
 function awgParamsCanonicalKeys() { # <backend>
 	local KEYS="${AWG_PARAMS_KEYS}"
@@ -8002,6 +11586,8 @@ function installBoringtunHost() {
 		echo -e "${RED}ERROR: could not write the BoringTun service files for awg-quick@${SERVER_AWG_NIC}.${NC}" >&2
 		exit 1
 	fi
+	# State imports stay stopped and disabled until an explicit operator cutover.
+	[[ -z "${_AWG_STATE_IMPORT_DIR}" ]] || return 0
 	systemctl enable "awg-quick@${SERVER_AWG_NIC}"
 	if systemctl start "awg-quick@${SERVER_AWG_NIC}"; then
 		if _awgBtCheckServedByBoringtun "${SERVER_AWG_NIC}"; then
@@ -8342,6 +11928,7 @@ function generateS3AndS4() { # [maximum S4, default128]
 
 function readS3AndS4() { # [maximum S4, default140]
 	local S4_MAX
+	# shellcheck disable=SC2031 # set in the same shell or, for import, in the same awgStateCommand subshell
 	S4_MAX="${1:-$(s4MaxForEndpoint "${SERVER_PUB_IP:-}")}"
 	SERVER_AWG_S3=0
 	SERVER_AWG_S4=0
@@ -8860,6 +12447,7 @@ function firstFreeAwgInterfaceName() {
 }
 
 function installQuestions() {
+	[[ -z "${_AWG_STATE_IMPORT_DIR}" ]] || return 0
 	validateClientMtu || exit 1
 	# Fresh installs remain on AWG 2.0 regardless of caller environment. AWG 3.0
 	# and AWG 3.1 can be enabled only after installation through the explicit
@@ -8880,6 +12468,7 @@ function installQuestions() {
 		# Only auto-detect if the operator did not provide an explicit override.
 		# An explicit SERVER_PUB_IP (even if private, e.g. for an internal-only
 		# deployment) is honoured as-is.
+		# shellcheck disable=SC2031 # set in the same shell or, for import, in the same awgStateCommand subshell
 		if [[ -z "${SERVER_PUB_IP:-}" ]]; then
 			SERVER_PUB_IP=$(detectPublicIPv4)
 			# If auto-detection only yielded a non-routable IPv4 (external
@@ -9599,6 +13188,10 @@ ${AWG_PROTOCOL_FIELDS}"
 # keys, params, the server configuration with its firewall hooks, and the
 # forwarding sysctls.
 function writeAwgServerInstallState() {
+	if [[ -n "${_AWG_STATE_IMPORT_DIR}" ]]; then
+		awgStateWriteInstallState
+		return $?
+	fi
 	# Refuse an impossible candidate before creating directories, keys or params.
 	validateFreshInstallMtu || return 1
 	# Ensure configuration directory exists
@@ -9659,8 +13252,10 @@ function writeAwgServerInstallState() {
 
 function installAmneziaWG() {
 	ensureSupportedInstallDistro
-	selectFreshInstallBackend || exit 1
-	selectFreshInstallImitation || exit 1
+	if [[ -z "${_AWG_STATE_IMPORT_DIR}" ]]; then
+		selectFreshInstallBackend || exit 1
+		selectFreshInstallImitation || exit 1
+	fi
 	if [[ "${AWG_BACKEND}" == "${AWG_BACKEND_BORINGTUN}" ]]; then
 		installBoringtunHost
 		return
@@ -9819,6 +13414,8 @@ EOF
 	# Always enable the service so it starts on next boot. Even if modprobe fails
 	# now (e.g., missing kernel headers), a reboot after installing headers or
 	# running dkms autoinstall will load the module via the ExecStartPre override.
+	# State imports stay stopped and disabled until an explicit operator cutover.
+	[[ -z "${_AWG_STATE_IMPORT_DIR}" ]] || return 0
 	systemctl enable "awg-quick@${SERVER_AWG_NIC}"
 
 	if modprobe amneziawg; then
@@ -11068,6 +14665,10 @@ function uninstallAmneziaWG() {
 			exit 1
 		else
 			echo "AmneziaWG uninstalled successfully."
+			# Keep recovery data and no-replay tombstones unless explicitly reset.
+			if [[ -d "${AWG_STATE_JOURNAL_DIR}" ]]; then
+				echo "Migration journals and server-identity tombstones retained in ${AWG_STATE_JOURNAL_DIR}; purge journals with --purge-state-journal <manifest-sha256>, or use --reset-state-journal <manifest-sha256> --confirm-policy-replay before restoring the same finalized archive."
+			fi
 			exit 0
 		fi
 	else
@@ -11926,34 +15527,40 @@ function rewriteAwgProtocolConfig() {
 	) >"${OUTPUT_FILE}" || return 1
 }
 
-# Return every regular, non-symlink client config in the known installer/web
-# locations. Search roots come from managed server state, the system account
-# database, and root-controlled web configuration.
-function collectAwgClientConfigCandidates() {
+# Search roots for installer-managed client profiles: the managed clients
+# directory, /root, /home/*, each managed client's resolved home (NSS/LDAP
+# homes such as /srv/alice), and the panel config directory. Endpoint audit
+# uses this same list. collectAwgClientConfigCandidates still skips symlinks.
+function awgStateClientConfigSearchRoots() {
 	local OUTPUT_NAME="$1"
-	local -n OUTPUT_REF="${OUTPUT_NAME}"
-	local -a SEARCH_ROOTS=()
-	local ROOT CANDIDATE CANONICAL PANEL_DIR HOME_PATH CLIENT_NAME
-	local NULLGLOB_WAS_SET=0
-	local -A SEEN_PATHS=()
-
-	OUTPUT_REF=()
-	SEARCH_ROOTS+=("${AMNEZIAWG_DIR}/clients" "/root")
+	local -n ROOTS_REF="${OUTPUT_NAME}"
+	local HOME_PATH CLIENT_NAME PANEL_DIR
+	ROOTS_REF=()
+	ROOTS_REF+=("${AMNEZIAWG_DIR}/clients" "/root")
 	for HOME_PATH in /home/*; do
-		[[ -d "${HOME_PATH}" && ! -L "${HOME_PATH}" ]] && SEARCH_ROOTS+=("${HOME_PATH}")
+		[[ -d "${HOME_PATH}" && ! -L "${HOME_PATH}" ]] && ROOTS_REF+=("${HOME_PATH}")
 	done
-	# getHomeDirForClient supports NSS/LDAP accounts whose homes are outside
-	# /home. Resolve each root-controlled managed marker so configs originally
-	# written to paths such as /srv/alice remain part of an all-client migration.
 	while IFS= read -r CLIENT_NAME; do
 		[[ -n "${CLIENT_NAME}" ]] || continue
 		HOME_PATH="$(getHomeDirForClient "${CLIENT_NAME}")" || return 1
 		if [[ "${HOME_PATH}" == /* && -d "${HOME_PATH}" && ! -L "${HOME_PATH}" ]]; then
-			SEARCH_ROOTS+=("${HOME_PATH}")
+			ROOTS_REF+=("${HOME_PATH}")
 		fi
 	done < <(grep -E '^### Client [A-Za-z0-9_-]{1,15}$' "${SERVER_AWG_CONF}" | cut -d ' ' -f 3)
 	PANEL_DIR="$(resolveWebPanelConfigDir 2>/dev/null || true)"
-	[[ -z "${PANEL_DIR}" ]] || SEARCH_ROOTS+=("${PANEL_DIR}")
+	[[ -z "${PANEL_DIR}" ]] || ROOTS_REF+=("${PANEL_DIR}")
+}
+
+function collectAwgClientConfigCandidates() {
+	local OUTPUT_NAME="$1"
+	local -n OUTPUT_REF="${OUTPUT_NAME}"
+	local -a SEARCH_ROOTS=()
+	local ROOT CANDIDATE CANONICAL
+	local NULLGLOB_WAS_SET=0
+	local -A SEEN_PATHS=()
+
+	OUTPUT_REF=()
+	awgStateClientConfigSearchRoots SEARCH_ROOTS || return 1
 
 	shopt -q nullglob && NULLGLOB_WAS_SET=1
 	shopt -s nullglob
@@ -13755,27 +17362,18 @@ function manageBoringtunMenu() {
 #
 # On error, prints a message to stderr and exits with a non-zero code.
 
+# Root-owned, independent of VPN/client/panel installation and retained across
+# rollback/uninstall/reset. Do not remove/recreate this inode while commands run.
+INSTALLER_LIFECYCLE_LOCK_DIR="/var/lib/amneziawg-install/lifecycle"
 CLIENT_LIFECYCLE_LOCK_FD=""
+CLIENT_PANEL_LIFECYCLE_LOCK_FD=""
 
-# Acquire the same non-blocking lifecycle lock used by amneziawg-web. The
-# persistent state directory is opened read-only, its descriptor identity
-# is revalidated against the path, and the descriptor is locked. The root-run
-# CLI therefore never creates, truncates, chowns, or chmods a service-writable
-# lock pathname. Mutating callers run in a subshell so the descriptor is closed
-# automatically; the interactive menu preloader releases it explicitly.
-function acquireClientLifecycleLock() {
-	local lock_dir panel_installed=0
-	local old_umask dir_identity descriptor_identity descriptor_path
-	lock_dir="$(resolveClientLifecycleLockDir)" || return 1
-	if isWebPanelInstalled; then
-		panel_installed=1
-	fi
-
-	if ! command -v flock >/dev/null 2>&1; then
-		echo "ERROR: flock is required for serialized client lifecycle operations" >&2
-		return 1
-	fi
-	if [[ ! -e "${lock_dir}" && "${panel_installed}" -eq 1 ]]; then
+# Open directory inodes read-only, validate descriptor/path identity, and lock
+# non-blockingly. Never create/chown/chmod a service-writable lock pathname.
+function acquireClientLifecycleDirectoryLock() { # <dir> <fd-variable> <create>
+	local lock_dir="$1" create="$3" old_umask dir_identity descriptor_identity descriptor_path lock_fd
+	local -n result_fd="$2"
+	if [[ ! -e "${lock_dir}" && "${create}" != 1 ]]; then
 		echo "ERROR: web panel lifecycle directory '${lock_dir}' does not exist" >&2
 		return 1
 	fi
@@ -13793,32 +17391,121 @@ function acquireClientLifecycleLock() {
 		echo "ERROR: refusing unsafe client lifecycle directory '${lock_dir}'" >&2
 		return 1
 	fi
-	if ! exec {CLIENT_LIFECYCLE_LOCK_FD}< "${lock_dir}"; then
+	# Only the independent installer inode is root-private; the panel database
+	# directory deliberately belongs to its service user and is never modified.
+	if [[ "${create}" == 1 ]]; then
+		local owner mode
+		owner="$(command stat -c %u -- "${lock_dir}")" || return 1
+		mode="$(command stat -c %a -- "${lock_dir}")" || return 1
+		if [[ "${owner}" != "${EUID}" ]] || (( (8#${mode} & 022) != 0 )); then
+			echo 'ERROR: installer lifecycle directory must be owned by the current user and not group/world writable' >&2
+			return 1
+		fi
+	fi
+	if ! exec {lock_fd}< "${lock_dir}"; then
 		echo "ERROR: could not open client lifecycle directory '${lock_dir}'" >&2
 		return 1
 	fi
-	descriptor_path="/proc/${BASHPID}/fd/${CLIENT_LIFECYCLE_LOCK_FD}"
+	descriptor_path="/proc/${BASHPID}/fd/${lock_fd}"
 	dir_identity="$(stat -Lc '%d:%i' -- "${lock_dir}" 2>/dev/null || true)"
 	descriptor_identity="$(stat -Lc '%d:%i' -- "${descriptor_path}" 2>/dev/null || true)"
 	if [[ -L "${lock_dir}" || ! -d "${lock_dir}" || -z "${dir_identity}" || \
 		-z "${descriptor_identity}" || "${dir_identity}" != "${descriptor_identity}" ]]; then
-		exec {CLIENT_LIFECYCLE_LOCK_FD}>&-
+		exec {lock_fd}>&-
 		echo "ERROR: client lifecycle directory changed while it was opened" >&2
 		return 1
 	fi
-	if ! flock -xn "${CLIENT_LIFECYCLE_LOCK_FD}"; then
-		exec {CLIENT_LIFECYCLE_LOCK_FD}>&-
+	if ! flock -xn "${lock_fd}"; then
+		exec {lock_fd}>&-
 		echo "ERROR: another client or protocol management operation is already in progress" >&2
 		return 1
+	fi
+	# shellcheck disable=SC2034 # nameref output sets the caller's descriptor variable
+	result_fd="${lock_fd}"
+}
+
+# Create the missing installer lock directory with private permissions.
+# Fails (quietly) only when the filesystem view is read-only or otherwise
+# refuses creation; acquireClientLifecycleDirectoryLock re-validates it.
+function installerLifecycleLockDirCreatable() {
+	local old_umask rc=0
+	old_umask="$(umask)"
+	umask 077
+	mkdir -p -- "${INSTALLER_LIFECYCLE_LOCK_DIR}" 2>/dev/null || rc=1
+	umask "${old_umask}"
+	return "${rc}"
+}
+
+# Every installer lifecycle caller takes the stable root-private lock. Keep the
+# existing panel directory lock too: native Rust operations hold that inode
+# across DB/config updates and privileged helper calls. Both are non-blocking,
+# acquired in this order; partial failures release the first lock immediately.
+# Mutating callers use subshells; the menu preloader releases explicitly.
+function acquireClientLifecycleLock() {
+	local panel_dir
+	if ! command -v flock >/dev/null 2>&1; then
+		echo "ERROR: flock is required for serialized client lifecycle operations" >&2
+		return 1
+	fi
+	if [[ ! -e "${INSTALLER_LIFECYCLE_LOCK_DIR}" && ! -L "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]] &&
+		! installerLifecycleLockDirCreatable; then
+		# The web panel helper runs this script inside the panel's
+		# ProtectSystem=strict view, where /var/lib is read-only. Panel
+		# install/upgrade pre-create the root-private directory; on hosts not
+		# yet upgraded, serialize on the panel DB-directory lock alone. Every
+		# root caller also takes that lock while a panel exists, so mutual
+		# exclusion with panel and CLI operations is preserved.
+		if panel_dir="$(resolveClientLifecycleLockDir)" &&
+			[[ "${panel_dir}" != "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]]; then
+			# The panel helper calls this on every protocol action: keep the
+			# non-interactive form to one short, greppable line.
+			if [[ -t 2 ]]; then
+				echo "WARNING: cannot create '${INSTALLER_LIFECYCLE_LOCK_DIR}' (read-only view); using the web panel lifecycle lock only. Rerun the panel upgrade to create it." >&2
+			else
+				echo "NOTICE: lifecycle-lock-fallback=panel (missing ${INSTALLER_LIFECYCLE_LOCK_DIR}; upgrade the panel)" >&2
+			fi
+			acquireClientLifecycleDirectoryLock "${panel_dir}" CLIENT_PANEL_LIFECYCLE_LOCK_FD 0 || return 1
+			return 0
+		fi
+	fi
+	acquireClientLifecycleDirectoryLock "${INSTALLER_LIFECYCLE_LOCK_DIR}" CLIENT_LIFECYCLE_LOCK_FD 1 || return 1
+	if ! panel_dir="$(resolveClientLifecycleLockDir)"; then
+		releaseClientLifecycleLock
+		return 1
+	fi
+	if [[ "${panel_dir}" != "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]]; then
+		if ! acquireClientLifecycleDirectoryLock "${panel_dir}" CLIENT_PANEL_LIFECYCLE_LOCK_FD 0; then
+			releaseClientLifecycleLock
+			return 1
+		fi
 	fi
 }
 
 function releaseClientLifecycleLock() {
+	if [[ -n "${CLIENT_PANEL_LIFECYCLE_LOCK_FD:-}" ]]; then
+		exec {CLIENT_PANEL_LIFECYCLE_LOCK_FD}>&- || true
+		CLIENT_PANEL_LIFECYCLE_LOCK_FD=""
+	fi
 	if [[ -n "${CLIENT_LIFECYCLE_LOCK_FD:-}" ]]; then
 		exec {CLIENT_LIFECYCLE_LOCK_FD}>&- || true
 		CLIENT_LIFECYCLE_LOCK_FD=""
 	fi
 }
+
+# The main fresh-install entry owns the same lock as reset/import/client ops.
+# Import calls the underlying installer hook directly under its existing lock;
+# it must not recursively acquire a second independent flock descriptor.
+function runLockedFreshInstall() (
+	acquireClientLifecycleLock || return 1
+	trap releaseClientLifecycleLock EXIT
+	if [[ -e "${AMNEZIAWG_DIR}/params" || -L "${AMNEZIAWG_DIR}/params" ]]; then
+		echo 'ERROR: installation state changed; params now exists. Rerun the installer for management.' >&2
+		return 1
+	fi
+	# Existing hand-made interfaces remain supported: installQuestions chooses a
+	# free NIC and writeAwgServerInstallState refuses to overwrite its config.
+	installAmneziaWG
+)
 
 # The initial interactive menu needs loaded values for display, but must not
 # hold the lifecycle lock while waiting for input. Mutating menu actions reload
@@ -14102,8 +17789,82 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	#   amneziawg-install.sh --upgrade-boringtun
 	#   amneziawg-install.sh --rollback-boringtun
 	#
+	# Server state migration (root; docs/STATE_MIGRATION.md):
+	#   amneziawg-install.sh --export-state <file>
+	#   amneziawg-install.sh --export-state - --passphrase-fd <fd>
+	#   amneziawg-install.sh --endpoint-summary
+	#   amneziawg-install.sh --inspect-state <file>
+	#   [SERVER_PUB_NIC=<nic>] [SERVER_PUB_IP=<host>] amneziawg-install.sh --import-state <file> [--dry-run]
+	#   [AWG_STATE_PANEL_BINARY=<amneziawg-web>] [AWG_STATE_PROXY_BINARY=<amneziawg-proxy>] \
+	#     amneziawg-install.sh --activate-state <file> [--enable-at-boot]
+	#     After finalization, restores an archived amneziawg-web panel and then
+	#     amneziawg-proxy via their installers from this checkout (each builds
+	#     from source unless its *_BINARY is set); a rerun on the finalized
+	#     journal retries only the unfinished companion steps.
+	#   amneziawg-install.sh --purge-state-journal <manifest-sha256> [--force]
+	#   amneziawg-install.sh --reset-state-journal <manifest-sha256> --confirm-policy-replay
+	#   amneziawg-install.sh --audit-endpoints
+	#   amneziawg-install.sh --set-endpoint-host <hostname> [--dry-run]
+	#     Rewrites only the host in client Endpoint lines (and SERVER_PUB_IP).
+	#     Keys are not regenerated. Clients import the updated profile once;
+	#     after that, changing the hostname's DNS record is enough.
+	#
 	# Requires AmneziaWG to be already installed (params file must exist).
 	case "${1:-}" in
+		--endpoint-summary)
+			if [[ $# -ne 1 ]]; then
+				echo 'Usage: amneziawg-install.sh --endpoint-summary' >&2
+				exit 1
+			fi
+			awgStateEndpointSummary
+			exit $?
+			;;
+		--audit-endpoints)
+			if [[ $# -ne 1 ]]; then
+				echo 'Usage: amneziawg-install.sh --audit-endpoints' >&2
+				exit 1
+			fi
+			awgStateEndpointCommand audit
+			exit $?
+			;;
+		--set-endpoint-host)
+			if [[ $# -ne 2 && ! ( $# -eq 3 && "${3:-}" == --dry-run ) ]] || [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+				echo 'Usage: amneziawg-install.sh --set-endpoint-host <hostname> [--dry-run]' >&2
+				exit 1
+			fi
+			awgStateEndpointCommand set "$2" "${3:-}"
+			exit $?
+			;;
+		--export-state|--inspect-state|--import-state|--activate-state)
+			# Streaming export is the only mode that reads a passphrase, and it
+			# reads it from a pipe descriptor. "-" is not a file destination.
+			if [[ "$1" == --export-state && $# -eq 4 && "$2" == - && "$3" == --passphrase-fd && "$4" =~ ^[0-9]+$ ]]; then
+				awgStateCommand "$@"
+				exit $?
+			fi
+			if [[ $# -ne 2 && ! ( "$1" == --import-state && $# -eq 3 && "$3" == --dry-run ) && ! ( "$1" == --activate-state && $# -eq 3 && "$3" == --enable-at-boot ) ]] || [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+				echo 'Usage: amneziawg-install.sh --export-state <file> | --export-state - --passphrase-fd <fd> | --inspect-state <file> | --import-state <file> [--dry-run] | --activate-state <file> [--enable-at-boot]' >&2
+				exit 1
+			fi
+			awgStateCommand "$@"
+			exit $?
+			;;
+		--reset-state-journal)
+			if [[ $# -ne 3 || "${3:-}" != --confirm-policy-replay || ! "${2:-}" =~ ^[0-9a-f]{64}$ ]]; then
+				echo 'Usage: amneziawg-install.sh --reset-state-journal <manifest-sha256> --confirm-policy-replay' >&2
+				exit 1
+			fi
+			awgStatePurgeJournal "$2" --reset-finalized
+			exit $?
+			;;
+		--purge-state-journal)
+			if [[ $# -ne 2 && ! ( $# -eq 3 && "$3" == --force ) ]] || [[ ! "${2:-}" =~ ^[0-9a-f]{64}$ ]]; then
+				echo 'Usage: amneziawg-install.sh --purge-state-journal <manifest-sha256> [--force]' >&2
+				exit 1
+			fi
+			awgStatePurgeJournal "$2" "${3:-}"
+			exit $?
+			;;
 		--upgrade-boringtun|--rollback-boringtun)
 			if [[ $# -ne 1 ]]; then
 				echo "Usage: amneziawg-install.sh --upgrade-boringtun" >&2
@@ -14215,6 +17976,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 		loadParamsForManagementMenu || exit 1
 		manageMenu
 	else
-		installAmneziaWG
+		runLockedFreshInstall
 	fi
 fi

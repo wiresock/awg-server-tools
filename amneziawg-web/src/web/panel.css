@@ -362,7 +362,8 @@ fieldset { margin: 0; padding: 0; border: 0; }
 .add-user-panel > summary::-webkit-details-marker { display: none; }
 .add-user-panel[open] > summary { margin-bottom: .75rem; }
 .protocol-panel > summary,
-#imitation-panel > summary { cursor: pointer; font-weight: 650; }
+#imitation-panel > summary,
+#state-export-panel > summary { cursor: pointer; font-weight: 650; }
 .protocol-panel section:not([hidden]) ~ section:not([hidden]) { margin-top: 1.5rem; }
 
 .danger-panel { max-width: none; border-color: rgba(248, 113, 113, .45); }

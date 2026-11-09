@@ -30,6 +30,10 @@ disguise VPN traffic as QUIC, DNS, SIP or STUN.
 > imitation requires [WireSock Secure Connect](https://www.wiresock.net/) 3.5+;
 > standard AmneziaWG clients still benefit from server-side obfuscation.
 
+Experimental: [encrypted server-state export/import](docs/STATE_MIGRATION.md)
+(CLI export, inspect, import and activate, including panel and proxy restore.
+Live acceptance drills are still pending; see that runbook).
+
 ## Web panel preview
 
 **Peer overview** — connection status, traffic counters, expiration dates, and

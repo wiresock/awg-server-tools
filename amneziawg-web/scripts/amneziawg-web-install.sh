@@ -94,6 +94,7 @@ SNAPSHOT_RETENTION_DAYS="${DEFAULT_SNAPSHOT_RETENTION_DAYS}"
 SESSION_TTL="${DEFAULT_SESSION_TTL}"
 USERNAME="${DEFAULT_USERNAME}"
 PASSWORD_HASH=""          # pre-hashed; takes precedence over PASSWORD
+PASSWORD_HASH_FILE=""     # file holding the pre-hashed password (keeps it out of argv)
 PASSWORD=""               # plaintext; only accepted interactively or with explicit flag
 ENABLE_SERVICE=true
 START_SERVICE=true
@@ -236,6 +237,9 @@ Options:
   --password-hash HASH      Argon2id PHC hash of the admin password
                             Generate with:
                               python3 -c "import argon2; print(argon2.PasswordHasher().hash('pw'))"
+  --password-hash-file FILE Read the Argon2id PHC hash from FILE (first line;
+                            a regular file, not a symlink), so it does not
+                            appear in the process list. Excludes --password-hash.
   --poll-interval SECS      Polling interval in seconds (default: ${DEFAULT_POLL_INTERVAL})
   --snapshot-retention-days DAYS
                             Retention window for historical traffic snapshots in days
@@ -300,6 +304,8 @@ parse_args() {
                 USERNAME="$2"; shift 2 ;;
             --password-hash)
                 PASSWORD_HASH="$2"; shift 2 ;;
+            --password-hash-file)
+                PASSWORD_HASH_FILE="$2"; shift 2 ;;
             --poll-interval)
                 POLL_INTERVAL="$2"; shift 2 ;;
             --snapshot-retention-days)
@@ -325,11 +331,31 @@ parse_args() {
         esac
     done
 
+    load_password_hash_file
+
     # --binary-src and --source-dir are mutually exclusive
     if [[ -n "${BINARY_SRC}" ]] && [[ -n "${SOURCE_DIR}" ]]; then
         die "--binary-src and --source-dir are mutually exclusive.
 Use --binary-src to provide a pre-built binary, or --source-dir to build from source."
     fi
+}
+
+# --password-hash-file: read the hash without putting it on a command line.
+load_password_hash_file() {
+    [[ -n "${PASSWORD_HASH_FILE}" ]] || return 0
+    if [[ -n "${PASSWORD_HASH}" ]]; then
+        die "--password-hash and --password-hash-file are mutually exclusive."
+    fi
+    if [[ -L "${PASSWORD_HASH_FILE}" || ! -f "${PASSWORD_HASH_FILE}" ]]; then
+        die "--password-hash-file must be a regular file (not a symlink): ${PASSWORD_HASH_FILE}"
+    fi
+    local line=""
+    IFS= read -r line <"${PASSWORD_HASH_FILE}" || [[ -n "${line}" ]] \
+        || die "Could not read --password-hash-file: ${PASSWORD_HASH_FILE}"
+    if [[ "${line}" != '$argon2'* ]]; then
+        die "--password-hash-file must contain an Argon2 PHC hash on its first line."
+    fi
+    PASSWORD_HASH="${line}"
 }
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
@@ -552,6 +578,61 @@ generate_hash() {
     }
 
     return 1
+}
+
+# age, python3 and sqlite3 are required for a panel state export. The panel
+# service cannot run apt-get (ProtectSystem=strict), so they are installed
+# here on Debian and Ubuntu, including the derivatives the installer maps
+# to those names. A failure warns and does not abort the panel install.
+ensure_state_export_dependencies() {
+    local os_id="" os_like="" os_file="/etc/os-release"
+    if [[ -r "${os_file}" ]]; then
+        # shellcheck disable=SC1090
+        os_id="$(. "${os_file}" && printf '%s' "${ID:-}")"
+        # shellcheck disable=SC1090
+        os_like="$(. "${os_file}" && printf '%s' "${ID_LIKE:-}")"
+    fi
+    case " ${os_id} ${os_like} " in
+        *" debian "*|*" ubuntu "*|*" raspbian "*) ;;
+        *)
+            warn "Skipping age, python3 and sqlite3 install on this operating system."
+            return 0
+            ;;
+    esac
+    if ! command -v apt-get >/dev/null 2>&1; then
+        warn "apt-get is not available; age, python3 and sqlite3 were not installed."
+        return 0
+    fi
+    if command -v age >/dev/null 2>&1 \
+        && command -v python3 >/dev/null 2>&1 \
+        && command -v sqlite3 >/dev/null 2>&1; then
+        return 0
+    fi
+    local conf="/etc/apt/apt.conf.d/99amneziawg-force-ipv4"
+    local conf_dir created=0 output
+    conf_dir="$(dirname -- "${conf}")"
+    if [[ ! -e "${conf}" ]]; then
+        if mkdir -p -- "${conf_dir}" \
+            && printf '%s\n%s\n' '# Managed by amneziawg-install - safe to remove' 'Acquire::ForceIPv4 "true";' >"${conf}"; then
+            created=1
+        else
+            warn "Could not write ${conf}; apt will run without forcing IPv4."
+        fi
+    fi
+    if ! output="$(apt-get update -qq 2>&1)"; then
+        warn "apt-get update failed; continuing without refreshing package lists."
+        warn "${output}"
+    fi
+    if output="$(apt-get install -y -qq age python3 sqlite3 2>&1)"; then
+        info "Installed age, python3 and sqlite3 for state export."
+    else
+        warn "Could not install age, python3 and sqlite3."
+        warn "${output}"
+    fi
+    if [[ "${created}" -eq 1 ]]; then
+        rm -f -- "${conf}"
+    fi
+    return 0
 }
 
 # Ensure at least one Argon2 hashing back-end is available.
@@ -854,7 +935,7 @@ detect_awg_config_dir() {
 non_interactive_validate() {
     # In non-interactive mode, a password hash is required.
     if [[ -z "${PASSWORD_HASH}" ]]; then
-        die "Non-interactive mode requires --password-hash.
+        die "Non-interactive mode requires --password-hash or --password-hash-file.
 Generate with:
   python3 -c \"import argon2; print(argon2.PasswordHasher().hash('yourpassword'))\""
     fi
@@ -991,6 +1072,28 @@ _apply_acl_to_symlink_target() {
         setfacl -m "u:${svc_user}:r" "${target_path}" 2>/dev/null || true
     else
         warn "Skipping ACL on symlink target ${target_path}: outside allowed directories."
+    fi
+}
+
+# amneziawg-install.sh serializes lifecycle operations on a root-private
+# directory lock. The panel's privileged helper runs that script inside the
+# service's ProtectSystem=strict view, where /var/lib is read-only, so create
+# the directory here (as root, outside the sandbox). Never replace a symlink.
+# Keep in sync with ensure_installer_lifecycle_lock_dir in amneziawg-web-upgrade.sh and with
+# INSTALLER_LIFECYCLE_LOCK_DIR in amneziawg-install.sh (tests/test-state-archive.py
+# asserts the copies are identical).
+readonly INSTALLER_LIFECYCLE_LOCK_DIR="/var/lib/amneziawg-install/lifecycle"
+ensure_installer_lifecycle_lock_dir() {
+    local parent="${INSTALLER_LIFECYCLE_LOCK_DIR%/*}"
+    if [[ -L "${parent}" || -L "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]]; then
+        warn "Refusing symlinked installer lifecycle directory ${INSTALLER_LIFECYCLE_LOCK_DIR}; panel protocol actions fall back to the panel lock."
+        return 0
+    fi
+    [[ -d "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]] && return 0
+    if ( umask 077 && mkdir -p -- "${INSTALLER_LIFECYCLE_LOCK_DIR}" ); then
+        info "Created installer lifecycle lock directory: ${INSTALLER_LIFECYCLE_LOCK_DIR}"
+    else
+        warn "Could not create ${INSTALLER_LIFECYCLE_LOCK_DIR}; panel protocol actions fall back to the panel lock."
     fi
 }
 
@@ -2271,11 +2374,14 @@ main() {
         interactive_setup
     fi
 
+    ensure_state_export_dependencies
+
     if systemctl is-active --quiet "${SERVICE_NAME}"; then
         SERVICE_WAS_ACTIVE="true"
     fi
 
     setup_filesystem
+    ensure_installer_lifecycle_lock_dir
     stage_binary
     stage_privileged_helper
     stage_sudoers

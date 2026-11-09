@@ -1136,6 +1136,83 @@ commit_staged_artifacts() {
 
 # ── Main upgrade ───────────────────────────────────────────────────────────────
 
+# amneziawg-install.sh serializes lifecycle operations on a root-private
+# directory lock. The panel's privileged helper runs that script inside the
+# service's ProtectSystem=strict view, where /var/lib is read-only, so create
+# the directory here (as root, outside the sandbox). Never replace a symlink.
+# Keep in sync with ensure_installer_lifecycle_lock_dir in amneziawg-web-install.sh and with
+# INSTALLER_LIFECYCLE_LOCK_DIR in amneziawg-install.sh (tests/test-state-archive.py
+# asserts the copies are identical).
+readonly INSTALLER_LIFECYCLE_LOCK_DIR="/var/lib/amneziawg-install/lifecycle"
+ensure_installer_lifecycle_lock_dir() {
+    local parent="${INSTALLER_LIFECYCLE_LOCK_DIR%/*}"
+    if [[ -L "${parent}" || -L "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]]; then
+        warn "Refusing symlinked installer lifecycle directory ${INSTALLER_LIFECYCLE_LOCK_DIR}; panel protocol actions fall back to the panel lock."
+        return 0
+    fi
+    [[ -d "${INSTALLER_LIFECYCLE_LOCK_DIR}" ]] && return 0
+    if ( umask 077 && mkdir -p -- "${INSTALLER_LIFECYCLE_LOCK_DIR}" ); then
+        info "Created installer lifecycle lock directory: ${INSTALLER_LIFECYCLE_LOCK_DIR}"
+    else
+        warn "Could not create ${INSTALLER_LIFECYCLE_LOCK_DIR}; panel protocol actions fall back to the panel lock."
+    fi
+}
+
+# age, python3 and sqlite3 are required for a panel state export. The panel
+# service cannot run apt-get (ProtectSystem=strict), so they are installed
+# here on Debian and Ubuntu, including the derivatives the installer maps
+# to those names. A failure warns and does not abort the panel upgrade.
+ensure_state_export_dependencies() {
+    local os_id="" os_like="" os_file="/etc/os-release"
+    if [[ -r "${os_file}" ]]; then
+        # shellcheck disable=SC1090
+        os_id="$(. "${os_file}" && printf '%s' "${ID:-}")"
+        # shellcheck disable=SC1090
+        os_like="$(. "${os_file}" && printf '%s' "${ID_LIKE:-}")"
+    fi
+    case " ${os_id} ${os_like} " in
+        *" debian "*|*" ubuntu "*|*" raspbian "*) ;;
+        *)
+            warn "Skipping age, python3 and sqlite3 install on this operating system."
+            return 0
+            ;;
+    esac
+    if ! command -v apt-get >/dev/null 2>&1; then
+        warn "apt-get is not available; age, python3 and sqlite3 were not installed."
+        return 0
+    fi
+    if command -v age >/dev/null 2>&1 \
+        && command -v python3 >/dev/null 2>&1 \
+        && command -v sqlite3 >/dev/null 2>&1; then
+        return 0
+    fi
+    local conf="/etc/apt/apt.conf.d/99amneziawg-force-ipv4"
+    local conf_dir created=0 output
+    conf_dir="$(dirname -- "${conf}")"
+    if [[ ! -e "${conf}" ]]; then
+        if mkdir -p -- "${conf_dir}" \
+            && printf '%s\n%s\n' '# Managed by amneziawg-install - safe to remove' 'Acquire::ForceIPv4 "true";' >"${conf}"; then
+            created=1
+        else
+            warn "Could not write ${conf}; apt will run without forcing IPv4."
+        fi
+    fi
+    if ! output="$(apt-get update -qq 2>&1)"; then
+        warn "apt-get update failed; continuing without refreshing package lists."
+        warn "${output}"
+    fi
+    if output="$(apt-get install -y -qq age python3 sqlite3 2>&1)"; then
+        info "Installed age, python3 and sqlite3 for state export."
+    else
+        warn "Could not install age, python3 and sqlite3."
+        warn "${output}"
+    fi
+    if [[ "${created}" -eq 1 ]]; then
+        rm -f -- "${conf}"
+    fi
+    return 0
+}
+
 main() {
     detect_service_state
 
@@ -1146,6 +1223,8 @@ main() {
         exit 0
     fi
 
+    ensure_state_export_dependencies
+
     # 1. Validate and stage every replacement before stopping the service.
     #    Each temporary file is in its destination directory, so the final
     #    renames are atomic and any staging failure leaves the live install
@@ -1155,6 +1234,7 @@ main() {
     stage_binary
     stage_awg_install_script
     stage_rollback_artifacts
+    ensure_installer_lifecycle_lock_dir
 
     # 2. Stop service if it was active (clean shutdown before artifact swap).
     if [[ "${SERVICE_WAS_ACTIVE}" == "true" ]]; then
