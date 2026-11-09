@@ -316,6 +316,8 @@ path = sys.argv[1]
 pid = os.fork()
 if pid == 0:
     os._exit(0)
+# Wait until the child has exited, but leave the zombie unreaped.
+os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
 open(path, "w").write(str(pid))
 time.sleep(5)
 ' "$WORK/zombie.pid" &
