@@ -54,7 +54,8 @@ for that form.
 amneziawg-web. Descriptor N must be a pipe (not a terminal and not a regular
 file). The installer reads the passphrase from that pipe until EOF and then
 closes it. The passphrase is at least 16 Unicode characters and at most 1024
-bytes, UTF-8, with no NUL, CR, or LF. An empty passphrase is refused before
+bytes. It must not contain a C0 control (U+0000 through U+001F, including
+tab) or DEL (U+007F). An empty passphrase is refused before
 `age` starts: age 1.1.1 would otherwise invent a passphrase and print it only
 on its terminal, and the archive would be unrecoverable. If no passphrase
 arrives within 30 seconds, export fails before `age` starts. The installer must be
@@ -86,15 +87,19 @@ An administrator can download the same archive from the amneziawg-web peer
 page (Server → Server migration). The panel requires a signed-in admin session
 and the current admin password in that same request. A bearer token is not
 enough, and export is refused when panel authentication is disabled. The form
-also takes the archive passphrase twice. The passphrase must be 16 to 1024
-UTF-8 characters and must not contain a C0 control (U+0000 through U+001F,
-including tab) or DEL (U+007F). The panel and `--passphrase-fd` use that same
+also takes the archive passphrase twice. The passphrase must be at least 16
+characters and at most 1024 bytes, and must not contain a C0 control
+(U+0000 through U+001F, including tab) or DEL (U+007F). A passphrase can
+therefore be refused before it reaches 1024 characters. The panel and
+`--passphrase-fd` use that same
 rule and the same error. The panel then streams the helper. It does not write
 a temporary archive file. The passphrase is not stored and is not written to
 the audit log or the panel log.
 
 One export runs at a time in a panel process. A second request is refused
-with HTTP 409 until the first download finishes or the browser disconnects.
+with HTTP 409 until the helper for the first export has exited. Disconnecting
+the browser starts that shutdown. It does not free the slot while the helper
+is still running.
 
 If the browser disconnects, the panel sends SIGTERM to the sudo process that
 started the helper. sudo relays SIGTERM, SIGHUP and SIGINT to the helper both

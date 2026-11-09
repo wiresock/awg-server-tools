@@ -37,6 +37,18 @@ fail_test() {
     exit 1
 }
 
+# kill -0 is true for a zombie. A container PID 1 can reap slowly, so a dead
+# installer still looks alive. State Z in /proc/<pid>/stat means it is gone.
+process_running() {
+    local pid="$1" stat state
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    [[ -r "/proc/${pid}/stat" ]] || return 1
+    stat="$(cat "/proc/${pid}/stat")"
+    state="${stat##*) }"
+    state="${state%% *}"
+    [[ -n "$state" && "$state" != Z ]]
+}
+
 SECRET='stream-export-secret-value'
 KEY='A/b+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
 LONG="$(printf 'x%.0s' {1..400})"
@@ -298,9 +310,36 @@ kill -s TERM -- "$helper_pid" || true
 wait "$helper_pid" 2>/dev/null || true
 installer_pid="$(cat "$WORK/installer.pid")"
 sleep_pid="$(cat "$WORK/sleep.pid")"
+if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os, sys, time
+path = sys.argv[1]
+pid = os.fork()
+if pid == 0:
+    os._exit(0)
+open(path, "w").write(str(pid))
+time.sleep(5)
+' "$WORK/zombie.pid" &
+    zombie_parent=$!
+    ready=0
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        if [[ -s "$WORK/zombie.pid" ]]; then
+            ready=1
+            break
+        fi
+        sleep 0.05
+    done
+    [[ "$ready" == 1 ]] || fail_test 'zombie pid was not recorded'
+    zpid="$(cat "$WORK/zombie.pid")"
+    kill -0 "$zpid" 2>/dev/null || fail_test 'zombie was not visible to kill -0'
+    if process_running "$zpid"; then
+        fail_test 'a zombie was treated as a running export process'
+    fi
+    kill "$zombie_parent" 2>/dev/null || true
+    wait "$zombie_parent" 2>/dev/null || true
+fi
 gone=0
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if ! kill -0 "$installer_pid" 2>/dev/null && ! kill -0 "$sleep_pid" 2>/dev/null; then
+    if ! process_running "$installer_pid" && ! process_running "$sleep_pid"; then
         gone=1
         break
     fi

@@ -472,15 +472,14 @@ impl Drop for Secret {
 }
 
 struct ExportSession {
-    child: Child,
+    child: Option<Child>,
     stdout: ChildStdout,
     completed: AtomicBool,
     state: AppState,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
     stderr_done: Option<tokio::sync::oneshot::Receiver<()>>,
-    /// Held until the session drops so a second export is refused with 409.
-    #[allow(dead_code)]
-    permit: ExportPermit,
+    /// Held until the helper has exited, including the disconnect shutdown.
+    permit: Option<ExportPermit>,
 }
 
 impl Drop for ExportSession {
@@ -488,7 +487,16 @@ impl Drop for ExportSession {
         if self.completed.swap(true, Ordering::SeqCst) {
             return;
         }
-        kill_export(&mut self.child);
+        let child = self.child.take();
+        let permit = self.permit.take();
+        if let Some(mut child) = child {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(shutdown_export(child, permit));
+            } else {
+                let _ = child.start_kill();
+                drop(permit);
+            }
+        }
         warn_export_stderr(&self.stderr_tail, "client_disconnected");
         let state = self.state.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -545,7 +553,10 @@ impl ExportSession {
         if self.completed.swap(true, Ordering::SeqCst) {
             return;
         }
-        let ok = matches!(self.child.wait().await, Ok(status) if status.success());
+        let ok = match self.child.take() {
+            Some(mut child) => matches!(child.wait().await, Ok(status) if status.success()),
+            None => false,
+        };
         self.wait_for_stderr().await;
         if ok {
             audit(&self.state, EVT_STATE_EXPORTED, None).await;
@@ -559,8 +570,9 @@ impl ExportSession {
         if self.completed.swap(true, Ordering::SeqCst) {
             return;
         }
-        kill_export(&mut self.child);
-        let _ = self.child.wait().await;
+        if let Some(child) = self.child.take() {
+            shutdown_export(child, self.permit.take()).await;
+        }
         self.wait_for_stderr().await;
         warn_export_stderr(&self.stderr_tail, reason);
         audit(&self.state, EVT_STATE_EXPORT_FAILED, Some(reason)).await;
@@ -635,64 +647,52 @@ async fn spawn_export(
         .take()
         .ok_or_else(|| std::io::Error::other("export helper has no stdout"))?;
     Ok(ExportSession {
-        child,
+        child: Some(child),
         stdout,
         completed: AtomicBool::new(false),
         state: state.clone(),
         stderr_tail,
         stderr_done: Some(done_rx),
-        permit,
+        permit: Some(permit),
     })
 }
 
-fn kill_export(child: &mut Child) {
+/// Stop the helper and keep `permit` until this process has been reaped.
+/// `Child::try_wait` is the only reap, so a recycled pid is not signaled.
+async fn shutdown_export(mut child: Child, permit: Option<ExportPermit>) {
+    let _permit = permit;
     #[cfg(unix)]
-    if let Some(raw) = child.id() {
-        let pid = raw as i32;
-        // sudo relays TERM to the helper and cannot relay KILL. The helper
-        // then stops the installer, which stops age and pack.
-        unsafe {
-            libc::kill(pid, libc::SIGTERM);
-        }
-        let reap = async move {
-            let deadline = tokio::time::Instant::now() + EXPORT_KILL_GRACE;
-            loop {
-                if reap_export(pid) {
-                    return;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    unsafe {
-                        libc::kill(-pid, libc::SIGKILL);
-                        libc::kill(pid, libc::SIGKILL);
-                    }
-                    for _ in 0..50 {
-                        if reap_export(pid) {
-                            return;
-                        }
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                    }
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
+    {
+        let pid = child.id().map(|raw| raw as i32);
+        if let Some(pid) = pid {
+            // sudo relays TERM to the helper and cannot relay KILL. The helper
+            // then stops the installer, which stops age and pack.
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
             }
-        };
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(reap);
-            return;
         }
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-            libc::kill(pid, libc::SIGKILL);
+        let deadline = tokio::time::Instant::now() + EXPORT_KILL_GRACE;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) if tokio::time::Instant::now() >= deadline => break,
+                Ok(None) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
         }
+        if let Some(raw) = child.id() {
+            let pid = raw as i32;
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     }
-    let _ = child.start_kill();
-}
-
-#[cfg(unix)]
-fn reap_export(pid: i32) -> bool {
-    let mut status = 0;
-    let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-    reaped == pid || reaped == -1
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill().await;
+    }
 }
 
 fn append_stderr_tail(buf: &mut Vec<u8>, chunk: &[u8], secret: &[u8]) {
@@ -1133,6 +1133,20 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn process_still_running(pid: i32) -> bool {
+        let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        // comm can contain spaces. The state is the field after the last ')'.
+        // Z is a zombie: dead, not yet reaped, and kill -0 still succeeds.
+        let Some((_, rest)) = text.rsplit_once(')') else {
+            return false;
+        };
+        let state = rest.split_whitespace().next().unwrap_or("");
+        !state.is_empty() && state != "Z"
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn stream_has_no_temp_file_and_disconnect_kills_the_child() {
         let state = test_state(true).await;
@@ -1231,7 +1245,7 @@ mod tests {
         drop(stream);
         let mut dead = false;
         for _ in 0..50 {
-            if unsafe { libc::kill(pid, 0) } != 0 {
+            if !process_still_running(pid) {
                 dead = true;
                 break;
             }
@@ -1521,7 +1535,7 @@ mod tests {
         let script = root.join("helper.sh");
         std::fs::write(
             &script,
-            "#!/bin/bash\nset -eu\nmode=\"${1:-ok}\"\nif [[ \"$mode\" == slow ]]; then sha256sum >/dev/null; printf 'age-encryption.org/v1\\n'; sleep 60; else sha256sum >/dev/null; printf 'age-encryption.org/v1\\n'; fi\n",
+            "#!/bin/bash\nset -eu\nmode=\"${1:-ok}\"\nsha256sum >/dev/null\nif [[ \"$mode\" == linger ]]; then trap 'sleep 1; exit 0' TERM; fi\nprintf 'age-encryption.org/v1\\n'\n# Short sleeps, so bash runs the TERM trap instead of waiting out one long sleep.\nif [[ \"$mode\" == linger ]]; then while true; do sleep 0.1; done; fi\n",
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -1534,7 +1548,7 @@ mod tests {
             form(&csrf, "testpassword", passphrase(), passphrase()),
             Some((
                 script.as_os_str(),
-                vec!["slow".into()],
+                vec!["linger".into()],
                 Some(cwd.clone()),
             )),
         )
@@ -1559,19 +1573,42 @@ mod tests {
             .unwrap()
             .contains("Another state export is already running."));
         drop(first);
-        let third = export_with(
+        // The helper traps SIGTERM and stays up for a second. The slot must
+        // stay taken until that process has been reaped.
+        let during_shutdown = export_with(
             &state,
             &headers,
             form(&csrf, "testpassword", passphrase(), passphrase()),
             Some((
                 script.as_os_str(),
                 vec!["ok".into()],
-                Some(cwd),
+                Some(cwd.clone()),
             )),
         )
         .await;
-        assert_eq!(third.status(), StatusCode::OK);
-        let _ = axum::body::to_bytes(third.into_body(), usize::MAX).await;
+        assert_eq!(during_shutdown.status(), StatusCode::CONFLICT);
+        let mut released = false;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let next = export_with(
+                &state,
+                &headers,
+                form(&csrf, "testpassword", passphrase(), passphrase()),
+                Some((
+                    script.as_os_str(),
+                    vec!["ok".into()],
+                    Some(cwd.clone()),
+                )),
+            )
+            .await;
+            if next.status() == StatusCode::OK {
+                let _ = axum::body::to_bytes(next.into_body(), usize::MAX).await;
+                released = true;
+                break;
+            }
+            assert_eq!(next.status(), StatusCode::CONFLICT);
+        }
+        assert!(released, "export slot stayed busy after the helper exited");
         let _ = std::fs::remove_dir_all(&root);
     }
 
