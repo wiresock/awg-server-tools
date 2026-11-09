@@ -100,7 +100,7 @@ pub const SUDO_BIN: &str = "/usr/bin/sudo";
 const AWG_BIN: &str = "/usr/bin/awg";
 
 /// Root-owned validator installed by the web-panel installer.
-const PRIVILEGED_HELPER_BIN: &str = "/usr/local/libexec/amneziawg-web-privileged";
+pub(crate) const PRIVILEGED_HELPER_BIN: &str = "/usr/local/libexec/amneziawg-web-privileged";
 
 /// Execute the helper's `show-all` operation and return parsed interfaces.
 ///

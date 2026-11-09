@@ -580,6 +580,61 @@ generate_hash() {
     return 1
 }
 
+# age, python3 and sqlite3 are required for a panel state export. The panel
+# service cannot run apt-get (ProtectSystem=strict), so they are installed
+# here on Debian and Ubuntu, including the derivatives the installer maps
+# to those names. A failure warns and does not abort the panel install.
+ensure_state_export_dependencies() {
+    local os_id="" os_like="" os_file="/etc/os-release"
+    if [[ -r "${os_file}" ]]; then
+        # shellcheck disable=SC1090
+        os_id="$(. "${os_file}" && printf '%s' "${ID:-}")"
+        # shellcheck disable=SC1090
+        os_like="$(. "${os_file}" && printf '%s' "${ID_LIKE:-}")"
+    fi
+    case " ${os_id} ${os_like} " in
+        *" debian "*|*" ubuntu "*|*" raspbian "*) ;;
+        *)
+            warn "Skipping age, python3 and sqlite3 install on this operating system."
+            return 0
+            ;;
+    esac
+    if ! command -v apt-get >/dev/null 2>&1; then
+        warn "apt-get is not available; age, python3 and sqlite3 were not installed."
+        return 0
+    fi
+    if command -v age >/dev/null 2>&1 \
+        && command -v python3 >/dev/null 2>&1 \
+        && command -v sqlite3 >/dev/null 2>&1; then
+        return 0
+    fi
+    local conf="/etc/apt/apt.conf.d/99amneziawg-force-ipv4"
+    local conf_dir created=0 output
+    conf_dir="$(dirname -- "${conf}")"
+    if [[ ! -e "${conf}" ]]; then
+        if mkdir -p -- "${conf_dir}" \
+            && printf '%s\n%s\n' '# Managed by amneziawg-install - safe to remove' 'Acquire::ForceIPv4 "true";' >"${conf}"; then
+            created=1
+        else
+            warn "Could not write ${conf}; apt will run without forcing IPv4."
+        fi
+    fi
+    if ! output="$(apt-get update -qq 2>&1)"; then
+        warn "apt-get update failed; continuing without refreshing package lists."
+        warn "${output}"
+    fi
+    if output="$(apt-get install -y -qq age python3 sqlite3 2>&1)"; then
+        info "Installed age, python3 and sqlite3 for state export."
+    else
+        warn "Could not install age, python3 and sqlite3."
+        warn "${output}"
+    fi
+    if [[ "${created}" -eq 1 ]]; then
+        rm -f -- "${conf}"
+    fi
+    return 0
+}
+
 # Ensure at least one Argon2 hashing back-end is available.
 # Tries to auto-install python3-argon2-cffi (apt), python3-argon2 (apt),
 # or the argon2 CLI (apt).
@@ -2318,6 +2373,8 @@ main() {
     else
         interactive_setup
     fi
+
+    ensure_state_export_dependencies
 
     if systemctl is-active --quiet "${SERVICE_NAME}"; then
         SERVICE_WAS_ACTIVE="true"

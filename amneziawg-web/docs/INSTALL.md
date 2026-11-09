@@ -190,15 +190,22 @@ allow-listed operations provide:
 - `remove-client` – atomically remove one exact, validated managed-client block
 - `remove-client-if-key` – atomically validate a managed client's public-key
   identity and remove its exact block
+- `export-state` – stream an age-encrypted server-state archive to standard
+  output. The passphrase arrives on a pipe (stdin), never in argv or the
+  environment. This is the only subcommand whose output is secret, and only
+  as that ciphertext. A failure writes no ciphertext.
+- `endpoint-summary` – print two integers, hostname endpoints then literal-IP
+  endpoints. Read-only. It does not print keys or hostnames.
 
 Every operation has a fixed argument shape.  Unknown subcommands, malformed
 interface/client names, keys or AllowedIPs, unsafe configuration paths,
 symbolic/hard links, and non-regular files are rejected before a privileged
 command is invoked. Existing root-owned server private keys and PSKs are never
-exposed to the service. Apart from the newly generated peer payload required by
-`append-peer`, the helper accepts no secrets; raw config files and
-caller-supplied `syncconf` content are never accepted. Config mutations and live
-reconciliation share a stable per-interface lock.
+exposed to the service in the clear. Apart from the newly generated peer
+payload required by `append-peer` and the `export-state` passphrase on stdin,
+the helper accepts no secrets; raw config files and caller-supplied `syncconf`
+content are never accepted. Config mutations and live reconciliation share a
+stable per-interface lock.
 
 This follows the principle of least privilege.
 
