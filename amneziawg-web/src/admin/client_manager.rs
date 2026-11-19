@@ -2237,8 +2237,11 @@ SERVER_AWG_H4='1837068650'
             "",
             "AWG_PROTOCOL_VERSION='1'\n",
             "AWG_PROTOCOL_VERSION='1.0'\n",
+            "CLIENT_DNS_2=''\nCLIENT_MTU=''\nSERVER_AWG_S3=''\nSERVER_AWG_S4=''\nAWG_BACKEND='kernel'\nAWG_PROTOCOL_VERSION='1'\nAWG_HEADER_PROTECTION_KEY=''\nAWG_CONTENT_PADDING_ADDITION=''\nAWG_REKEY_AFTER_TIME=''\nAWG_REKEY_TIMEOUT=''\nAWG_REJECT_AFTER_TIME=''\nAWG_KEEPALIVE_TIMEOUT=''\nAWG_RANDOM_TRAILERS=''\nAWG_DISABLE_COOKIES=''\n",
         ] {
             let params = parse_params(&format!("{legacy}{version}")).unwrap();
+            assert_eq!(params.protocol_version, AwgProtocolVersion::V1);
+            assert!(mtu_budget_warning(&params).is_none());
             let config = build_client_config(
                 &params,
                 "PRIVATE",

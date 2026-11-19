@@ -761,7 +761,7 @@ run_export_state() {
     # panel installer and upgrade install these tools. Do not start the
     # installer (it would try apt) when one of them is missing.
     local export_tool
-    for export_tool in age python3 sqlite3; do
+    for export_tool in age python3; do
         if [[ -z "$(resolve_system_command "${export_tool}")" ]]; then
             fail "export-state requires ${export_tool}; rerun the panel upgrade"
         fi

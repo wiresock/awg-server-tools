@@ -11,17 +11,17 @@ export TMPDIR="$WORK/tmp"
 source <(sed '/^main "\$@"$/d' "$ROOT/amneziawg-web/scripts/amneziawg-web-privileged")
 require_root() { :; }
 resolve_awg_install_script() { printf '%s\n' "$WORK/mock-installer.sh"; }
-# Export refuses to start unless age, python3 and sqlite3 resolve on the
+# Export refuses to start unless age and python3 resolve on the
 # helper PATH. The mock installer never executes them. When this machine does
 # not have one, report a trusted path so the other tests still reach the mock.
-if [[ -z "$(resolve_system_command age)" || -z "$(resolve_system_command python3)" || -z "$(resolve_system_command sqlite3)" ]]; then
+if [[ -z "$(resolve_system_command age)" || -z "$(resolve_system_command python3)" ]]; then
     eval "$(declare -f resolve_system_command | sed '1s/^resolve_system_command/_resolve_system_command_real/')"
     resolve_system_command() {
         local found
         found="$(_resolve_system_command_real "$1")"
         if [[ -z "${found}" ]]; then
             case "$1" in
-                age|python3|sqlite3)
+                age|python3)
                     printf '/usr/bin/%s\n' "$1"
                     return 0
                     ;;
@@ -183,24 +183,43 @@ printf '%s' "$SECRET" | (trap cleanup EXIT; main export-state extra) \
 [[ "$rc" == 2 ]] || fail_test "expected exit 2 for an extra argument, got $rc"
 grep -q 'expects 0 argument' "$WORK/stderr" || fail_test 'extra argument was not refused'
 
-if command -v sqlite3 >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1; then
     live="$WORK/live.db"
-    sqlite3 "$live" 'PRAGMA journal_mode=WAL; CREATE TABLE peers(name TEXT); INSERT INTO peers VALUES ("phone");'
-    python3 - "$live" <<'PY' &
-import sqlite3, sys, time
-connection = sqlite3.connect(sys.argv[1])
-connection.execute('BEGIN')
-connection.execute('SELECT * FROM peers')
+    ready="$WORK/writer-ready"
+    python3 - "$live" <<'PY'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as con:
+    con.execute('PRAGMA journal_mode=WAL')
+    con.execute('CREATE TABLE peers(name TEXT)')
+    con.execute('CREATE TABLE snapshots(id INTEGER PRIMARY KEY, name TEXT)')
+    con.execute('INSERT INTO peers VALUES ("phone")')
+    con.execute('INSERT INTO snapshots VALUES (1, "phone")')
+PY
+    python3 - "$live" "$ready" <<'PY' &
+import pathlib, sqlite3, sys, time
+connection = sqlite3.connect(sys.argv[1], isolation_level=None)
+connection.execute('BEGIN IMMEDIATE')
+connection.execute('INSERT INTO peers VALUES ("uncommitted")')
+pathlib.Path(sys.argv[2]).write_text('ready')
 time.sleep(20)
 PY
     holder=$!
-    sleep 0.3
-    sqlite3 -readonly "$live" ".timeout 10000" ".backup '${WORK}/copy.db'" \
-        || fail_test 'sqlite3 .backup failed while the database was open'
+    for _ in $(seq 1 50); do
+        [[ -f "$ready" ]] && break
+        sleep 0.1
+    done
+    [[ -f "$ready" ]] || fail_test 'background WAL writer did not start'
+    bash -c 'set -euo pipefail; source "$1"; awgStateArchive panel-snapshot "$2" "$3"' _ \
+        "$ROOT/amneziawg-install.sh" "$live" "$WORK/copy.db" \
+        || fail_test 'panel-snapshot failed while a WAL writer held an open transaction'
     kill "$holder" 2>/dev/null || true
     wait "$holder" 2>/dev/null || true
-    [[ "$(sqlite3 "$WORK/copy.db" 'SELECT name FROM peers')" == phone ]] \
-        || fail_test 'backup of the open database did not contain the row'
+    python3 - "$WORK/copy.db" <<'PY' || fail_test 'panel-snapshot did not preserve committed rows or omit snapshots/uncommitted rows'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as con:
+    assert con.execute('SELECT name FROM peers').fetchall() == [('phone',)]
+    assert con.execute('SELECT COUNT(*) FROM snapshots').fetchone() == (0,)
+PY
 fi
 
 cat > "$WORK/summary-installer.sh" <<MOCK
@@ -369,7 +388,7 @@ grep -q 'ensure_state_export_dependencies$' <(sed -n '/^main()/,/^}/p' "$upgrade
         if [[ "$1" == -v ]]; then
             case "${2:-}" in
                 apt-get) return 0 ;;
-                age|python3|sqlite3) return 1 ;;
+                age|python3) return 1 ;;
             esac
             return 1
         fi
@@ -390,7 +409,7 @@ grep -q 'ensure_state_export_dependencies$' <(sed -n '/^main()/,/^}/p' "$upgrade
     if grep -q APT-STDOUT "$WORK/dep-out"; then
         fail_test 'apt stdout was not captured'
     fi
-    grep -q 'install -y -qq age python3 sqlite3' "$WORK/apt-args" \
+    grep -q 'install -y -qq age python3$' "$WORK/apt-args" \
         || fail_test 'age was not installed with apt-get'
     [[ ! -e "$WORK/force-ipv4.conf" ]] || fail_test 'temporary ForceIPv4 config was left behind'
     rm -f "$WORK/apt-args"

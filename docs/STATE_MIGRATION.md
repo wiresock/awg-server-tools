@@ -63,7 +63,7 @@ tab) or DEL (U+007F). An empty passphrase is refused before
 on its terminal, and the archive would be unrecoverable. If no passphrase
 arrives within 30 seconds, export fails before `age` starts. The installer must be
 a regular file for this form (`bash <(curl ...)` cannot stream). Ciphertext is
-written to standard output only after encryption succeeds. If age or sqlite3
+written to standard output only after encryption succeeds. If `age` or `python3`
 is missing, apt's messages go to standard error and cannot prefix that
 ciphertext. Encryption that does
 not finish within 5 minutes, or any failure of packing or `age`, writes nothing
@@ -146,16 +146,16 @@ printed. It does not install packages and does not change the VPN. It needs
 use an IP in Endpoint; they will need a new profile after a ban" (singular
 when N is 1).
 
-The panel install and upgrade scripts install `age`, `python3`, and `sqlite3`
+The panel install and upgrade scripts install `age` and `python3`
 on Debian and Ubuntu (including the derivatives the installer already maps to
 them). The panel service's `ProtectSystem=strict` sandbox cannot run apt-get,
-so a missing tool is not installed at export time. If `age`, `python3`, or
-`sqlite3` is absent from `/usr/bin`, `/bin`, `/usr/sbin`, or `/sbin`, the
+so a missing tool is not installed at export time. If `age` or `python3`
+is absent from `/usr/bin`, `/bin`, `/usr/sbin`, or `/sbin`, the
 helper refuses before starting the installer with
 `export-state requires <tool>; rerun the panel upgrade`, and the download
 button stays disabled with that reason.
 
-The CLI export and import still install missing `age`, `python3`, and `sqlite3`
+The CLI export and import still install missing `age` and `python3`
 with apt. Inspect, dry-run and activation require them to be installed already
 and never install packages.
 The existing installer's distribution/version and signed AWG package handling
@@ -215,7 +215,14 @@ The encrypted payload is a gzip tar containing only regular files:
 - `vpn/params` and `vpn/server.conf`: exact source bytes, including server keys,
   PSKs, obfuscation and protocol fields. Imported params are parsed as literals
   against an allowlist, **never sourced**. Only validated values are serialized
-  into new local params.
+  into new local params. Pre-2.0 AWG 1.0 kernel installations (no
+  `AWG_PROTOCOL_VERSION`, no `S3`/`S4`, and scalar uint32 `H1`–`H4`) are
+  detected and preserved as `AWG_PROTOCOL_VERSION='1'` with empty
+  `SERVER_AWG_S3`/`SERVER_AWG_S4` and no `S3`/`S4` in `server.conf`, matching
+  `amneziawg-web` and `amneziawg-proxy` without forcing an AWG 2.0 upgrade.
+  Non-interactive `--add-client`, `--remove-client`, and `--list-clients`
+  preserve AWG 1.0 without prompting; enabling AWG 3.x requires migrating to
+  AWG 2.0 interactively first.
 - `clients/*.conf`: discovered installer-managed profiles, byte for byte.
   Discovery reuses `collectAwgClientConfigCandidates`: managed clients directory,
   panel config directory, `/root`, `/home/*`, and managed users' resolved homes.
@@ -225,14 +232,17 @@ The encrypted payload is a gzip tar containing only regular files:
   or replacing the root-owned copy. Custom client shell hooks fail export. Copies are restored
   into the managed clients directory, not arbitrary archived home paths.
 - `web/database.sqlite`: if the panel is installed, a consistent online
-  `sqlite3 .backup` of the effective database location: `--database-url` takes
+  read-only SQLite snapshot of the effective database location: `--database-url` takes
   precedence over `AWG_WEB_DB`; absent settings use `awg-web.db`. Relative paths
-  use the service working directory. The staged copy is converted to
-  `journal_mode=DELETE` right after `.backup` (a WAL-mode panel DB would
-  otherwise yield a WAL copy), export refuses if any `-wal`/`-shm`/`-journal`
-  sidecar exists in staging, and every reader of a staged or unpacked DB opens
-  it with `mode=ro&immutable=1`, so no sidecar is ever created or packed (also
-  for older archives whose DB still has a WAL header).
+  use the service working directory. The staged copy is written directly in
+  `journal_mode=DELETE` with the exact schema (tables, indexes, triggers, views,
+  `_sqlx_migrations`, and `sqlite_sequence`) and all rows from every operational
+  table (`peers`, `events`, `users`, `interfaces`, SMTP/delivery tables, etc.),
+  while omitting historical polling telemetry rows in `snapshots` so multi-gigabyte
+  traffic histories do not overflow RAM staging or `MAX_FILE`. Export refuses if
+  any `-wal`/`-shm`/`-journal` sidecar exists in staging, and every reader of a
+  staged or unpacked DB opens it with `mode=ro&immutable=1`, so no sidecar is
+  ever created or packed (also for older archives whose DB still has a WAL header).
   Unsupported SQLite URL/query formats fail export rather than silently omit
   the DB. Per-peer `expires_at` values remain in this snapshot; no remaining
   lifetime is reset on the destination. `web/env.conf` is copied from the existing env-file resolver.
@@ -705,7 +715,7 @@ removes a finalized tombstone; there is no automatic reset on uninstall.
 Export streams gzip tar bytes **directly into age through a pipe**; no plaintext
 `state.tar.gz` is written. Both pipeline statuses are checked (`pipefail`), and a
 failed producer or encryption removes partial ciphertext rather than publishing
-it. Individual-file snapshots (including SQLite `.backup`) still need staging.
+it. Individual-file snapshots (including the staged SQLite snapshot) still need staging.
 All CLI modes prefer a private 0700 directory on `/dev/shm`, then `/run`, only
 when that location is tmpfs/ramfs; if neither is usable the command refuses
 (there is no disk-backed `/tmp` fallback). Insufficient RAM/staging space aborts
@@ -842,9 +852,10 @@ conflicting client copies, `installer_sha256` when the installer is read from
 `bash <(…)`, the server-identity tombstone, the reset hint, the MTU warning,
 fractional-second expiries, clock-skew tolerance, the `SERVER_PUB_IP`
 override and IP-literal warning, and that journals hold no plaintext keys or
-panel DB. It uses the real `sqlite3` CLI (skipped if absent; CI installs it)
-to export a live WAL-mode panel DB and import a WAL-header DB without
-sidecars, and covers the config-replace failure window, `host:port` rejection,
+panel DB. It uses the embedded Python `panel-snapshot` helper directly (no
+`sqlite3` CLI required) to export a live WAL-mode panel DB omitting historical
+`snapshots` rows and import a WAL-header DB without sidecars, and covers the
+config-replace failure window, `host:port` rejection,
 inherited subshell traps, refusal without RAM staging and the
 incomplete-rollback block. It also covers the default proxy topology, an
 archive-controlled path that already exists, the journal-directory companion

@@ -398,14 +398,12 @@ ROOT="$2"
 WEB_PANEL_SYSTEMD_UNIT="$ROOT/panel.service"
 WEB_PANEL_ENV_FILE="$ROOT/env.conf"
 readWebPanelEffectiveProperty() { return 1; }
-sqlite3() {
-    [[ "$1" == -readonly ]] || return 0 # journal_mode conversion of the copy.
-    printf '%s' "$2" >"$ROOT/chosen"
-    python3 - "$2" "$ROOT/stage/web/database.sqlite" <<'SQLITE'
-import sqlite3, sys
-with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as dest:
-    source.backup(dest)
-SQLITE
+eval "$(declare -f awgStateArchive | sed '1s/awgStateArchive/_real_awgStateArchive/')"
+awgStateArchive() {
+    if [[ "$1" == panel-snapshot ]]; then
+        printf '%s' "$2" >"$ROOT/chosen"
+    fi
+    _real_awgStateArchive "$@"
 }
 awgStateSnapshotPanel "$ROOT/stage"
 '''
@@ -1948,16 +1946,25 @@ SERVER_AWG_S4=18 CLIENT_MTU="" awgStateWarnMtuBudget "$2"
         self.assertIn(b'future relative to this host', self.run_helper('inspect', ok=False).stderr)
 
     def test_wal_mode_panel_db_snapshot_exports_and_imports_without_sidecars(self):
-        if not shutil.which('sqlite3'):
-            self.skipTest('sqlite3 CLI not installed')
         live = self.root / 'live'
         live.mkdir()
         db_path = live / 'awg-web.db'
         writer = sqlite3.connect(db_path)
         self.addCleanup(writer.close)
         writer.execute('PRAGMA journal_mode=WAL')
-        writer.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, removal_pending INTEGER, expires_at TEXT, display_name TEXT)')
-        writer.execute('INSERT INTO peers VALUES(?,?,?,?,?,?)', (PEER, 1, 0, 0, None, 'phone'))
+        writer.execute('PRAGMA user_version=7')
+        writer.execute('CREATE TABLE _sqlx_migrations(version BIGINT PRIMARY KEY, description TEXT NOT NULL)')
+        writer.execute('INSERT INTO _sqlx_migrations VALUES(10, "events_on_delete")')
+        writer.execute('CREATE TABLE peers(id INTEGER PRIMARY KEY AUTOINCREMENT, public_key TEXT NOT NULL UNIQUE, disabled INTEGER, archived INTEGER, removal_pending INTEGER, expires_at TEXT, display_name TEXT)')
+        writer.execute('CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT, peer_id INTEGER REFERENCES peers(id), action TEXT NOT NULL)')
+        writer.execute('CREATE TABLE snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT, public_key TEXT NOT NULL, captured_at TEXT NOT NULL, rx_bytes INTEGER NOT NULL, tx_bytes INTEGER NOT NULL)')
+        writer.execute('CREATE INDEX idx_snapshots_pk_captured_id ON snapshots(public_key, captured_at, id)')
+        writer.execute('INSERT INTO peers(id, public_key, disabled, archived, removal_pending, expires_at, display_name) VALUES(5,?,?,?,?,?,?)', (PEER, 1, 0, 0, None, 'phone'))
+        writer.execute('INSERT INTO events(peer_id, action) VALUES(5, "peer.disabled")')
+        writer.executemany(
+            'INSERT INTO snapshots(public_key, captured_at, rx_bytes, tx_bytes) VALUES(?,?,?,?)',
+            [(PEER, f'2026-11-19T20:00:{i:02d}Z', i * 100, i * 200) for i in range(50)],
+        )
         writer.commit()  # Writer kept open: live WAL/SHM exist, like a running panel.
         self.assertTrue((live / 'awg-web.db-wal').exists())
         source = self.root / 'source'
@@ -1991,6 +1998,20 @@ awgStateExport "$ROOT/export.tar.gz" "$ROOT/work"
         self.assertIn('web/database.sqlite', names)
         self.assertFalse([n for n in names if n.endswith(('-wal', '-shm', '-journal'))], names)
         self.assertEqual(data[18:20], b'\x01\x01')  # Rollback-journal (DELETE) mode header.
+        exported_db = self.root / 'exported-check.sqlite'
+        exported_db.write_bytes(data)
+        with closing(sqlite3.connect(exported_db.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+            self.assertEqual(db.execute('PRAGMA integrity_check').fetchone(), ('ok',))
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone(), (7,))
+            self.assertEqual(db.execute('SELECT id, public_key, disabled, display_name FROM peers').fetchall(), [(5, PEER, 1, 'phone')])
+            self.assertEqual(db.execute('SELECT peer_id, action FROM events').fetchall(), [(5, 'peer.disabled')])
+            self.assertEqual(db.execute('SELECT version FROM _sqlx_migrations').fetchall(), [(10,)])
+            # Historical telemetry rows in snapshots are omitted, while table schema, index, and sequence remain intact.
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM snapshots').fetchone(), (0,))
+            self.assertEqual(db.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_snapshots_pk_captured_id'").fetchone(), ('idx_snapshots_pk_captured_id',))
+            seqs = dict(db.execute('SELECT name, seq FROM sqlite_sequence').fetchall())
+            self.assertEqual(seqs.get('peers'), 5)
+            self.assertEqual(seqs.get('snapshots'), 50)
         # Import side: an archive whose DB still carries a WAL header (older
         # exports) is read immutably and never grows sidecars next to it.
         wal_db = self.root / 'wal-origin.sqlite'
@@ -2009,6 +2030,138 @@ awgStateExport "$ROOT/export.tar.gz" "$ROOT/work"
         self.run_helper('prepare', destination, self.root / 'prepared.conf')
         leftovers = [p.name for p in destination.rglob('*') if p.name.endswith(('-wal', '-shm', '-journal'))]
         self.assertEqual(leftovers, [])
+
+    def test_panel_snapshot_full_migrations_concurrency_and_security(self):
+        migrations_dir = SCRIPT.parent / 'amneziawg-web' / 'migrations'
+        migration_files = sorted(migrations_dir.glob('*.sql'))
+        self.assertGreaterEqual(len(migration_files), 15)
+
+        src = self.root / 'full-panel.db'
+        other_peer = base64.b64encode(b'D' * 32).decode()
+        checksum = bytes(range(48))
+        digest = b'\xab' * 32
+        token_hash = b'\xcd' * 32
+        with closing(sqlite3.connect(src)) as db:
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('PRAGMA application_id=1096238935')
+            db.execute(
+                'CREATE TABLE _sqlx_migrations(version BIGINT PRIMARY KEY, description TEXT NOT NULL, '
+                'installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, success BOOLEAN NOT NULL, '
+                'checksum BLOB NOT NULL, execution_time BIGINT NOT NULL)'
+            )
+            for mf in migration_files:
+                db.executescript(mf.read_text(encoding='utf-8'))
+                ver = int(mf.name.split('_', 1)[0])
+                db.execute(
+                    'INSERT INTO _sqlx_migrations(version, description, success, checksum, execution_time) '
+                    'VALUES(?, ?, 1, ?, 1)',
+                    (ver, mf.stem, checksum),
+                )
+            db.execute('CREATE VIEW active_peer_keys AS SELECT public_key FROM peers WHERE disabled = 0')
+            db.execute('INSERT INTO peers(id, public_key, display_name) VALUES(10, ?, "alice")', (PEER,))
+            db.execute('INSERT INTO peers(id, public_key, display_name) VALUES(25, ?, "temp")', (other_peer,))
+            db.execute('DELETE FROM peers WHERE id = 25')  # High-water mark stays 25 in sqlite_sequence.
+            db.execute(
+                'INSERT INTO delivery_clients(id, peer_id, interface, managed_name, last_public_key, email, '
+                'binding_version, export_digest) VALUES("c1", 10, "awg0", "alice", ?, "a@example.test", 1, ?)',
+                (PEER, digest),
+            )
+            db.execute(
+                'INSERT INTO email_jobs(id, client_id, request_id, actor, recipient, mode, formats, '
+                'binding_version, export_digest, state, attempts, next_attempt_at, created_at) '
+                'VALUES("j1", "c1", "r1", "admin", "a@example.test", "link", "conf", 1, ?, "queued", 0, 100, 100)',
+                (digest,),
+            )
+            db.execute(
+                'INSERT INTO delivery_grants(id, job_id, token_hash, binding_version, export_digest, expires_at) '
+                'VALUES("g1", "j1", ?, 1, ?, 9999999999)',
+                (token_hash, digest),
+            )
+            db.executemany(
+                'INSERT INTO snapshots(public_key, captured_at, rx_bytes, tx_bytes) VALUES(?,?,?,?)',
+                [(PEER, f'2026-11-19T21:00:{i:02d}Z', i, i * 2) for i in range(12)],
+            )
+            db.commit()
+
+        # Hold an active uncommitted WAL write transaction while taking panel-snapshot.
+        writer = sqlite3.connect(src, isolation_level=None)
+        self.addCleanup(writer.close)
+        writer.execute('BEGIN IMMEDIATE')
+        writer.execute('INSERT INTO peers(id, public_key, display_name) VALUES(30, ?, "uncommitted")', (other_peer,))
+
+        dst = self.root / 'full-snapshot.sqlite'
+        # Also exercise a relative source path to verify abspath URI conversion.
+        rel_src = os.path.relpath(src, self.root)
+        result = subprocess.run(
+            ['bash', '-c', 'set -euo pipefail; cd "$2"; source "$1"; awgStateArchive panel-snapshot "$3" "$4"',
+             'test', str(SCRIPT), str(self.root), rel_src, str(dst)],
+            capture_output=True,
+        )
+        writer.execute('ROLLBACK')
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertEqual(dst.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(dst.read_bytes()[18:20], b'\x01\x01')
+        for suffix in ('-wal', '-shm', '-journal'):
+            self.assertFalse(Path(str(dst) + suffix).exists())
+
+        with closing(sqlite3.connect(dst.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+            self.assertEqual(db.execute('PRAGMA integrity_check').fetchone(), ('ok',))
+            self.assertEqual(db.execute('PRAGMA application_id').fetchone(), (1096238935,))
+            # Committed peer preserved, uncommitted WAL row excluded.
+            self.assertEqual(db.execute('SELECT id, public_key, display_name FROM peers').fetchall(), [(10, PEER, 'alice')])
+            # Snapshots omitted while schema and indexes remain.
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM snapshots').fetchone(), (0,))
+            self.assertIsNotNone(db.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_snapshots_pk_captured_id'").fetchone())
+            self.assertIsNotNone(db.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='email_jobs_visible_activity'").fetchone())
+            self.assertEqual(db.execute('SELECT public_key FROM active_peer_keys').fetchall(), [(PEER,)])
+            # Triggers exist and did not fire during copy.
+            triggers = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall()}
+            self.assertTrue({'delivery_peer_invalidated', 'delivery_peer_deleted', 'delivery_contact_invalidated'}.issubset(triggers))
+            self.assertEqual(db.execute('SELECT binding_version, typeof(export_digest), export_digest FROM delivery_clients').fetchall(), [(1, 'blob', digest)])
+            self.assertEqual(db.execute('SELECT state, invalidation_code FROM email_jobs').fetchall(), [('queued', None)])
+            self.assertEqual(db.execute('SELECT revoked_at, typeof(token_hash), token_hash FROM delivery_grants').fetchall(), [(None, 'blob', token_hash)])
+            self.assertEqual(db.execute('SELECT typeof(checksum), checksum FROM _sqlx_migrations WHERE version = 1').fetchall(), [('blob', checksum)])
+            # sqlite_sequence preserves high-water marks even after deleting max-id peer and omitting snapshots.
+            seqs = dict(db.execute('SELECT name, seq FROM sqlite_sequence').fetchall())
+            self.assertEqual(seqs.get('peers'), 25)
+            self.assertEqual(seqs.get('snapshots'), 12)
+
+        # Fail-closed & cleanup checks.
+        existing = self.root / 'existing.sqlite'
+        existing.write_bytes(b'keep-me')
+        res = self.run_helper('panel-snapshot', src, existing, ok=False)
+        self.assertEqual(existing.read_bytes(), b'keep-me')
+        self.assertNotIn(b'Traceback', res.stderr)
+
+        link_dst = self.root / 'link-dst.sqlite'
+        link_dst.symlink_to(self.root / 'nowhere.sqlite')
+        self.run_helper('panel-snapshot', src, link_dst, ok=False)
+
+        link_src = self.root / 'link-src.db'
+        link_src.symlink_to(src)
+        out_from_link = self.root / 'from-link.sqlite'
+        self.run_helper('panel-snapshot', link_src, out_from_link, ok=False)
+        self.assertFalse(out_from_link.exists())
+
+        corrupt = self.root / 'corrupt.db'
+        corrupt.write_bytes(b'not-a-sqlite-database')
+        out_corrupt = self.root / 'out-corrupt.sqlite'
+        self.run_helper('panel-snapshot', corrupt, out_corrupt, ok=False)
+        for suffix in ('', '-wal', '-shm', '-journal'):
+            self.assertFalse(Path(str(out_corrupt) + suffix).exists())
+
+        vtab = self.root / 'vtab.db'
+        with closing(sqlite3.connect(vtab)) as db:
+            db.execute('CREATE VIRTUAL TABLE evil USING fts5(content)')
+            db.commit()
+        out_vtab = self.root / 'out-vtab.sqlite'
+        self.run_helper('panel-snapshot', vtab, out_vtab, ok=False)
+        for suffix in ('', '-wal', '-shm', '-journal'):
+            self.assertFalse(Path(str(out_vtab) + suffix).exists())
+
+        # Missing destination arg fails cleanly without an uncaught IndexError traceback.
+        missing_arg = self.run_helper('panel-snapshot', src, ok=False)
+        self.assertNotIn(b'Traceback', missing_arg.stderr)
 
     def test_config_replace_failure_in_deferred_window_restores_previous(self):
         for case in ('landed-then-failed', 'io-error', 'interrupted'):
@@ -4522,6 +4675,491 @@ class CompanionPermissionTests(unittest.TestCase):
         # The proxy data dir is left to the proxy installer (no chown/chmod here).
         self.assertNotIn('chown', proxy)
         self.assertNotIn('chmod', proxy)
+
+
+class Awg1MigrationTests(unittest.TestCase):
+    """Pre-2.0 AWG 1.0 kernel installations must export, import, retry
+    activation, re-export, and keep working with amneziawg-web and
+    amneziawg-proxy without being promoted to AWG 2.0."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='awg1-state-test-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.helper = self.root / 'helper.py'
+        self.helper.write_text(CODE)
+
+    def run_helper(self, mode, path, *args, ok=True):
+        result = subprocess.run(['python3', str(self.helper), KEYS, mode, str(path),
+                                 *map(str, args)], capture_output=True)
+        if ok:
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+        else:
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn(KEY.encode(), result.stderr)
+        return result
+
+    def legacy_fixture(self, include_dns2=True, proxy=True):
+        lines = [
+            'SERVER_PUB_IP=milan.example.test',
+            'SERVER_PUB_NIC=eth0',
+            'SERVER_AWG_NIC=awg0',
+            'SERVER_AWG_IPV4=10.66.67.1',
+            'SERVER_AWG_IPV6=fd42:42:43::1',
+            'SERVER_PORT=64828',
+            f'SERVER_PRIV_KEY={KEY}',
+            f'SERVER_PUB_KEY={PUB}',
+            'CLIENT_DNS_1=1.1.1.1',
+        ]
+        if include_dns2:
+            lines.append('CLIENT_DNS_2=1.0.0.1')
+        lines += [
+            'ALLOWED_IPS=0.0.0.0/0,::/0',
+            'SERVER_AWG_JC=10',
+            'SERVER_AWG_JMIN=50',
+            'SERVER_AWG_JMAX=1000',
+            'SERVER_AWG_S1=84',
+            'SERVER_AWG_S2=150',
+            'SERVER_AWG_H1=1805140871',
+            'SERVER_AWG_H2=1806515711',
+            'SERVER_AWG_H3=434882725',
+            'SERVER_AWG_H4=1715363230',
+        ]
+        listen_port = '64829' if proxy else '64828'
+        conf = (
+            '[Interface]\n'
+            'Address = 10.66.67.1/24,fd42:42:43::1/64\n'
+            f'ListenPort = {listen_port}\n'
+            f'PrivateKey = {KEY}\n'
+            'Jc = 10\nJmin = 50\nJmax = 1000\nS1 = 84\nS2 = 150\n'
+            'H1 = 1805140871\nH2 = 1806515711\nH3 = 434882725\nH4 = 1715363230\n'
+            'PostUp = iptables -w -I INPUT ! -i lo -p udp --dport 64829 -j DROP\n'
+            f'\n### Client phone\n[Peer]\nPublicKey = {PEER}\nPresharedKey = {PUB}\n'
+            'AllowedIPs = 10.66.67.2/32,fd42:42:43::2/128\n'
+        )
+        client = (
+            f'[Interface]\nPrivateKey = {PEER}\nAddress = 10.66.67.2/32,fd42:42:43::2/128\n'
+            'DNS = 1.1.1.1,1.0.0.1\n'
+            'Jc = 10\nJmin = 50\nJmax = 1000\nS1 = 84\nS2 = 150\n'
+            'H1 = 1805140871\nH2 = 1806515711\nH3 = 434882725\nH4 = 1715363230\n'
+            f'\n[Peer]\nPublicKey = {PUB}\nPresharedKey = {PUB}\n'
+            'Endpoint = milan.example.test:64828\nAllowedIPs = 0.0.0.0/0,::/0\n'
+        )
+        files = {
+            'vpn/params': ('\n'.join(lines) + '\n').encode(),
+            'vpn/server.conf': conf.encode(),
+            'clients/awg0-client-phone.conf': client.encode(),
+        }
+        if proxy:
+            files['proxy/proxy.toml'] = (
+                'listen = "[::]:64828"\n'
+                'backend = "127.0.0.1:64829"\n'
+                'imitate_protocol = "auto"\n'
+                'quic_certificate_domain = "milan.example.test"\n'
+                'awg_config = "/etc/amnezia/amneziawg/awg0.conf"\n'
+                'status_file = "/var/lib/amneziawg-proxy/sessions.json"\n'
+                'status_interval_secs = 5\n'
+            ).encode()
+        return files
+
+    def write_stage(self, name, files):
+        stage = self.root / name
+        for rel, data in files.items():
+            path = stage / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        return stage
+
+    def test_awg1_legacy_pack_inspect_and_rejections(self):
+        files = self.legacy_fixture()
+        stage = self.write_stage('stage-legacy', files)
+        tar = self.root / 'legacy.tar.gz'
+        self.run_helper('export-check', stage)
+        self.run_helper('pack', stage, tar, 'awg-fixture')
+        self.run_helper('verify', tar)
+        info = json.loads(self.run_helper('inspect', tar).stdout.decode())
+        self.assertEqual(info['protocol'], '1')
+        self.assertEqual(info['backend'], 'kernel')
+        self.assertEqual(info['proxy_plan']['topology'], 'proxy')
+        self.assertTrue(info['proxy_plan']['awg_matches_backend'])
+        self.assertIsNone(info['proxy_plan']['refusal'])
+        self.assertEqual(info['endpoint_audit']['hostname'], 1)
+        self.assertEqual(info['endpoint_audit']['ip_literal'], 0)
+
+        # Explicit AWG_PROTOCOL_VERSION=1 / 1.0 with empty S3/S4 (post-import shape).
+        for version in ('1', '1.0'):
+            explicit = dict(files)
+            explicit['vpn/params'] += f"AWG_PROTOCOL_VERSION='{version}'\nSERVER_AWG_S3=''\nSERVER_AWG_S4=''\n".encode()
+            sdir = self.write_stage(f'stage-v-{version}', explicit)
+            out_tar = self.root / f'explicit-{version}.tar.gz'
+            self.run_helper('export-check', sdir)
+            self.run_helper('pack', sdir, out_tar, 'awg-fixture')
+            self.assertEqual(json.loads(self.run_helper('inspect', out_tar).stdout.decode())['protocol'], '1')
+
+        # S3=0, S4=0 without AWG_PROTOCOL_VERSION stays AWG 2.0 (never inferred as 1.0).
+        zero_v2 = self.legacy_fixture(proxy=False)
+        zero_v2['vpn/params'] += b"SERVER_AWG_S3='0'\nSERVER_AWG_S4='0'\n"
+        zero_v2['vpn/server.conf'] = zero_v2['vpn/server.conf'].replace(b'S2 = 150\n', b'S2 = 150\nS3 = 0\nS4 = 0\n')
+        zdir = self.write_stage('stage-zero-v2', zero_v2)
+        ztar = self.root / 'zero-v2.tar.gz'
+        self.run_helper('pack', zdir, ztar, 'awg-fixture')
+        self.assertEqual(json.loads(self.run_helper('inspect', ztar).stdout.decode())['protocol'], '2')
+
+        # Standard headers 1..4, leading-zero scalar headers, and AWG 1.5 I1-I5 stay valid under AWG 1.0.
+        special = self.legacy_fixture(proxy=False)
+        special['vpn/params'] = (
+            special['vpn/params']
+            .replace(b'SERVER_AWG_H1=1805140871', b'SERVER_AWG_H1=00001')
+            .replace(b'SERVER_AWG_H2=1806515711', b'SERVER_AWG_H2=2')
+            .replace(b'SERVER_AWG_H3=434882725', b'SERVER_AWG_H3=3')
+            .replace(b'SERVER_AWG_H4=1715363230', b'SERVER_AWG_H4=4')
+        )
+        special['vpn/server.conf'] = (
+            special['vpn/server.conf']
+            .replace(b'H1 = 1805140871', b'H1 = 00001')
+            .replace(b'H2 = 1806515711', b'H2 = 2')
+            .replace(b'H3 = 434882725', b'H3 = 3')
+            .replace(b'H4 = 1715363230', b'H4 = 4')
+            .replace(b'S2 = 150\n', b'S2 = 150\nI1 = <b 0xdeadbeef>\n')
+        )
+        special['clients/awg0-client-phone.conf'] = special['clients/awg0-client-phone.conf'].replace(
+            b'S2 = 150\n', b'S2 = 150\nI1 = <b 0xdeadbeef>\n'
+        )
+        sp_tar = self.root / 'special.tar.gz'
+        self.run_helper('pack', self.write_stage('stage-special', special), sp_tar, 'awg-fixture')
+        self.assertEqual(json.loads(self.run_helper('inspect', sp_tar).stdout.decode())['protocol'], '1')
+
+        # Legacy 2.0 and 3.0 aliases normalize cleanly in params().
+        for raw, norm, extra_conf in (
+            ('2.0', '2', b''),
+            ('3.0', '3', f'HeaderProtectionKey = {KEY}\n'.encode()),
+        ):
+            aliased = self.legacy_fixture(proxy=False)
+            aliased['vpn/params'] += f"SERVER_AWG_S3='15'\nSERVER_AWG_S4='16'\nAWG_PROTOCOL_VERSION='{raw}'\n".encode()
+            if raw == '3.0':
+                aliased['vpn/params'] += f"AWG_HEADER_PROTECTION_KEY='{KEY}'\n".encode()
+            aliased['vpn/server.conf'] = aliased['vpn/server.conf'].replace(
+                b'S2 = 150\n', b'S2 = 150\nS3 = 15\nS4 = 16\n' + extra_conf
+            )
+            a_tar = self.root / f'alias-{raw}.tar.gz'
+            self.run_helper('pack', self.write_stage(f'stage-alias-{raw}', aliased), a_tar, 'awg-fixture')
+            self.assertEqual(json.loads(self.run_helper('inspect', a_tar).stdout.decode())['protocol'], norm)
+
+        # Tampered manifest protocol mismatches fail closed in both directions.
+        for wrong_proto in ('2', '1.0'):
+            bad_meta = manifest(files)
+            bad_meta['protocol'] = wrong_proto
+            bad_tar = self.root / f'bad-manifest-{wrong_proto}.tar.gz'
+            make_tar(bad_tar, files, bad_meta)
+            self.run_helper('verify', bad_tar, ok=False)
+        v2_files = state_fixture()
+        bad_v2_meta = manifest(v2_files)
+        bad_v2_meta['protocol'] = '1'
+        bad_v2_tar = self.root / 'bad-v2-as-v1.tar.gz'
+        make_tar(bad_v2_tar, v2_files, bad_v2_meta)
+        self.run_helper('verify', bad_v2_tar, ok=False)
+
+        # Invalid AWG 1.0 / incomplete AWG 2.0 / kernel-imitation combinations must fail closed.
+        bad_params = [
+            ('boringtun', files['vpn/params'] + b"AWG_PROTOCOL_VERSION='1'\nAWG_BACKEND='boringtun'\n"),
+            ('boringtun-inferred', files['vpn/params'] + b"AWG_BACKEND='boringtun'\n"),
+            ('kernel-imitate-proto', files['vpn/params'] + b"AWG_BORINGTUN_IMITATE_PROTOCOL='quic'\n"),
+            ('kernel-imitate-domain', files['vpn/params'] + b"AWG_BORINGTUN_IMITATE_DOMAIN='example.test'\n"),
+            ('s3-set', files['vpn/params'] + b"AWG_PROTOCOL_VERSION='1'\nSERVER_AWG_S3='15'\n"),
+            ('s4-zero-explicit-v1', files['vpn/params'] + b"AWG_PROTOCOL_VERSION='1'\nSERVER_AWG_S4='0'\n"),
+            ('ranged-h1', files['vpn/params'].replace(b'SERVER_AWG_H1=1805140871', b'SERVER_AWG_H1=5-10') + b"AWG_PROTOCOL_VERSION='1'\n"),
+            ('overflow-h1', files['vpn/params'].replace(b'SERVER_AWG_H1=1805140871', b'SERVER_AWG_H1=4294967296') + b"AWG_PROTOCOL_VERSION='1'\n"),
+            ('awg3-key', files['vpn/params'] + f"AWG_PROTOCOL_VERSION='1'\nAWG_HEADER_PROTECTION_KEY='{KEY}'\n".encode()),
+            ('awg3-trailers', files['vpn/params'] + b"AWG_PROTOCOL_VERSION='1'\nAWG_RANDOM_TRAILERS='on'\n"),
+            ('awg3-rekey', files['vpn/params'] + b"AWG_PROTOCOL_VERSION='1'\nAWG_REKEY_AFTER_TIME='10'\n"),
+            ('explicit-v2-missing-s3-s4', files['vpn/params'] + b"AWG_PROTOCOL_VERSION='2'\n"),
+            ('explicit-v2-empty-s3-s4', files['vpn/params'] + b"AWG_PROTOCOL_VERSION='2'\nSERVER_AWG_S3=''\nSERVER_AWG_S4=''\n"),
+            ('partial-s3-only', files['vpn/params'] + b"SERVER_AWG_S3='15'\n"),
+        ]
+        for label, payload in bad_params:
+            with self.subTest(case=label):
+                p = self.root / f'bad-{label}.params'
+                p.write_bytes(payload)
+                self.run_helper('params', p, ok=False)
+
+        # Server config carrying S3, S4, or HeaderProtectionKey under AWG 1.0 must fail export-check.
+        for label, extra in (
+            ('s3', b'S3 = 15\n'),
+            ('s4-zero', b'S4 = 0\n'),
+            ('hpk', f'HeaderProtectionKey = {KEY}\n'.encode()),
+        ):
+            with self.subTest(bad_conf=label):
+                bad_conf = dict(files)
+                bad_conf['vpn/server.conf'] = bad_conf['vpn/server.conf'].replace(b'S2 = 150\n', b'S2 = 150\n' + extra)
+                self.run_helper('export-check', self.write_stage(f'stage-bad-conf-{label}', bad_conf), ok=False)
+
+    def test_awg1_roundtrip_import_local_identity_reexport_and_companions(self):
+        # Omit CLIENT_DNS_2 too to prove set -u safety in serializeParams.
+        files = self.legacy_fixture(include_dns2=False)
+        source = self.root / 'source'
+        (source / 'clients').mkdir(parents=True)
+        (source / 'params').write_bytes(files['vpn/params'])
+        (source / 'awg0.conf').write_bytes(files['vpn/server.conf'])
+        (source / 'clients/awg0-client-phone.conf').write_bytes(files['clients/awg0-client-phone.conf'])
+        proxy_dir = self.root / 'proxy-etc'
+        proxy_dir.mkdir()
+        (proxy_dir / 'proxy.toml').write_bytes(files['proxy/proxy.toml'])
+        (self.root / 'work1').mkdir()
+        (self.root / 'work2').mkdir()
+        shell = r'''
+set -euo pipefail
+source "$1"
+ROOT="$2"
+WEB_HELPER="$3"
+PROXY_SH="$4"
+AMNEZIAWG_DIR="$ROOT/source"
+AWG_STATE_PROXY_CONFIG="$ROOT/proxy-etc/proxy.toml"
+AWG_STATE_PROXY_UNIT="$ROOT/no-proxy.service"
+acquireClientLifecycleLock() { return 0; }
+releaseClientLifecycleLock() { return 0; }
+awgStateTrustedPath() { return 0; }
+isWebPanelInstalled() { return 1; }
+collectAwgClientConfigCandidates() { local -n OUTPUT="$1"; OUTPUT=("${AMNEZIAWG_DIR}/clients/awg0-client-phone.conf"); }
+isRoot() { return 0; }
+checkOS() { OS=ubuntu; }
+awgStateWorkDir() { mktemp -d "$ROOT/tmpfs.XXXXXX"; }
+awg() {
+    case "$1" in
+        --version) printf 'fixture-tools\n' ;;
+        pubkey) printf '%s\n' "$SERVER_PUB_KEY" ;;
+        *) return 1 ;;
+    esac
+}
+age() { [[ "$1" == --passphrase && "$2" == --output && $# -eq 3 ]] || return 1; cat >"$3"; }
+
+# 1. Export legacy AWG 1.0 server (no AWG_PROTOCOL_VERSION, no S3/S4).
+awgStateExport "$ROOT/first.tar.gz" "$ROOT/work1"
+
+# 2. Import onto a fresh target under set -euo pipefail.
+awgStateArchive unpack "$ROOT/first.tar.gz" "$ROOT/stage"
+awgStateReadParams "$ROOT/stage/vpn/params" "$ROOT/records"
+[[ "$AWG_PROTOCOL_VERSION" == 1 ]]
+awgStateArchive prepare "$ROOT/stage"
+SERVER_PUB_NIC=ens99
+ENABLE_IPV6=y
+AMNEZIAWG_DIR="$ROOT/target"
+AWG_SYSCTL_FILE="$ROOT/sysctl/awg.conf"
+_AWG_STATE_IMPORT_DIR="$ROOT/stage"
+writeFirewallRules() { printf 'PostUp = echo new-uplink-%s\n' "$SERVER_PUB_NIC"; }
+writeAwgServerInstallState
+awgParamsFileHasCanonicalKeys "$ROOT/target/params" kernel
+
+# 2b. Reconcile, MTU budget warning, and proxy-prepare must all succeed on AWG 1.0.
+awgStateArchive reconcile "$ROOT/target/awg0.conf" "$ROOT/stage" "$ROOT/reconciled.conf" >/dev/null
+cmp -s "$ROOT/target/awg0.conf" "$ROOT/reconciled.conf"
+freshOuterMtuBudget() { printf '1500\n'; }
+awgStateWarnMtuBudget "$ROOT/target/awg0.conf" 2>"$ROOT/mtu.err"
+[[ ! -s "$ROOT/mtu.err" ]]
+awgStateArchive proxy-prepare "$ROOT/stage" "$ROOT/proxy-out" "$ROOT/target/awg0.conf" "" \
+    "$AWG_STATE_PROXY_CONFIG" "/var/lib/amneziawg-proxy" "/usr/local/bin" >"$ROOT/proxy.fields"
+grep -q 'awg_config = "'"$ROOT/target/awg0.conf"'"' "$ROOT/proxy-out/proxy.toml"
+
+# 3. local-identity must succeed (needed for --activate-state companion retries).
+awgStateArchive local-identity "$ROOT/stage/vpn/params" "$ROOT/target/params" "$ROOT/target/awg0.conf"
+
+# 4. Bash awgStateEndpointSummary and a second export from the migrated AWG 1.0 host must succeed.
+awgStateExport "$ROOT/second.tar.gz" "$ROOT/work2"
+awgStateEndpointSummary >"$ROOT/summary.txt"
+
+# 5. amneziawg-web-privileged must classify the migrated params as protocol 1 (kernel).
+(
+    # shellcheck disable=SC1090
+    source <(sed -e '/^main "\$@"$/d' -e "s|^readonly AWG_PARAMS_PATH=.*|readonly AWG_PARAMS_PATH=\"$ROOT/target/params\"|" "$WEB_HELPER")
+    require_root() { :; }
+    validate_root_owned_file() { [[ "$1" == "$ROOT/target/params" && "$2" == false ]]; }
+    validate_root_owned_directory() { return 0; }
+    systemctl() { printf 'active\n'; }
+    [[ "$(main protocol-status)" == 1 ]]
+    main backend-status >"$ROOT/web-backend.txt"
+)
+
+# 6. amneziawg-proxy-install.sh must parse and accept the migrated params.
+(
+    eval "$(sed -n '/^awg_protocol_is_proxy_compatible() {/,/^}/p;/^awg_backend_is_proxy_compatible() {/,/^}/p;/^parse_params_file() {/,/^}/p' "$PROXY_SH")"
+    parse_params_file "$ROOT/target/params"
+    awg_backend_is_proxy_compatible "${PARAMS_VALUES[AWG_BACKEND]}"
+    awg_protocol_is_proxy_compatible "${PARAMS_VALUES[AWG_PROTOCOL_VERSION]}"
+)
+'''
+        result = subprocess.run(
+            ['bash', '-c', shell, 'awg1-roundtrip', str(SCRIPT), str(self.root),
+             str(ROOT / 'amneziawg-web/scripts/amneziawg-web-privileged'),
+             str(ROOT / 'amneziawg-proxy/scripts/amneziawg-proxy-install.sh')],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        target_params = (self.root / 'target/params').read_text()
+        self.assertIn("AWG_PROTOCOL_VERSION='1'\n", target_params)
+        self.assertIn("SERVER_AWG_S3=''\n", target_params)
+        self.assertIn("SERVER_AWG_S4=''\n", target_params)
+        self.assertIn("SERVER_PUB_NIC='ens99'\n", target_params)
+        target_conf = (self.root / 'target/awg0.conf').read_text()
+        self.assertNotIn('S3 =', target_conf)
+        self.assertNotIn('S4 =', target_conf)
+        self.assertIn('ListenPort = 64829', target_conf)
+        self.assertIn('new-uplink-ens99', target_conf)
+        first_info = json.loads(self.run_helper('inspect', self.root / 'first.tar.gz').stdout.decode())
+        second_info = json.loads(self.run_helper('inspect', self.root / 'second.tar.gz').stdout.decode())
+        self.assertEqual(first_info['protocol'], '1')
+        self.assertEqual(second_info['protocol'], '1')
+        self.assertEqual((self.root / 'summary.txt').read_text().splitlines(), ['1', '0'])
+        web_backend = (self.root / 'web-backend.txt').read_text()
+        self.assertIn('backend=kernel\n', web_backend)
+        self.assertIn('awg_protocol=1\n', web_backend)
+
+    def test_awg1_cli_lifecycle_unmigrated_and_migrated(self):
+        files = self.legacy_fixture(include_dns2=False, proxy=False)
+        for variant in ('unmigrated', 'migrated'):
+            with self.subTest(variant=variant):
+                target = self.root / f'host-{variant}'
+                (target / 'clients').mkdir(parents=True)
+                params_bytes = files['vpn/params']
+                if variant == 'migrated':
+                    params_bytes += b"AWG_PROTOCOL_VERSION='1'\nSERVER_AWG_S3=''\nSERVER_AWG_S4=''\n"
+                (target / 'params').write_bytes(params_bytes)
+                (target / 'awg0.conf').write_bytes(files['vpn/server.conf'])
+                (target / 'clients/awg0-client-phone.conf').write_bytes(files['clients/awg0-client-phone.conf'])
+                shell = r'''
+set -euo pipefail
+source "$1"
+AMNEZIAWG_DIR="$2"
+SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"
+acquireClientLifecycleLock() { return 0; }
+releaseClientLifecycleLock() { return 0; }
+getHomeDirForClient() { printf '%s\n' "$AMNEZIAWG_DIR/clients"; }
+ensureAwgBackendReady() { return 0; }
+awgSyncInterfaceConfig() { return 0; }
+copyToWebPanelDir() { return 0; }
+removeFromWebPanelDir() { return 0; }
+systemctl() {
+    if [[ "${1:-}" == show ]]; then printf 'active\n'; return 0; fi
+    return 1
+}
+awg() {
+    case "$1" in
+        genkey) printf '%s\n' "$3" ;;
+        pubkey) printf '%s\n' "$4" ;;
+        genpsk) printf '%s\n' "$4" ;;
+        *) return 1 ;;
+    esac
+}
+stat() {
+    case "$2" in
+        %u) printf '0\n' ;;
+        %a) printf '600\n' ;;
+        *) command stat "$@" ;;
+    esac
+}
+
+# 1. Exported env vars must never leak into validateParamsFile.
+(
+    export SERVER_AWG_S3=15 SERVER_AWG_S4=20 CLIENT_DNS_2=8.8.8.8 SERVER_AWG_H1=999
+    validateParamsFile 0
+    [[ "$AWG_PROTOCOL_VERSION" == 1 ]]
+    [[ -z "$SERVER_AWG_S3" && -z "$SERVER_AWG_S4" && -z "$CLIENT_DNS_2" ]]
+    [[ "$SERVER_AWG_H1" == 1805140871 ]]
+)
+# Missing SERVER_AWG_H1 in params must not be satisfied by an exported env var.
+(
+    BAD_DIR="$AMNEZIAWG_DIR/missing-h1"
+    mkdir -p "$BAD_DIR"
+    grep -v '^SERVER_AWG_H1=' "$AMNEZIAWG_DIR/params" >"$BAD_DIR/params"
+    printf "AWG_PROTOCOL_VERSION='1'\n" >>"$BAD_DIR/params"
+    cp "$SERVER_AWG_CONF" "$BAD_DIR/awg0.conf"
+    AMNEZIAWG_DIR="$BAD_DIR"
+    export SERVER_AWG_H1=12345
+    if validateParamsFile 0 >/dev/null 2>&1; then exit 18; fi
+)
+# Unmigrated legacy params with AWG_BACKEND=boringtun must fail closed.
+(
+    BT_DIR="$AMNEZIAWG_DIR/bt-legacy"
+    mkdir -p "$BT_DIR"
+    cp "$AMNEZIAWG_DIR/params" "$BT_DIR/params"
+    printf "AWG_BACKEND='boringtun'\n" >>"$BT_DIR/params"
+    cp "$SERVER_AWG_CONF" "$BT_DIR/awg0.conf"
+    AMNEZIAWG_DIR="$BT_DIR"
+    if validateParamsFile 0 >/dev/null 2>&1; then exit 19; fi
+)
+
+# 2. Validation, --backend-status, and changeAwgProtocolInteractively.
+validateParamsFile 0
+[[ "$AWG_PROTOCOL_VERSION" == 1 ]]
+[[ "$(awgProtocolDisplayName "$AWG_PROTOCOL_VERSION")" == 1.0 ]]
+printBackendStatus >"$AMNEZIAWG_DIR/backend-status.txt"
+grep -qx 'backend=kernel' "$AMNEZIAWG_DIR/backend-status.txt"
+grep -qx 'awg_protocol=1.0' "$AMNEZIAWG_DIR/backend-status.txt"
+if changeAwgProtocolInteractively >"$AMNEZIAWG_DIR/menu.out" 2>&1 </dev/null; then exit 24; fi
+grep -q 'AmneziaWG 1.0 must be migrated to AWG 2.0' "$AMNEZIAWG_DIR/menu.out"
+
+if (AWG_BACKEND=boringtun validatePersistedAwgProtocolState) 2>/dev/null; then exit 20; fi
+if (SERVER_AWG_S3=15 validatePersistedAwgProtocolState) 2>/dev/null; then exit 21; fi
+if (SERVER_AWG_H1=5-10 validatePersistedAwgProtocolState) 2>/dev/null; then exit 22; fi
+if (AWG_HEADER_PROTECTION_KEY="$SERVER_PUB_KEY" validatePersistedAwgProtocolState) 2>/dev/null; then exit 23; fi
+
+# 3. Protocol mode changes (--enable-awg3, --enable-awg31, --disable-awg3) must refuse without mutating.
+BEFORE="$(sha256sum "$AMNEZIAWG_DIR/params" "$SERVER_AWG_CONF")"
+for target_mode in 2 3 3.1; do
+    if setAwgProtocolMode "$target_mode" >"$AMNEZIAWG_DIR/out.$target_mode" 2>"$AMNEZIAWG_DIR/err.$target_mode"; then
+        exit 30
+    fi
+    grep -q 'AmneziaWG 1.0.*AWG 2.0' "$AMNEZIAWG_DIR/err.$target_mode"
+done
+[[ "$(sha256sum "$AMNEZIAWG_DIR/params" "$SERVER_AWG_CONF")" == "$BEFORE" ]]
+
+# 4. Non-interactive --list-clients, --add-client, --remove-client preserve AWG 1.0 (even with AUTO_INSTALL=y / EOF).
+PARAMS_BEFORE="$(sha256sum "$AMNEZIAWG_DIR/params")"
+LISTED="$(AUTO_INSTALL=y nonInteractiveListClients </dev/null)"
+[[ "$LISTED" == phone ]]
+ADDED_PATH="$(AUTO_INSTALL=y nonInteractiveAddClient laptop </dev/null)"
+[[ "$ADDED_PATH" == "$AMNEZIAWG_DIR/clients/awg0-client-laptop.conf" ]]
+[[ -f "$ADDED_PATH" ]]
+! grep -q '^S3 =' "$ADDED_PATH"
+! grep -q '^S4 =' "$ADDED_PATH"
+grep -q '^S2 = 150$' "$ADDED_PATH"
+grep -q '^H1 = 1805140871$' "$ADDED_PATH"
+[[ "$(nonInteractiveListClients </dev/null | tr '\n' ' ')" == "phone laptop " ]]
+REMOVED="$(AUTO_INSTALL=y nonInteractiveRemoveClient laptop </dev/null)"
+[[ "$REMOVED" == OK ]]
+[[ ! -e "$ADDED_PATH" ]]
+[[ "$(nonInteractiveListClients </dev/null)" == phone ]]
+[[ "$(sha256sum "$AMNEZIAWG_DIR/params")" == "$PARAMS_BEFORE" ]]
+! grep -q '^S3 =' "$SERVER_AWG_CONF"
+! grep -q '^S4 =' "$SERVER_AWG_CONF"
+
+# 4b. AWG 2.0 with missing S3/S4 must fail closed in nonInteractiveAddClient (never emit empty S3 =).
+(
+    BAD2="$AMNEZIAWG_DIR/bad-v2"
+    mkdir -p "$BAD2"
+    grep -v '^AWG_PROTOCOL_VERSION=' "$AMNEZIAWG_DIR/params" >"$BAD2/params"
+    printf "AWG_PROTOCOL_VERSION='2'\n" >>"$BAD2/params"
+    cp "$SERVER_AWG_CONF" "$BAD2/awg0.conf"
+    AMNEZIAWG_DIR="$BAD2"
+    if nonInteractiveAddClient broken >"$BAD2/out" 2>"$BAD2/err" </dev/null; then exit 35; fi
+    grep -q 'SERVER_AWG_S3 and SERVER_AWG_S4 must be set' "$BAD2/err"
+    [[ ! -e "$BAD2/clients/awg0-client-broken.conf" ]]
+)
+
+# 5. Interactive AWG 1.0 -> 2.0 migration must promote AWG_PROTOCOL_VERSION to 2.
+# (loadParams/migrateS3S4 are part of the non-errexit installer path.)
+AUTO_INSTALL=y
+set +e +o pipefail
+loadParams 0 0 >"$AMNEZIAWG_DIR/migrate.out" 2>"$AMNEZIAWG_DIR/migrate.err"
+RC=$?
+set -euo pipefail
+[[ "$RC" -eq 0 ]] || { cat "$AMNEZIAWG_DIR/migrate.out" "$AMNEZIAWG_DIR/migrate.err" >&2; exit 40; }
+[[ "$AWG_PROTOCOL_VERSION" == 2 ]]
+grep -q "^AWG_PROTOCOL_VERSION='2'$" "$AMNEZIAWG_DIR/params"
+grep -q "^S3 = " "$SERVER_AWG_CONF"
+grep -q "^S4 = " "$SERVER_AWG_CONF"
+'''
+                result = subprocess.run(
+                    ['bash', '-c', shell, 'awg1-guard', str(SCRIPT), str(target), PEER, PUB],
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
