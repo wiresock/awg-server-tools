@@ -223,14 +223,17 @@ The encrypted payload is a gzip tar containing only regular files:
   or replacing the root-owned copy. Custom client shell hooks fail export. Copies are restored
   into the managed clients directory, not arbitrary archived home paths.
 - `web/database.sqlite`: if the panel is installed, a consistent online
-  `sqlite3 .backup` of the effective database location: `--database-url` takes
+  read-only SQLite snapshot of the effective database location: `--database-url` takes
   precedence over `AWG_WEB_DB`; absent settings use `awg-web.db`. Relative paths
-  use the service working directory. The staged copy is converted to
-  `journal_mode=DELETE` right after `.backup` (a WAL-mode panel DB would
-  otherwise yield a WAL copy), export refuses if any `-wal`/`-shm`/`-journal`
-  sidecar exists in staging, and every reader of a staged or unpacked DB opens
-  it with `mode=ro&immutable=1`, so no sidecar is ever created or packed (also
-  for older archives whose DB still has a WAL header).
+  use the service working directory. The staged copy is written directly in
+  `journal_mode=DELETE` with the exact schema (tables, indexes, triggers, views,
+  `_sqlx_migrations`, and `sqlite_sequence`) and all rows from every operational
+  table (`peers`, `events`, `users`, `interfaces`, SMTP/delivery tables, etc.),
+  while omitting historical polling telemetry rows in `snapshots` so multi-gigabyte
+  traffic histories do not overflow RAM staging or `MAX_FILE`. Export refuses if
+  any `-wal`/`-shm`/`-journal` sidecar exists in staging, and every reader of a
+  staged or unpacked DB opens it with `mode=ro&immutable=1`, so no sidecar is
+  ever created or packed (also for older archives whose DB still has a WAL header).
   Unsupported SQLite URL/query formats fail export rather than silently omit
   the DB. Per-peer `expires_at` values remain in this snapshot; no remaining
   lifetime is reset on the destination. `web/env.conf` is copied from the existing env-file resolver.
@@ -703,7 +706,7 @@ removes a finalized tombstone; there is no automatic reset on uninstall.
 Export streams gzip tar bytes **directly into age through a pipe**; no plaintext
 `state.tar.gz` is written. Both pipeline statuses are checked (`pipefail`), and a
 failed producer or encryption removes partial ciphertext rather than publishing
-it. Individual-file snapshots (including SQLite `.backup`) still need staging.
+it. Individual-file snapshots (including the staged SQLite snapshot) still need staging.
 All CLI modes prefer a private 0700 directory on `/dev/shm`, then `/run`, only
 when that location is tmpfs/ramfs; if neither is usable the command refuses
 (there is no disk-backed `/tmp` fallback). Insufficient RAM/staging space aborts

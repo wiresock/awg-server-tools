@@ -4029,6 +4029,106 @@ def listen_warning(listen, own_addresses=()):
             'Edit the panel env after restore or use 127.0.0.1/0.0.0.0 on the old host before export.' % host)
 
 
+def quote_sql_ident(name):
+    return '"' + name.replace('"', '""') + '"'
+
+
+def panel_snapshot(src_path, dst_path):
+    # Capture a consistent point-in-time snapshot of the live panel DB
+    # (including WAL-mode DBs) while omitting historical polling rows in
+    # `snapshots`, which can grow to gigabytes and exceed RAM staging and
+    # MAX_FILE. All schema objects (including the empty `snapshots` table and
+    # its indexes) and all rows from every other table are preserved verbatim.
+    src_file = Path(src_path)
+    dst_file = Path(dst_path)
+    require(src_file.is_file() and not src_file.is_symlink(), 'panel database path is unsupported/missing')
+    require(not os.path.lexists(dst_file), 'panel snapshot destination already exists')
+    fd = os.open(str(dst_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+    try:
+        with closing(sqlite3.connect(src_file.as_uri() + '?mode=ro', uri=True, timeout=10.0, isolation_level=None)) as src, \
+                closing(sqlite3.connect(str(dst_file), isolation_level=None)) as dst:
+            src.execute('PRAGMA busy_timeout = 10000')
+            src.execute('PRAGMA query_only = ON')
+            src.execute('BEGIN')
+            try:
+                tables = src.execute(
+                    "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL ORDER BY rowid"
+                ).fetchall()
+                extras = src.execute(
+                    "SELECT type, name, sql FROM sqlite_master WHERE type IN ('index', 'trigger', 'view') "
+                    "AND sql IS NOT NULL ORDER BY CASE type WHEN 'index' THEN 0 WHEN 'view' THEN 1 ELSE 2 END, rowid"
+                ).fetchall()
+                has_seq = src.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'"
+                ).fetchone() is not None
+                seq_rows = src.execute('SELECT name, seq FROM sqlite_sequence').fetchall() if has_seq else []
+                user_version = int(src.execute('PRAGMA user_version').fetchone()[0])
+                application_id = int(src.execute('PRAGMA application_id').fetchone()[0])
+
+                dst.execute('PRAGMA journal_mode = DELETE')
+                dst.execute('PRAGMA foreign_keys = OFF')
+                dst.execute('BEGIN IMMEDIATE')
+                try:
+                    for name, sql in tables:
+                        if name.startswith('sqlite_'):
+                            continue
+                        dst.execute(sql)
+                    for name, _ in tables:
+                        if name.startswith('sqlite_') or name.lower() == 'snapshots':
+                            continue
+                        ident = quote_sql_ident(name)
+                        cols = [row[1] for row in src.execute('PRAGMA table_info(%s)' % ident).fetchall()]
+                        if not cols:
+                            continue
+                        col_sql = ', '.join(quote_sql_ident(col) for col in cols)
+                        placeholders = ', '.join('?' for _ in cols)
+                        insert_sql = 'INSERT INTO %s (%s) VALUES (%s)' % (ident, col_sql, placeholders)
+                        cursor = src.execute('SELECT %s FROM %s' % (col_sql, ident))
+                        while True:
+                            batch = cursor.fetchmany(1000)
+                            if not batch:
+                                break
+                            dst.executemany(insert_sql, batch)
+                    if has_seq and dst.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'"
+                    ).fetchone() is not None:
+                        dst.execute('DELETE FROM sqlite_sequence')
+                        if seq_rows:
+                            dst.executemany('INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)', seq_rows)
+                    for _, _, sql in extras:
+                        dst.execute(sql)
+                    if user_version:
+                        dst.execute('PRAGMA user_version = %d' % user_version)
+                    if application_id:
+                        dst.execute('PRAGMA application_id = %d' % application_id)
+                    dst.execute('COMMIT')
+                except Exception:
+                    try:
+                        dst.execute('ROLLBACK')
+                    except sqlite3.Error:
+                        pass
+                    raise
+            finally:
+                try:
+                    src.execute('ROLLBACK')
+                except sqlite3.Error:
+                    pass
+            mode = dst.execute('PRAGMA journal_mode').fetchone()
+            require(mode is not None and str(mode[0]).lower() == 'delete', 'panel snapshot journal mode is not DELETE')
+            require(dst.execute('PRAGMA integrity_check').fetchone() == ('ok',), 'panel snapshot integrity check failed')
+        dst_file.chmod(0o600)
+        for suffix in ('-wal', '-shm', '-journal'):
+            require(not os.path.lexists(str(dst_file) + suffix), 'unexpected SQLite sidecar after panel snapshot')
+    except Exception:
+        for suffix in ('', '-wal', '-shm', '-journal'):
+            try:
+                os.unlink(str(dst_file) + suffix)
+            except OSError:
+                pass
+        raise
+
+
 def panel_prepare(root, out, clients_dir, default_db, migrations_dir, approved=''):
     # Builds the live-ready panel DB/env in private staging. Bash installs them.
     plan = panel_plan(root, migrations_dir)
@@ -4475,6 +4575,8 @@ def main():
         state = params(Path(path).read_bytes())
         for name, value in state.items():
             sys.stdout.buffer.write(name.encode() + b'\0' + value.encode() + b'\0')
+    elif mode == 'panel-snapshot':
+        panel_snapshot(path, args[0])
     elif mode == 'export-check':
         # Fail before the passphrase prompt: the staged panel snapshot must have
         # the schema import will require, and the server and client configs
@@ -4725,17 +4827,11 @@ function awgStateSnapshotPanel() {
 		echo 'ERROR: panel database path is unsupported/missing; export refused.' >&2
 		return 1
 	fi
-	command -v sqlite3 >/dev/null 2>&1 || {
-		echo 'ERROR: sqlite3 is required for the panel online backup.' >&2
-		return 1
-	}
 	mkdir -p "${STAGE}/web" || return 1
-	# Use .backup, never copy a live WAL-mode DB. Destination is a private mktemp path.
-	sqlite3 -readonly "${DB}" ".timeout 10000" ".backup '${STAGE}/web/database.sqlite'" || return 1
-	# .backup keeps the source's WAL mode; a later non-immutable open would
-	# create -wal/-shm sidecars that pack rejects. Make the copy a plain
-	# rollback-journal DB and prove no sidecar exists (readers use immutable=1).
-	sqlite3 "${STAGE}/web/database.sqlite" 'PRAGMA journal_mode=DELETE;' >/dev/null || return 1
+	# Capture a consistent read-only SQLite snapshot into a plain DELETE-mode
+	# DB, omitting historical polling rows in `snapshots` so multi-gigabyte
+	# telemetry tables do not overflow RAM staging or MAX_FILE.
+	awgStateArchive panel-snapshot "${DB}" "${STAGE}/web/database.sqlite" || return 1
 	local SIDECAR
 	for SIDECAR in -wal -shm -journal; do
 		if [[ -e "${STAGE}/web/database.sqlite${SIDECAR}" || -L "${STAGE}/web/database.sqlite${SIDECAR}" ]]; then
@@ -4747,7 +4843,7 @@ function awgStateSnapshotPanel() {
 	if [[ -n "${ENV_FILE}" && -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]]; then
 		install -m 600 -- "${ENV_FILE}" "${STAGE}/web/env.conf" || return 1
 	fi
-	echo 'NOTE: panel DB/env and the proxy config stay inside the encrypted archive. --activate-state --enable-at-boot restores them when this checkout has the installers; queued mail is not replayed.' >&2
+	echo 'NOTE: panel DB/env and the proxy config stay inside the encrypted archive. --activate-state --enable-at-boot restores them when this checkout has the installers; queued mail is not replayed and historical traffic snapshots are omitted.' >&2
 }
 
 # Copy installer-managed client profiles. The first copy of a name wins.

@@ -396,14 +396,12 @@ ROOT="$2"
 WEB_PANEL_SYSTEMD_UNIT="$ROOT/panel.service"
 WEB_PANEL_ENV_FILE="$ROOT/env.conf"
 readWebPanelEffectiveProperty() { return 1; }
-sqlite3() {
-    [[ "$1" == -readonly ]] || return 0 # journal_mode conversion of the copy.
-    printf '%s' "$2" >"$ROOT/chosen"
-    python3 - "$2" "$ROOT/stage/web/database.sqlite" <<'SQLITE'
-import sqlite3, sys
-with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as dest:
-    source.backup(dest)
-SQLITE
+eval "$(declare -f awgStateArchive | sed '1s/awgStateArchive/_real_awgStateArchive/')"
+awgStateArchive() {
+    if [[ "$1" == panel-snapshot ]]; then
+        printf '%s' "$2" >"$ROOT/chosen"
+    fi
+    _real_awgStateArchive "$@"
 }
 awgStateSnapshotPanel "$ROOT/stage"
 '''
@@ -1942,16 +1940,25 @@ SERVER_AWG_S4=18 CLIENT_MTU="" awgStateWarnMtuBudget "$2"
         self.assertIn(b'future relative to this host', self.run_helper('inspect', ok=False).stderr)
 
     def test_wal_mode_panel_db_snapshot_exports_and_imports_without_sidecars(self):
-        if not shutil.which('sqlite3'):
-            self.skipTest('sqlite3 CLI not installed')
         live = self.root / 'live'
         live.mkdir()
         db_path = live / 'awg-web.db'
         writer = sqlite3.connect(db_path)
         self.addCleanup(writer.close)
         writer.execute('PRAGMA journal_mode=WAL')
-        writer.execute('CREATE TABLE peers(public_key TEXT, disabled INTEGER, archived INTEGER, removal_pending INTEGER, expires_at TEXT, display_name TEXT)')
-        writer.execute('INSERT INTO peers VALUES(?,?,?,?,?,?)', (PEER, 1, 0, 0, None, 'phone'))
+        writer.execute('PRAGMA user_version=7')
+        writer.execute('CREATE TABLE _sqlx_migrations(version BIGINT PRIMARY KEY, description TEXT NOT NULL)')
+        writer.execute('INSERT INTO _sqlx_migrations VALUES(10, "events_on_delete")')
+        writer.execute('CREATE TABLE peers(id INTEGER PRIMARY KEY AUTOINCREMENT, public_key TEXT NOT NULL UNIQUE, disabled INTEGER, archived INTEGER, removal_pending INTEGER, expires_at TEXT, display_name TEXT)')
+        writer.execute('CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT, peer_id INTEGER REFERENCES peers(id), action TEXT NOT NULL)')
+        writer.execute('CREATE TABLE snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT, public_key TEXT NOT NULL, captured_at TEXT NOT NULL, rx_bytes INTEGER NOT NULL, tx_bytes INTEGER NOT NULL)')
+        writer.execute('CREATE INDEX idx_snapshots_pk_captured_id ON snapshots(public_key, captured_at, id)')
+        writer.execute('INSERT INTO peers(id, public_key, disabled, archived, removal_pending, expires_at, display_name) VALUES(5,?,?,?,?,?,?)', (PEER, 1, 0, 0, None, 'phone'))
+        writer.execute('INSERT INTO events(peer_id, action) VALUES(5, "peer.disabled")')
+        writer.executemany(
+            'INSERT INTO snapshots(public_key, captured_at, rx_bytes, tx_bytes) VALUES(?,?,?,?)',
+            [(PEER, f'2026-11-19T20:00:{i:02d}Z', i * 100, i * 200) for i in range(50)],
+        )
         writer.commit()  # Writer kept open: live WAL/SHM exist, like a running panel.
         self.assertTrue((live / 'awg-web.db-wal').exists())
         source = self.root / 'source'
@@ -1985,6 +1992,20 @@ awgStateExport "$ROOT/export.tar.gz" "$ROOT/work"
         self.assertIn('web/database.sqlite', names)
         self.assertFalse([n for n in names if n.endswith(('-wal', '-shm', '-journal'))], names)
         self.assertEqual(data[18:20], b'\x01\x01')  # Rollback-journal (DELETE) mode header.
+        exported_db = self.root / 'exported-check.sqlite'
+        exported_db.write_bytes(data)
+        with closing(sqlite3.connect(exported_db.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+            self.assertEqual(db.execute('PRAGMA integrity_check').fetchone(), ('ok',))
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone(), (7,))
+            self.assertEqual(db.execute('SELECT id, public_key, disabled, display_name FROM peers').fetchall(), [(5, PEER, 1, 'phone')])
+            self.assertEqual(db.execute('SELECT peer_id, action FROM events').fetchall(), [(5, 'peer.disabled')])
+            self.assertEqual(db.execute('SELECT version FROM _sqlx_migrations').fetchall(), [(10,)])
+            # Historical telemetry rows in snapshots are omitted, while table schema, index, and sequence remain intact.
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM snapshots').fetchone(), (0,))
+            self.assertEqual(db.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_snapshots_pk_captured_id'").fetchone(), ('idx_snapshots_pk_captured_id',))
+            seqs = dict(db.execute('SELECT name, seq FROM sqlite_sequence').fetchall())
+            self.assertEqual(seqs.get('peers'), 5)
+            self.assertEqual(seqs.get('snapshots'), 50)
         # Import side: an archive whose DB still carries a WAL header (older
         # exports) is read immutably and never grows sidecars next to it.
         wal_db = self.root / 'wal-origin.sqlite'
