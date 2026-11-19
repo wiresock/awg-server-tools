@@ -206,7 +206,14 @@ The encrypted payload is a gzip tar containing only regular files:
 - `vpn/params` and `vpn/server.conf`: exact source bytes, including server keys,
   PSKs, obfuscation and protocol fields. Imported params are parsed as literals
   against an allowlist, **never sourced**. Only validated values are serialized
-  into new local params.
+  into new local params. Pre-2.0 AWG 1.0 kernel installations (no
+  `AWG_PROTOCOL_VERSION`, no `S3`/`S4`, and scalar uint32 `H1`–`H4`) are
+  detected and preserved as `AWG_PROTOCOL_VERSION='1'` with empty
+  `SERVER_AWG_S3`/`SERVER_AWG_S4` and no `S3`/`S4` in `server.conf`, matching
+  `amneziawg-web` and `amneziawg-proxy` without forcing an AWG 2.0 upgrade.
+  Non-interactive `--add-client`, `--remove-client`, and `--list-clients`
+  preserve AWG 1.0 without prompting; enabling AWG 3.x requires migrating to
+  AWG 2.0 interactively first.
 - `clients/*.conf`: discovered installer-managed profiles, byte for byte.
   Discovery reuses `collectAwgClientConfigCandidates`: managed clients directory,
   panel config directory, `/root`, `/home/*`, and managed users' resolved homes.

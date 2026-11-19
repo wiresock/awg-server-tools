@@ -28,10 +28,13 @@ WEB_PANEL_DATA_DIR="/var/lib/amneziawg-web"
 WEB_PANEL_LIFECYCLE_SCRIPT="/usr/local/bin/amneziawg-install.sh"
 
 # Protocol state is deliberately independent from package/tool versions. A
-# missing value in an older params file always means AWG 2.0; AWG 3.0 and
-# AWG 3.1 are only entered through the explicit, capability-gated migration
-# path. Existing AWG 3.0 installations stay on 3.0 until the operator opts in
-# to 3.1; newly installed awg tools never imply a protocol upgrade.
+# missing value in an older params file means AWG 2.0 by default (state
+# migration and the web panel detect pre-2.0 AWG 1.0 params when S3/S4 are
+# absent and H1-H4 are scalar); AWG 3.0 and AWG 3.1 are only entered through
+# the explicit, capability-gated migration path. Existing AWG 3.0 installations
+# stay on 3.0 until the operator opts in to 3.1; newly installed awg tools
+# never imply a protocol upgrade.
+AWG_PROTOCOL_VERSION_1="1"
 AWG_PROTOCOL_VERSION_2="2"
 AWG_PROTOCOL_VERSION_3="3"
 AWG_PROTOCOL_VERSION_31="3.1"
@@ -1849,6 +1852,7 @@ function clearAwg31Params() {
 
 function awgProtocolDisplayName() {
 	case "${1:-}" in
+		"${AWG_PROTOCOL_VERSION_1}"|1.0) printf '1.0\n' ;;
 		"${AWG_PROTOCOL_VERSION_2}"|2.0) printf '2.0\n' ;;
 		"${AWG_PROTOCOL_VERSION_3}"|3.0) printf '3.0\n' ;;
 		"${AWG_PROTOCOL_VERSION_31}") printf '3.1\n' ;;
@@ -1894,6 +1898,9 @@ function normalizeAwgOnOff() {
 # never silently reinterpreted as 3.1.
 function normalizeAwgProtocolVersion() {
 	case "${AWG_PROTOCOL_VERSION:-}" in
+		1|1.0)
+			AWG_PROTOCOL_VERSION="${AWG_PROTOCOL_VERSION_1}"
+			;;
 		""|2|2.0)
 			AWG_PROTOCOL_VERSION="${AWG_PROTOCOL_VERSION_2}"
 			;;
@@ -1904,7 +1911,7 @@ function normalizeAwgProtocolVersion() {
 			AWG_PROTOCOL_VERSION="${AWG_PROTOCOL_VERSION_31}"
 			;;
 		*)
-			echo "ERROR: unsupported AWG_PROTOCOL_VERSION in params; expected 2, 3, or 3.1" >&2
+			echo "ERROR: unsupported AWG_PROTOCOL_VERSION in params; expected 1, 2, 3, or 3.1" >&2
 			return 1
 			;;
 	esac
@@ -1989,13 +1996,65 @@ function warnIfRandomTrailersSPaddingUnequal() {
 	echo "         Upstream recommends the same S1, S2, S3, and S4 values to reduce packet-type misdetection." >&2
 }
 
+# Pre-2.0 AWG 1.0 params omit AWG_PROTOCOL_VERSION and S3/S4 and use scalar
+# uint32 H1-H4 (matching awgStateArchive and amneziawg-web).
+function awgParamsHaveLegacyAwg1Framing() {
+	local KEY_NAME VALUE
+
+	[[ -z "${AWG_PROTOCOL_VERSION:-}" && -z "${SERVER_AWG_S3:-}" && -z "${SERVER_AWG_S4:-}" ]] || return 1
+	for KEY_NAME in SERVER_AWG_H1 SERVER_AWG_H2 SERVER_AWG_H3 SERVER_AWG_H4; do
+		VALUE="${!KEY_NAME:-}"
+		if ! [[ "${VALUE}" =~ ^[0-9]{1,10}$ ]] || (( 10#${VALUE} > 4294967295 )); then
+			return 1
+		fi
+	done
+}
+
+# Validate persisted AWG 1.0 state: kernel backend only, no S3/S4 padding,
+# scalar uint32 H1-H4 headers, and no AWG 3.x header-protection fields.
+function validateAwg1Params() {
+	local KEY_NAME VALUE
+
+	if [[ "${AWG_BACKEND:-${AWG_BACKEND_KERNEL}}" != "${AWG_BACKEND_KERNEL}" ]]; then
+		echo "ERROR: AmneziaWG 1.0 is supported only with the kernel backend" >&2
+		return 1
+	fi
+	if [[ -n "${SERVER_AWG_S3:-}" || -n "${SERVER_AWG_S4:-}" ]]; then
+		echo "ERROR: AmneziaWG 1.0 must not set S3 or S4" >&2
+		return 1
+	fi
+	for KEY_NAME in SERVER_AWG_H1 SERVER_AWG_H2 SERVER_AWG_H3 SERVER_AWG_H4; do
+		VALUE="${!KEY_NAME:-}"
+		if ! [[ "${VALUE}" =~ ^[0-9]{1,10}$ ]] || (( 10#${VALUE} > 4294967295 )); then
+			echo "ERROR: ${KEY_NAME} must be a scalar uint32 value in AmneziaWG 1.0" >&2
+			return 1
+		fi
+	done
+	for KEY_NAME in AWG_HEADER_PROTECTION_KEY AWG_CONTENT_PADDING_ADDITION \
+		AWG_REKEY_AFTER_TIME AWG_REKEY_TIMEOUT AWG_REJECT_AFTER_TIME \
+		AWG_KEEPALIVE_TIMEOUT AWG_RANDOM_TRAILERS AWG_DISABLE_COOKIES; do
+		if [[ -n "${!KEY_NAME:-}" ]]; then
+			echo "ERROR: ${KEY_NAME} is not allowed in AmneziaWG 1.0" >&2
+			return 1
+		fi
+	done
+}
+
 # Invalid AWG 3.x-only state normally fails closed. The sole exception is the
 # explicit AWG 2.0 downgrade command, which must remain able to remove damaged
 # 3.0/3.1 fields and restore an otherwise valid installation to AWG 2.0.
 function validatePersistedAwgProtocolState() {
 	local ALLOW_INVALID_AWG3_FOR_DOWNGRADE="${1:-0}"
 
-	normalizeAwgProtocolVersion || return 1
+	if awgParamsHaveLegacyAwg1Framing; then
+		AWG_PROTOCOL_VERSION="${AWG_PROTOCOL_VERSION_1}"
+	else
+		normalizeAwgProtocolVersion || return 1
+	fi
+	if [[ "${AWG_PROTOCOL_VERSION}" == "${AWG_PROTOCOL_VERSION_1}" ]] && ! validateAwg1Params; then
+		echo "ERROR: invalid AWG 1.0 protocol state in persisted params" >&2
+		return 1
+	fi
 	if awgProtocolUses31Fields && ! validateAwg31Params; then
 		if [[ "${ALLOW_INVALID_AWG3_FOR_DOWNGRADE}" == "1" ]]; then
 			echo "WARNING: invalid AWG 3.1 state will be removed by the requested AWG 2.0 downgrade" >&2
@@ -3298,6 +3357,18 @@ function renderClientMtu() {
 	fi
 }
 
+# Append S3/S4 to the S2 line for AWG 2.0+ client configs; AWG 1.0 omits them.
+function renderAwgS3S4Lines() {
+	if [[ "${AWG_PROTOCOL_VERSION:-}" == "${AWG_PROTOCOL_VERSION_1}" ]]; then
+		return 0
+	fi
+	if [[ -z "${SERVER_AWG_S3:-}" || -z "${SERVER_AWG_S4:-}" ]]; then
+		echo "ERROR: SERVER_AWG_S3 and SERVER_AWG_S4 must be set for AmneziaWG $(awgProtocolDisplayName "${AWG_PROTOCOL_VERSION:-${AWG_PROTOCOL_VERSION_2}}")." >&2
+		return 1
+	fi
+	printf '\nS3 = %s\nS4 = %s' "${SERVER_AWG_S3}" "${SERVER_AWG_S4}"
+}
+
 # Serialize all server parameters to a params file
 # Uses safe quoting for string values to prevent shell injection when sourced
 # Arguments:
@@ -3336,7 +3407,7 @@ SERVER_PORT=$(safeQuoteParam "${SERVER_PORT}")
 SERVER_PRIV_KEY=$(safeQuoteParam "${SERVER_PRIV_KEY}")
 SERVER_PUB_KEY=$(safeQuoteParam "${SERVER_PUB_KEY}")
 CLIENT_DNS_1=$(safeQuoteParam "${CLIENT_DNS_1}")
-CLIENT_DNS_2=$(safeQuoteParam "${CLIENT_DNS_2}")
+CLIENT_DNS_2=$(safeQuoteParam "${CLIENT_DNS_2:-}")
 CLIENT_MTU=$(safeQuoteParam "${CLIENT_MTU:-}")
 ALLOWED_IPS=$(safeQuoteParam "${ALLOWED_IPS}")
 ENABLE_IPV6=$(safeQuoteParam "${ENABLE_IPV6:-}")
@@ -3345,8 +3416,8 @@ SERVER_AWG_JMIN=$(safeQuoteParam "${SERVER_AWG_JMIN}")
 SERVER_AWG_JMAX=$(safeQuoteParam "${SERVER_AWG_JMAX}")
 SERVER_AWG_S1=$(safeQuoteParam "${SERVER_AWG_S1}")
 SERVER_AWG_S2=$(safeQuoteParam "${SERVER_AWG_S2}")
-SERVER_AWG_S3=$(safeQuoteParam "${SERVER_AWG_S3}")
-SERVER_AWG_S4=$(safeQuoteParam "${SERVER_AWG_S4}")
+SERVER_AWG_S3=$(safeQuoteParam "${SERVER_AWG_S3:-}")
+SERVER_AWG_S4=$(safeQuoteParam "${SERVER_AWG_S4:-}")
 SERVER_AWG_H1=$(safeQuoteParam "${SERVER_AWG_H1}")
 SERVER_AWG_H2=$(safeQuoteParam "${SERVER_AWG_H2}")
 SERVER_AWG_H3=$(safeQuoteParam "${SERVER_AWG_H3}")
@@ -3451,6 +3522,23 @@ def key(value):
         return False
 
 
+PROTOCOL_3_FIELDS = (
+    ('HeaderProtectionKey', 'AWG_HEADER_PROTECTION_KEY'),
+    ('ContentPaddingAddition', 'AWG_CONTENT_PADDING_ADDITION'),
+    ('RekeyAfterTime', 'AWG_REKEY_AFTER_TIME'),
+    ('RekeyTimeout', 'AWG_REKEY_TIMEOUT'),
+    ('RejectAfterTime', 'AWG_REJECT_AFTER_TIME'),
+    ('KeepaliveTimeout', 'AWG_KEEPALIVE_TIMEOUT'),
+    ('RandomTrailers', 'AWG_RANDOM_TRAILERS'),
+    ('DisableCookies', 'AWG_DISABLE_COOKIES'),
+)
+
+
+def is_scalar_u32(value):
+    return (isinstance(value, str) and re.fullmatch(r'[0-9]{1,10}', value) is not None
+            and int(value) <= 4294967295)
+
+
 def params(data, validate_public_key=True):
     result = {}
     for line in data.decode('utf-8').splitlines():
@@ -3466,13 +3554,34 @@ def params(data, validate_public_key=True):
         require(len(value) <= 4096, 'oversized params value')
         result[name] = value
     result.setdefault('AWG_BACKEND', 'kernel')
-    result.setdefault('AWG_PROTOCOL_VERSION', '2')
+    result.setdefault('CLIENT_DNS_2', '')
     result.setdefault('CLIENT_MTU', '')
     result.setdefault('ENABLE_IPV6', '')
     result.setdefault('AWG_BORINGTUN_IMITATE_PROTOCOL', 'none')
     result.setdefault('AWG_BORINGTUN_IMITATE_DOMAIN', '')
+    # Pre-2.0 AWG 1.0 params omit AWG_PROTOCOL_VERSION and S3/S4 and use scalar
+    # uint32 H1-H4 (same rule as amneziawg-web). Preserve them as protocol 1 so
+    # serializeParams never promotes them to AWG 2.0 with empty S3/S4.
+    raw_protocol = result.get('AWG_PROTOCOL_VERSION', '')
+    s3 = result.get('SERVER_AWG_S3', '')
+    s4 = result.get('SERVER_AWG_S4', '')
+    legacy_framing = (
+        not s3 and not s4 and
+        all(is_scalar_u32(result.get('SERVER_AWG_' + h, '')) for h in ('H1', 'H2', 'H3', 'H4'))
+    )
+    if raw_protocol in ('1', '1.0'):
+        result['AWG_PROTOCOL_VERSION'] = '1'
+    elif raw_protocol == '' and legacy_framing:
+        result['AWG_PROTOCOL_VERSION'] = '1'
+    elif raw_protocol in ('', '2', '2.0'):
+        result['AWG_PROTOCOL_VERSION'] = '2'
+    elif raw_protocol in ('3', '3.0'):
+        result['AWG_PROTOCOL_VERSION'] = '3'
+    elif raw_protocol == '3.1':
+        result['AWG_PROTOCOL_VERSION'] = '3.1'
+    else:
+        raise ValueError('unsupported protocol')
     require(result['AWG_BACKEND'] in ('kernel', 'boringtun'), 'unsupported backend')
-    require(result['AWG_PROTOCOL_VERSION'] in ('2', '3', '3.1'), 'unsupported protocol')
     for name in ('SERVER_AWG_NIC', 'SERVER_PUB_NIC'):
         require(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}', result.get(name, '')),
                 'invalid interface name')
@@ -3483,18 +3592,36 @@ def params(data, validate_public_key=True):
     require(re.fullmatch(r'[0-9]{1,5}', result['SERVER_PORT']) and
             1 <= int(result['SERVER_PORT']) <= 65535, 'invalid port')
     require(result['ENABLE_IPV6'] in ('', 'y', 'n'), 'invalid IPv6 flag')
-    for name, value in result.items():
-        if name.startswith('SERVER_AWG_') and name not in (
-                'SERVER_AWG_NIC', 'SERVER_AWG_IPV4', 'SERVER_AWG_IPV6'):
-            require(re.fullmatch(r'[0-9]{1,10}(?:-[0-9]{1,10})?', value),
+    for name in ('SERVER_AWG_JC', 'SERVER_AWG_JMIN', 'SERVER_AWG_JMAX',
+                 'SERVER_AWG_S1', 'SERVER_AWG_S2'):
+        require(name in result and re.fullmatch(r'[0-9]{1,10}', result[name]),
+                'invalid obfuscation value')
+    for name in ('SERVER_AWG_H1', 'SERVER_AWG_H2', 'SERVER_AWG_H3', 'SERVER_AWG_H4'):
+        require(name in result and re.fullmatch(r'[0-9]{1,10}(?:-[0-9]{1,10})?', result[name]),
+                'invalid obfuscation value')
+    if result['AWG_PROTOCOL_VERSION'] == '1':
+        require(result['AWG_BACKEND'] == 'kernel', 'AWG 1.0 requires kernel backend')
+        require(not s3 and not s4, 'AWG 1.0 must not set S3/S4')
+        require(all(is_scalar_u32(result['SERVER_AWG_' + h]) for h in ('H1', 'H2', 'H3', 'H4')),
+                'AWG 1.0 requires scalar H1-H4')
+        require(not any(result.get(name, '') for _, name in PROTOCOL_3_FIELDS),
+                'AWG 1.0 must not set AWG 3.x fields')
+        result.setdefault('SERVER_AWG_S3', '')
+        result.setdefault('SERVER_AWG_S4', '')
+    else:
+        for name in ('SERVER_AWG_S3', 'SERVER_AWG_S4'):
+            require(name in result and re.fullmatch(r'[0-9]{1,10}', result[name]),
                     'invalid obfuscation value')
-        if name in ('CLIENT_MTU',) and value:
-            require(re.fullmatch(r'[0-9]{1,5}', value) and 576 <= int(value) <= 65535, 'invalid MTU')
+    if result['CLIENT_MTU']:
+        require(re.fullmatch(r'[0-9]{1,5}', result['CLIENT_MTU']) and 576 <= int(result['CLIENT_MTU']) <= 65535, 'invalid MTU')
     require(result['AWG_BORINGTUN_IMITATE_PROTOCOL'] in
             ('none', 'dns', 'quic', 'sip', 'stun', 'auto'), 'invalid imitation')
     domain = result['AWG_BORINGTUN_IMITATE_DOMAIN']
     require(not domain or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,252}', domain),
             'invalid imitation domain')
+    if result['AWG_BACKEND'] == 'kernel':
+        require(result['AWG_BORINGTUN_IMITATE_PROTOCOL'] == 'none' and not domain,
+                'imitation requires boringtun backend')
     return result
 
 
@@ -3596,13 +3723,8 @@ def config(data, state=None, blocked=frozenset(), preserve_hooks=False, proxy=No
                 and v.network.prefixlen == 64 for v in ipv6), 'unsupported/mismatched IPv6 subnet')
         for suffix in ('JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'):
             field = {'JC': 'Jc', 'JMIN': 'Jmin', 'JMAX': 'Jmax'}.get(suffix, suffix)
-            require(fields.get(field) == state.get('SERVER_AWG_' + suffix), 'obfuscation mismatch')
-        protocol_fields = dict(HeaderProtectionKey='AWG_HEADER_PROTECTION_KEY',
-            ContentPaddingAddition='AWG_CONTENT_PADDING_ADDITION', RekeyAfterTime='AWG_REKEY_AFTER_TIME',
-            RekeyTimeout='AWG_REKEY_TIMEOUT', RejectAfterTime='AWG_REJECT_AFTER_TIME',
-            KeepaliveTimeout='AWG_KEEPALIVE_TIMEOUT', RandomTrailers='AWG_RANDOM_TRAILERS',
-            DisableCookies='AWG_DISABLE_COOKIES')
-        for field, name in protocol_fields.items():
+            require(fields.get(field, '') == state.get('SERVER_AWG_' + suffix, ''), 'obfuscation mismatch')
+        for field, name in PROTOCOL_3_FIELDS:
             expected = state.get(name, '')
             require(fields.get(field, '') == expected, 'protocol fields mismatch')
     return ''.join(output).encode()
@@ -12868,8 +12990,9 @@ function clientIPv4InUse() {
 }
 
 function newClient() {
-	local CLIENT_MTU_LINE
+	local CLIENT_MTU_LINE AWG_S3_S4_LINES=""
 	CLIENT_MTU_LINE="$(renderClientMtu)" || return 1
+	AWG_S3_S4_LINES="$(renderAwgS3S4Lines)" || return 1
 	ensureAwgBackendReady
 	# Reset variables to ensure clean state for each new client
 	local CLIENT_NAME=""
@@ -13099,9 +13222,7 @@ Jc = ${SERVER_AWG_JC}
 Jmin = ${SERVER_AWG_JMIN}
 Jmax = ${SERVER_AWG_JMAX}
 S1 = ${SERVER_AWG_S1}
-S2 = ${SERVER_AWG_S2}
-S3 = ${SERVER_AWG_S3}
-S4 = ${SERVER_AWG_S4}
+S2 = ${SERVER_AWG_S2}${AWG_S3_S4_LINES}
 H1 = ${SERVER_AWG_H1}
 H2 = ${SERVER_AWG_H2}
 H3 = ${SERVER_AWG_H3}
@@ -13270,8 +13391,9 @@ function revokeClient() {
 }
 
 function regenerateClients() {
-	local CLIENT_MTU_LINE
+	local CLIENT_MTU_LINE AWG_S3_S4_LINES=""
 	CLIENT_MTU_LINE="$(renderClientMtu)" || return 1
+	AWG_S3_S4_LINES="$(renderAwgS3S4Lines)" || return 1
 	NUMBER_OF_CLIENTS=$(grep -c -E "^### Client" "${SERVER_AWG_CONF}")
 	if [[ ${NUMBER_OF_CLIENTS} == '0' ]]; then
 		echo ""
@@ -13583,9 +13705,7 @@ Jc = ${SERVER_AWG_JC}
 Jmin = ${SERVER_AWG_JMIN}
 Jmax = ${SERVER_AWG_JMAX}
 S1 = ${SERVER_AWG_S1}
-S2 = ${SERVER_AWG_S2}
-S3 = ${SERVER_AWG_S3}
-S4 = ${SERVER_AWG_S4}
+S2 = ${SERVER_AWG_S2}${AWG_S3_S4_LINES}
 H1 = ${SERVER_AWG_H1}
 H2 = ${SERVER_AWG_H2}
 H3 = ${SERVER_AWG_H3}
@@ -14114,20 +14234,20 @@ function validateParamsFile() {
 	# Params must be authoritative; do not let exported shell variables fill in
 	# keys that older params files legitimately lack, select an AWG backend or a
 	# BoringTun protocol imitation, or enable AWG 3.0 features.
-	unset CLIENT_MTU ENABLE_IPV6 AWG_PROTOCOL_VERSION AWG_HEADER_PROTECTION_KEY \
-		AWG_CONTENT_PADDING_ADDITION AWG_REKEY_AFTER_TIME AWG_REKEY_TIMEOUT \
-		AWG_REJECT_AFTER_TIME AWG_KEEPALIVE_TIMEOUT AWG_RANDOM_TRAILERS \
-		AWG_DISABLE_COOKIES AWG_BACKEND AWG_BORINGTUN_IMITATE_PROTOCOL \
-		AWG_BORINGTUN_IMITATE_DOMAIN
+	# shellcheck disable=SC2086 # the key lists are fixed words
+	unset ${AWG_PARAMS_KEYS} ${AWG_PARAMS_BORINGTUN_KEYS}
 	# shellcheck source=/etc/amnezia/amneziawg/params
 	if ! source "${AMNEZIAWG_DIR}/params"; then
 		echo -e "${RED}ERROR: Failed to load params from ${AMNEZIAWG_DIR}/params.${NC}" >&2
 		echo -e "${ORANGE}The file may be corrupted or contain a syntax error. Fix or regenerate it and rerun the installer.${NC}" >&2
 		return 1
 	fi
-	# Normalize a legacy omission to the same empty value serialization writes,
+	# Normalize legacy omissions to the same empty values serialization writes,
 	# so transactional params comparisons remain stable across an upgrade.
+	CLIENT_DNS_2="${CLIENT_DNS_2:-}"
 	CLIENT_MTU="${CLIENT_MTU:-}"
+	SERVER_AWG_S3="${SERVER_AWG_S3:-}"
+	SERVER_AWG_S4="${SERVER_AWG_S4:-}"
 	validateClientMtu || return 1
 	if ! validatePersistedAwgBackendState; then
 		echo -e "${RED}ERROR: Invalid AWG backend state in ${AMNEZIAWG_DIR}/params.${NC}" >&2
@@ -14466,6 +14586,10 @@ function persistMigration() {
 
 	echo -e "${GREEN}Updating configuration with migrated values...${NC}"
 
+	if [[ "${AWG_PROTOCOL_VERSION:-}" == "${AWG_PROTOCOL_VERSION_1}" ]]; then
+		AWG_PROTOCOL_VERSION="${AWG_PROTOCOL_VERSION_2}"
+	fi
+
 	# Create backups of both files before migration
 	# Note: If the script is interrupted, the .bak files will remain for manual recovery
 	if ! cp "${SERVER_AWG_CONF}" "${SERVER_AWG_CONF}.bak"; then
@@ -14759,6 +14883,10 @@ function loadParams() {
 	local IPV6_CHANGED=0
 	if [[ "${_MIGRATE_ORIG_IPV6}" != "${SERVER_AWG_IPV6}" ]]; then
 		IPV6_CHANGED=1
+	fi
+
+	if [[ "${AWG_PROTOCOL_VERSION:-}" == "${AWG_PROTOCOL_VERSION_1}" ]]; then
+		NEEDS_UPDATE=1
 	fi
 
 	if migrateS3S4; then
@@ -15388,6 +15516,11 @@ function setAwgProtocolMode() (
 		loadParams 0 1
 	fi
 	normalizeAwgProtocolVersion || return 1
+	if [[ "${AWG_PROTOCOL_VERSION}" == "${AWG_PROTOCOL_VERSION_1}" ]]; then
+		reportAwgProtocolDiagnostic "ERROR: AmneziaWG 1.0 installations must be migrated to AWG 2.0 before changing protocol mode."
+		reportAwgProtocolDiagnostic "Run amneziawg-install.sh interactively, complete the prompted AWG 2.0 migration, and then retry."
+		return 1
+	fi
 	# BoringTun keeps its protocol imitation across protocol changes. AWG 3.x
 	# refuses SIP imitation with long S prefixes and weakens header masking
 	# under the others, so say so before anything changes.
@@ -16491,6 +16624,10 @@ function changeAwgProtocolInteractively() {
 	echo "Current AmneziaWG protocol mode: $(awgProtocolDisplayName "${AWG_PROTOCOL_VERSION}")"
 	echo ""
 	case "${AWG_PROTOCOL_VERSION}" in
+		"${AWG_PROTOCOL_VERSION_1}")
+			echo -e "${ORANGE}AmneziaWG 1.0 must be migrated to AWG 2.0 before enabling AWG 3.0 or 3.1.${NC}"
+			return 1
+			;;
 		"${AWG_PROTOCOL_VERSION_2}")
 			echo "   1) Enable AWG 3.0 (header protection)"
 			echo "   2) Enable AWG 3.1 (header protection + RandomTrailers; DisableCookies stays off)"
@@ -16848,9 +16985,12 @@ function nonInteractiveAddClient() (
 	acquireClientLifecycleLock || exit 1
 	# Reload only after locking: a protocol transaction may have completed after
 	# this CLI process started but before it acquired the lifecycle lock.
-	loadParams
-	local CLIENT_MTU_LINE
+	# Non-interactive client management must never prompt for or auto-apply a
+	# breaking AWG 1.0 -> 2.0 migration.
+	loadParams 0 1
+	local CLIENT_MTU_LINE AWG_S3_S4_LINES=""
 	CLIENT_MTU_LINE="$(renderClientMtu)" || exit 1
+	AWG_S3_S4_LINES="$(renderAwgS3S4Lines)" || exit 1
 
 	# Ensure the config path follows the freshly loaded interface name.
 	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
@@ -16957,9 +17097,7 @@ Jc = ${SERVER_AWG_JC}
 Jmin = ${SERVER_AWG_JMIN}
 Jmax = ${SERVER_AWG_JMAX}
 S1 = ${SERVER_AWG_S1}
-S2 = ${SERVER_AWG_S2}
-S3 = ${SERVER_AWG_S3}
-S4 = ${SERVER_AWG_S4}
+S2 = ${SERVER_AWG_S2}${AWG_S3_S4_LINES}
 H1 = ${SERVER_AWG_H1}
 H2 = ${SERVER_AWG_H2}
 H3 = ${SERVER_AWG_H3}
@@ -17038,7 +17176,7 @@ function nonInteractiveRemoveClient() (
 		exit 1
 	fi
 	acquireClientLifecycleLock || exit 1
-	loadParams
+	loadParams 0 1
 
 	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
 
@@ -17075,7 +17213,7 @@ function nonInteractiveRemoveClient() (
 
 function nonInteractiveListClients() (
 	acquireClientLifecycleLock || exit 1
-	loadParams
+	loadParams 0 1
 	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
 	grep -E "^### Client" "${SERVER_AWG_CONF}" | cut -d ' ' -f 3 || true
 )
