@@ -10798,6 +10798,17 @@ function _awgBtScratchOwnerWants() {
 		_awgBtProcessIs "${OWNER_RECORD[OWNER_PID]}" "${OWNER_RECORD[OWNER_START]}"
 }
 
+# bash 5.3 will not undo HUP, INT and TERM after the guardian ignored them:
+# this subshell treats those dispositions as ignored on entry, so `trap -`
+# leaves them ignored and BoringTun inherits them. perl-base is Essential on
+# Debian and Ubuntu and can restore the defaults. exec keeps this PID, which
+# the child record already names.
+function _awgBtExecRestoringSignals() {
+	command -v perl >/dev/null 2>&1 || return 1
+	# shellcheck disable=SC2016 # perl reads $name and @ARGV, not the shell
+	exec perl -e 'foreach my $name (qw(HUP INT TERM)) { $SIG{$name} = "DEFAULT" } exec @ARGV or die $!' -- "$@"
+}
+
 function _awgBtScratchStart() {
 	local CLIENT DAEMON
 	if [[ "${GUARD_RECORD[MODE]}" == unit ]]; then
@@ -10829,7 +10840,7 @@ function _awgBtScratchStart() {
 		trap - HUP INT TERM
 		_awgBtCloseInheritedFds
 		_awgBtScratchRegisterSelf CHILD || exit 1
-		exec setpriv --pdeathsig KILL -- "${_AWG_BT_ARGV[@]}" </dev/null >/dev/null 2>&1
+		_awgBtExecRestoringSignals setpriv --pdeathsig KILL -- "${_AWG_BT_ARGV[@]}" </dev/null >/dev/null 2>&1 || exit 1
 	) &
 	DAEMON=$!
 	_awgBtScratchAwaitRegistration CHILD "${DAEMON}" || return 1

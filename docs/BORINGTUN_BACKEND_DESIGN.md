@@ -1869,8 +1869,10 @@ and is the only process that starts the instance:
    guardian forks a child that writes its own PID and start time to
    `<token>.child`, checks that no reclaim has begun, that its attempt's owner
    record still exists, and that the guardian still lives, and only then execs
-   BoringTun under `setpriv --pdeathsig KILL`, with the guardian's ignored
-   signals reset. The guardian goes on only once that record exists. A daemon
+   BoringTun under `setpriv --pdeathsig KILL`, after perl-base restores the
+   guardian's ignored HUP, INT and TERM. bash 5.3 will not reset a signal that
+   was ignored when the subshell started, so `trap -` alone leaves them ignored.
+   The guardian goes on only once that record exists. A daemon
    therefore never runs without a durable record, whenever the guardian dies;
    the parent-death signal, which has the classic window before `prctl`, is only
    a second line.
