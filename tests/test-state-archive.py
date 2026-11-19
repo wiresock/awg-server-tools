@@ -2025,6 +2025,138 @@ awgStateExport "$ROOT/export.tar.gz" "$ROOT/work"
         leftovers = [p.name for p in destination.rglob('*') if p.name.endswith(('-wal', '-shm', '-journal'))]
         self.assertEqual(leftovers, [])
 
+    def test_panel_snapshot_full_migrations_concurrency_and_security(self):
+        migrations_dir = SCRIPT.parent / 'amneziawg-web' / 'migrations'
+        migration_files = sorted(migrations_dir.glob('*.sql'))
+        self.assertGreaterEqual(len(migration_files), 15)
+
+        src = self.root / 'full-panel.db'
+        other_peer = base64.b64encode(b'D' * 32).decode()
+        checksum = bytes(range(48))
+        digest = b'\xab' * 32
+        token_hash = b'\xcd' * 32
+        with closing(sqlite3.connect(src)) as db:
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('PRAGMA application_id=1096238935')
+            db.execute(
+                'CREATE TABLE _sqlx_migrations(version BIGINT PRIMARY KEY, description TEXT NOT NULL, '
+                'installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, success BOOLEAN NOT NULL, '
+                'checksum BLOB NOT NULL, execution_time BIGINT NOT NULL)'
+            )
+            for mf in migration_files:
+                db.executescript(mf.read_text(encoding='utf-8'))
+                ver = int(mf.name.split('_', 1)[0])
+                db.execute(
+                    'INSERT INTO _sqlx_migrations(version, description, success, checksum, execution_time) '
+                    'VALUES(?, ?, 1, ?, 1)',
+                    (ver, mf.stem, checksum),
+                )
+            db.execute('CREATE VIEW active_peer_keys AS SELECT public_key FROM peers WHERE disabled = 0')
+            db.execute('INSERT INTO peers(id, public_key, display_name) VALUES(10, ?, "alice")', (PEER,))
+            db.execute('INSERT INTO peers(id, public_key, display_name) VALUES(25, ?, "temp")', (other_peer,))
+            db.execute('DELETE FROM peers WHERE id = 25')  # High-water mark stays 25 in sqlite_sequence.
+            db.execute(
+                'INSERT INTO delivery_clients(id, peer_id, interface, managed_name, last_public_key, email, '
+                'binding_version, export_digest) VALUES("c1", 10, "awg0", "alice", ?, "a@example.test", 1, ?)',
+                (PEER, digest),
+            )
+            db.execute(
+                'INSERT INTO email_jobs(id, client_id, request_id, actor, recipient, mode, formats, '
+                'binding_version, export_digest, state, attempts, next_attempt_at, created_at) '
+                'VALUES("j1", "c1", "r1", "admin", "a@example.test", "link", "conf", 1, ?, "queued", 0, 100, 100)',
+                (digest,),
+            )
+            db.execute(
+                'INSERT INTO delivery_grants(id, job_id, token_hash, binding_version, export_digest, expires_at) '
+                'VALUES("g1", "j1", ?, 1, ?, 9999999999)',
+                (token_hash, digest),
+            )
+            db.executemany(
+                'INSERT INTO snapshots(public_key, captured_at, rx_bytes, tx_bytes) VALUES(?,?,?,?)',
+                [(PEER, f'2026-11-19T21:00:{i:02d}Z', i, i * 2) for i in range(12)],
+            )
+            db.commit()
+
+        # Hold an active uncommitted WAL write transaction while taking panel-snapshot.
+        writer = sqlite3.connect(src, isolation_level=None)
+        self.addCleanup(writer.close)
+        writer.execute('BEGIN IMMEDIATE')
+        writer.execute('INSERT INTO peers(id, public_key, display_name) VALUES(30, ?, "uncommitted")', (other_peer,))
+
+        dst = self.root / 'full-snapshot.sqlite'
+        # Also exercise a relative source path to verify abspath URI conversion.
+        rel_src = os.path.relpath(src, self.root)
+        result = subprocess.run(
+            ['bash', '-c', 'set -euo pipefail; cd "$2"; source "$1"; awgStateArchive panel-snapshot "$3" "$4"',
+             'test', str(SCRIPT), str(self.root), rel_src, str(dst)],
+            capture_output=True,
+        )
+        writer.execute('ROLLBACK')
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertEqual(dst.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(dst.read_bytes()[18:20], b'\x01\x01')
+        for suffix in ('-wal', '-shm', '-journal'):
+            self.assertFalse(Path(str(dst) + suffix).exists())
+
+        with closing(sqlite3.connect(dst.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+            self.assertEqual(db.execute('PRAGMA integrity_check').fetchone(), ('ok',))
+            self.assertEqual(db.execute('PRAGMA application_id').fetchone(), (1096238935,))
+            # Committed peer preserved, uncommitted WAL row excluded.
+            self.assertEqual(db.execute('SELECT id, public_key, display_name FROM peers').fetchall(), [(10, PEER, 'alice')])
+            # Snapshots omitted while schema and indexes remain.
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM snapshots').fetchone(), (0,))
+            self.assertIsNotNone(db.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_snapshots_pk_captured_id'").fetchone())
+            self.assertIsNotNone(db.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='email_jobs_visible_activity'").fetchone())
+            self.assertEqual(db.execute('SELECT public_key FROM active_peer_keys').fetchall(), [(PEER,)])
+            # Triggers exist and did not fire during copy.
+            triggers = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall()}
+            self.assertTrue({'delivery_peer_invalidated', 'delivery_peer_deleted', 'delivery_contact_invalidated'}.issubset(triggers))
+            self.assertEqual(db.execute('SELECT binding_version, typeof(export_digest), export_digest FROM delivery_clients').fetchall(), [(1, 'blob', digest)])
+            self.assertEqual(db.execute('SELECT state, invalidation_code FROM email_jobs').fetchall(), [('queued', None)])
+            self.assertEqual(db.execute('SELECT revoked_at, typeof(token_hash), token_hash FROM delivery_grants').fetchall(), [(None, 'blob', token_hash)])
+            self.assertEqual(db.execute('SELECT typeof(checksum), checksum FROM _sqlx_migrations WHERE version = 1').fetchall(), [('blob', checksum)])
+            # sqlite_sequence preserves high-water marks even after deleting max-id peer and omitting snapshots.
+            seqs = dict(db.execute('SELECT name, seq FROM sqlite_sequence').fetchall())
+            self.assertEqual(seqs.get('peers'), 25)
+            self.assertEqual(seqs.get('snapshots'), 12)
+
+        # Fail-closed & cleanup checks.
+        existing = self.root / 'existing.sqlite'
+        existing.write_bytes(b'keep-me')
+        res = self.run_helper('panel-snapshot', src, existing, ok=False)
+        self.assertEqual(existing.read_bytes(), b'keep-me')
+        self.assertNotIn(b'Traceback', res.stderr)
+
+        link_dst = self.root / 'link-dst.sqlite'
+        link_dst.symlink_to(self.root / 'nowhere.sqlite')
+        self.run_helper('panel-snapshot', src, link_dst, ok=False)
+
+        link_src = self.root / 'link-src.db'
+        link_src.symlink_to(src)
+        out_from_link = self.root / 'from-link.sqlite'
+        self.run_helper('panel-snapshot', link_src, out_from_link, ok=False)
+        self.assertFalse(out_from_link.exists())
+
+        corrupt = self.root / 'corrupt.db'
+        corrupt.write_bytes(b'not-a-sqlite-database')
+        out_corrupt = self.root / 'out-corrupt.sqlite'
+        self.run_helper('panel-snapshot', corrupt, out_corrupt, ok=False)
+        for suffix in ('', '-wal', '-shm', '-journal'):
+            self.assertFalse(Path(str(out_corrupt) + suffix).exists())
+
+        vtab = self.root / 'vtab.db'
+        with closing(sqlite3.connect(vtab)) as db:
+            db.execute('CREATE VIRTUAL TABLE evil USING fts5(content)')
+            db.commit()
+        out_vtab = self.root / 'out-vtab.sqlite'
+        self.run_helper('panel-snapshot', vtab, out_vtab, ok=False)
+        for suffix in ('', '-wal', '-shm', '-journal'):
+            self.assertFalse(Path(str(out_vtab) + suffix).exists())
+
+        # Missing destination arg fails cleanly without an uncaught IndexError traceback.
+        missing_arg = self.run_helper('panel-snapshot', src, ok=False)
+        self.assertNotIn(b'Traceback', missing_arg.stderr)
+
     def test_config_replace_failure_in_deferred_window_restores_previous(self):
         for case in ('landed-then-failed', 'io-error', 'interrupted'):
             with self.subTest(case=case):

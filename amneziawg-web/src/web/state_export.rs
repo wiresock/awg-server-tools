@@ -207,7 +207,7 @@ fn json_endpoints(summary: Option<(u64, u64)>) -> Response {
 
 /// Lock-free presence check. The panel sandbox cannot install a missing tool.
 fn export_tool_block() -> Option<String> {
-    for tool in ["age", "python3", "sqlite3"] {
+    for tool in ["age", "python3"] {
         let present = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
             .iter()
             .any(|dir| Path::new(dir).join(tool).is_file());

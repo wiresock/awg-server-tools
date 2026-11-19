@@ -4043,13 +4043,24 @@ def panel_snapshot(src_path, dst_path):
     dst_file = Path(dst_path)
     require(src_file.is_file() and not src_file.is_symlink(), 'panel database path is unsupported/missing')
     require(not os.path.lexists(dst_file), 'panel snapshot destination already exists')
+    abs_src = Path(os.path.abspath(str(src_file)))
     fd = os.open(str(dst_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.close(fd)
+    ddl_patterns = {
+        'index': re.compile(r'^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\b', re.IGNORECASE),
+        'view': re.compile(r'^\s*CREATE\s+VIEW\b', re.IGNORECASE),
+        'trigger': re.compile(r'^\s*CREATE\s+TRIGGER\b', re.IGNORECASE),
+    }
     try:
-        with closing(sqlite3.connect(src_file.as_uri() + '?mode=ro', uri=True, timeout=10.0, isolation_level=None)) as src, \
+        with closing(sqlite3.connect(abs_src.as_uri() + '?mode=ro', uri=True, timeout=10.0, isolation_level=None)) as src, \
                 closing(sqlite3.connect(str(dst_file), isolation_level=None)) as dst:
+            src.execute('PRAGMA trusted_schema = OFF')
             src.execute('PRAGMA busy_timeout = 10000')
             src.execute('PRAGMA query_only = ON')
+            dst.execute('PRAGMA trusted_schema = OFF')
+            dst.execute('PRAGMA journal_mode = DELETE')
+            page_size = int(dst.execute('PRAGMA page_size').fetchone()[0])
+            dst.execute('PRAGMA max_page_count = %d' % max(1, MAX_FILE // max(page_size, 512)))
             src.execute('BEGIN')
             try:
                 tables = src.execute(
@@ -4066,16 +4077,17 @@ def panel_snapshot(src_path, dst_path):
                 user_version = int(src.execute('PRAGMA user_version').fetchone()[0])
                 application_id = int(src.execute('PRAGMA application_id').fetchone()[0])
 
-                dst.execute('PRAGMA journal_mode = DELETE')
                 dst.execute('PRAGMA foreign_keys = OFF')
                 dst.execute('BEGIN IMMEDIATE')
                 try:
                     for name, sql in tables:
-                        if name.startswith('sqlite_'):
+                        if name.lower().startswith('sqlite_'):
                             continue
+                        require(re.match(r'^\s*CREATE\s+TABLE\b', sql, re.IGNORECASE) is not None,
+                                'unsupported table DDL in panel database')
                         dst.execute(sql)
                     for name, _ in tables:
-                        if name.startswith('sqlite_') or name.lower() == 'snapshots':
+                        if name.lower().startswith('sqlite_') or name.lower() == 'snapshots':
                             continue
                         ident = quote_sql_ident(name)
                         cols = [row[1] for row in src.execute('PRAGMA table_info(%s)' % ident).fetchall()]
@@ -4096,7 +4108,10 @@ def panel_snapshot(src_path, dst_path):
                         dst.execute('DELETE FROM sqlite_sequence')
                         if seq_rows:
                             dst.executemany('INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)', seq_rows)
-                    for _, _, sql in extras:
+                    for kind, _, sql in extras:
+                        pattern = ddl_patterns.get(kind)
+                        require(pattern is not None and pattern.match(sql) is not None,
+                                'unsupported schema DDL in panel database')
                         dst.execute(sql)
                     if user_version:
                         dst.execute('PRAGMA user_version = %d' % user_version)
@@ -4120,6 +4135,18 @@ def panel_snapshot(src_path, dst_path):
         dst_file.chmod(0o600)
         for suffix in ('-wal', '-shm', '-journal'):
             require(not os.path.lexists(str(dst_file) + suffix), 'unexpected SQLite sidecar after panel snapshot')
+    except sqlite3.OperationalError as error:
+        for suffix in ('', '-wal', '-shm', '-journal'):
+            try:
+                os.unlink(str(dst_file) + suffix)
+            except OSError:
+                pass
+        msg = str(error).lower()
+        if 'database or disk is full' in msg:
+            raise StatePolicyError('panel database snapshot failed: staging space or size limit exceeded') from None
+        if 'database is locked' in msg or 'database table is locked' in msg:
+            raise StatePolicyError('panel database snapshot failed: database is locked') from None
+        raise
     except Exception:
         for suffix in ('', '-wal', '-shm', '-journal'):
             try:
@@ -4171,6 +4198,7 @@ def panel_prepare(root, out, clients_dir, default_db, migrations_dir, approved='
     with closing(sqlite3.connect((root / 'web/database.sqlite').as_uri() + '?mode=ro&immutable=1', uri=True)) as source, \
             closing(sqlite3.connect(str(db_out))) as dest:
         source.backup(dest)
+        dest.execute('PRAGMA trusted_schema = OFF')
         dest.execute('PRAGMA journal_mode=DELETE')
         require(dest.execute('PRAGMA integrity_check').fetchone() == ('ok',), 'panel database integrity check failed')
         if dest.execute("SELECT type FROM sqlite_master WHERE name='email_jobs'").fetchone() == ('table',):
@@ -4576,6 +4604,7 @@ def main():
         for name, value in state.items():
             sys.stdout.buffer.write(name.encode() + b'\0' + value.encode() + b'\0')
     elif mode == 'panel-snapshot':
+        require(len(args) == 1, 'panel-snapshot expects source and destination')
         panel_snapshot(path, args[0])
     elif mode == 'export-check':
         # Fail before the passphrase prompt: the staged panel snapshot must have
@@ -4623,7 +4652,7 @@ def main():
                         versions={'installer_format': 'state-v1', 'installer_sha256': args[2] if len(args) > 2 and re.fullmatch(r'[0-9a-f]{64}', args[2]) else 'unknown', 'awg_tools': args[1],
                                   'panel': 'not-probed'},
                         files={name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
-                        limitations=['Panel DB/env and the amneziawg-proxy config are restored by --activate-state --enable-at-boot when their installers are available; mail queue is not replayed.',
+                        limitations=['Panel DB/env and the amneziawg-proxy config are restored by --activate-state --enable-at-boot when their installers are available; mail queue is not replayed and historical traffic snapshots are omitted.',
                                      'No TLS keys, binaries, systemd units, sessions or firewall dumps.'])
         validate_manifest(manifest, files)
         files['manifest.json'] = json.dumps(manifest, sort_keys=True, indent=2).encode()
@@ -4752,17 +4781,17 @@ function awgStateReadParams() {
 
 function awgStateDependencies() { # <allow-install: 0|1>
 	local TOOL MISSING=0
-	for TOOL in age python3 sqlite3; do
+	for TOOL in age python3; do
 		command -v "${TOOL}" >/dev/null 2>&1 || MISSING=1
 	done
 	((MISSING)) || return 0
 	if [[ "$1" != 1 ]]; then
-		echo 'ERROR: install age, python3 and sqlite3 first (read-only operations do not install packages).' >&2
+		echo 'ERROR: install age and python3 first (read-only operations do not install packages).' >&2
 		return 1
 	fi
 	enable_apt_ipv4
 	# stdout of a streaming export is the ciphertext. apt progress stays on stderr.
-	apt-get update >&2 && apt-get install -y age python3 sqlite3 >&2
+	apt-get update >&2 && apt-get install -y age python3 >&2
 	local STATUS=$?
 	disable_apt_ipv4
 	return "${STATUS}"
@@ -4882,7 +4911,7 @@ function awgStateEndpointSummary() (
 		exit 1
 	}
 	# The count is a python3 read of staged profiles. It does not encrypt, so
-	# age and sqlite3 are not required and must not be installed from here.
+	# age is not required and must not be installed from here.
 	command -v python3 >/dev/null 2>&1 || {
 		echo 'ERROR: python3 is required to count client endpoints.' >&2
 		exit 1

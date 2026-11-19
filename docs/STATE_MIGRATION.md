@@ -60,7 +60,7 @@ tab) or DEL (U+007F). An empty passphrase is refused before
 on its terminal, and the archive would be unrecoverable. If no passphrase
 arrives within 30 seconds, export fails before `age` starts. The installer must be
 a regular file for this form (`bash <(curl ...)` cannot stream). Ciphertext is
-written to standard output only after encryption succeeds. If age or sqlite3
+written to standard output only after encryption succeeds. If `age` or `python3`
 is missing, apt's messages go to standard error and cannot prefix that
 ciphertext. Encryption that does
 not finish within 5 minutes, or any failure of packing or `age`, writes nothing
@@ -143,16 +143,16 @@ printed. It does not install packages and does not change the VPN. It needs
 use an IP in Endpoint; they will need a new profile after a ban" (singular
 when N is 1).
 
-The panel install and upgrade scripts install `age`, `python3`, and `sqlite3`
+The panel install and upgrade scripts install `age` and `python3`
 on Debian and Ubuntu (including the derivatives the installer already maps to
 them). The panel service's `ProtectSystem=strict` sandbox cannot run apt-get,
-so a missing tool is not installed at export time. If `age`, `python3`, or
-`sqlite3` is absent from `/usr/bin`, `/bin`, `/usr/sbin`, or `/sbin`, the
+so a missing tool is not installed at export time. If `age` or `python3`
+is absent from `/usr/bin`, `/bin`, `/usr/sbin`, or `/sbin`, the
 helper refuses before starting the installer with
 `export-state requires <tool>; rerun the panel upgrade`, and the download
 button stays disabled with that reason.
 
-The CLI export and import still install missing `age`, `python3`, and `sqlite3`
+The CLI export and import still install missing `age` and `python3`
 with apt. Inspect, dry-run and activation require them to be installed already
 and never install packages.
 The existing installer's distribution/version and signed AWG package handling
@@ -768,9 +768,10 @@ conflicting client copies, `installer_sha256` when the installer is read from
 `bash <(…)`, the server-identity tombstone, the reset hint, the MTU warning,
 fractional-second expiries, clock-skew tolerance, the `SERVER_PUB_IP`
 override and IP-literal warning, and that journals hold no plaintext keys or
-panel DB. It uses the real `sqlite3` CLI (skipped if absent; CI installs it)
-to export a live WAL-mode panel DB and import a WAL-header DB without
-sidecars, and covers the config-replace failure window, `host:port` rejection,
+panel DB. It uses the embedded Python `panel-snapshot` helper directly (no
+`sqlite3` CLI required) to export a live WAL-mode panel DB omitting historical
+`snapshots` rows and import a WAL-header DB without sidecars, and covers the
+config-replace failure window, `host:port` rejection,
 inherited subshell traps, refusal without RAM staging and the
 incomplete-rollback block. It also covers the default proxy topology, an
 archive-controlled path that already exists, the journal-directory companion
