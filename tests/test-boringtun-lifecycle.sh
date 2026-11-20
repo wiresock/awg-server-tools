@@ -1114,7 +1114,10 @@ SLEEP_DIR="${STORE}/${STORE_ID_[old]}"
 cp "$(command -v sleep)" "${SLEEP_DIR}/boringtun-cli"
 chmod 0755 "${SLEEP_DIR}/boringtun-cli"
 sed -i "s/^binary_sha256=.*/binary_sha256=$(sha256sum "${SLEEP_DIR}/boringtun-cli" | cut -d' ' -f1)/" "${SLEEP_DIR}/MANIFEST"
-"${SLEEP_DIR}/boringtun-cli" 60 &
+# uutils coreutils (Ubuntu 26.04) is one binary that picks the utility from
+# argv[0], so the copy is started as "sleep". GNU sleep ignores argv[0].
+# /proc/<pid>/exe still names the copy in the store.
+(exec -a sleep "${SLEEP_DIR}/boringtun-cli" 60) &
 BACKGROUND+=("$!")
 echo "$!" >"${S}/main-pid"
 echo 1 >"${S}/served-rc"
