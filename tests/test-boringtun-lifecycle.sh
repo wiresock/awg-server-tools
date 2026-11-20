@@ -1104,20 +1104,21 @@ assert_rc 1 "${RC}" "a damaged current makes the status fail"
 assert_contains $'installed_release=invalid' "${OUT}" "  reported as invalid"
 assert_contains "upgrade_available=no" "${OUT}" "  with no upgrade offered from it"
 # The release a running daemon executes, from its executable path: a fixture
-# release whose binary is a copy of sleep, so that /proc/<pid>/exe is in the
-# store.
+# release whose binary is a copy of bash, so that /proc/<pid>/exe is in the
+# store. Not a copy of sleep: uutils coreutils (Ubuntu 26.04) is one binary
+# that refuses to run under another name. The copy waits in a builtin read on
+# a FIFO, so it stays one process and never execs anything else.
 make_install
 rm -rf -- "${STORE:?}"/*
 store_release old
 store_release new
 SLEEP_DIR="${STORE}/${STORE_ID_[old]}"
-cp "$(command -v sleep)" "${SLEEP_DIR}/boringtun-cli"
+cp "$(command -v bash)" "${SLEEP_DIR}/boringtun-cli"
 chmod 0755 "${SLEEP_DIR}/boringtun-cli"
 sed -i "s/^binary_sha256=.*/binary_sha256=$(sha256sum "${SLEEP_DIR}/boringtun-cli" | cut -d' ' -f1)/" "${SLEEP_DIR}/MANIFEST"
-# uutils coreutils (Ubuntu 26.04) is one binary that picks the utility from
-# argv[0], so the copy is started as "sleep". GNU sleep ignores argv[0].
-# /proc/<pid>/exe still names the copy in the store.
-(exec -a sleep "${SLEEP_DIR}/boringtun-cli" 60) &
+mkfifo "${S}/daemon-wait"
+# shellcheck disable=SC2016 # $1 is expanded by the copied bash
+"${SLEEP_DIR}/boringtun-cli" -c 'read -r -t 60 _ <>"$1"' daemon "${S}/daemon-wait" &
 BACKGROUND+=("$!")
 echo "$!" >"${S}/main-pid"
 echo 1 >"${S}/served-rc"
