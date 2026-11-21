@@ -5101,10 +5101,10 @@ function awgStateWriteForwardingSettings() { # <private candidate>
 
 function awgStateSaveLiveForwarding() { # <private rollback file>
 	local KEY VALUE
-	local -a KEYS=(net.ipv4.ip_forward)
-	[[ "${ENABLE_IPV6:-n}" != y ]] || KEYS+=(net.ipv6.conf.all.forwarding)
+	local -a FORWARDING_KEYS=(net.ipv4.ip_forward)
+	[[ "${ENABLE_IPV6:-n}" != y ]] || FORWARDING_KEYS+=(net.ipv6.conf.all.forwarding)
 	: >"$1" || return 1
-	for KEY in "${KEYS[@]}"; do
+	for KEY in "${FORWARDING_KEYS[@]}"; do
 		VALUE="$(sysctl -n "${KEY}")" || return 1
 		[[ "${VALUE}" == 0 || "${VALUE}" == 1 ]] || return 1
 		printf '%s = %s\n' "${KEY}" "${VALUE}" >>"$1" || return 1
