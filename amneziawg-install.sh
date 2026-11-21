@@ -6702,7 +6702,10 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 			echo 'ERROR: could not remove the server-identity tombstone. The finalized marker was retained; fix the removal error and rerun the same reset.' >&2
 			exit 1
 		fi
-		rm -f -- "${JOURNAL}/finalized" || exit 1
+		if ! rm -f -- "${JOURNAL}/finalized"; then
+			echo 'ERROR: server-identity cleanup completed, but the finalized marker could not be removed. The reset is incomplete. Fix the removal error and rerun the same reset.' >&2
+			exit 1
+		fi
 		# The reset is committed. Fresh import reuses an empty journal directory,
 		# so a failed rmdir cannot turn this into a non-retryable failure.
 		if ! rmdir -- "${JOURNAL}"; then

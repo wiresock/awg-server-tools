@@ -699,7 +699,7 @@ awgStateIsFinalized "$JOURNAL" awg0
 [[ -f "${IDENTITY[0]}" ]]
 
 TEST_UNIT_STATE=disabled; FAIL_FINALIZED=1
-if awgStatePurgeJournal "$DIGEST" --reset-finalized; then exit 14; fi
+if awgStatePurgeJournal "$DIGEST" --reset-finalized 2>"$ROOT/finalized-unlink.err"; then exit 14; fi
 awgStateIsFinalized "$JOURNAL" awg0
 [[ ! -e "${IDENTITY[0]}" ]]
 
@@ -728,6 +728,10 @@ SERVER_PUB_NIC=eth0 awgStateCommand --import-state "$ARCHIVE"
         self.assertIn(b'--reset-state-journal ' + hashlib.sha256(
             (stage / 'manifest.json').read_bytes()).hexdigest().encode(), result.stderr)
         self.assertIn(b'disable the VPN before journal reset', result.stderr)
+        unlink_error = (self.root / 'finalized-unlink.err').read_bytes()
+        self.assertIn(b'server-identity cleanup completed', unlink_error)
+        self.assertIn(b'finalized marker could not be removed', unlink_error)
+        self.assertIn(b'rerun the same reset', unlink_error)
         self.assertIn(b'Finalized journal reset', result.stdout)
         self.assertIn(b'Imported in quarantine', result.stdout)
 
