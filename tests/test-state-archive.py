@@ -640,6 +640,97 @@ flock -xn "$ROOT/lifecycle" -c true # Released after a precondition failure too.
         self.assertIn(b'another client or protocol management operation', result.stderr)
         self.assertNotIn(b'lifecycle lock not held', result.stderr)
 
+    def test_reset_retries_identity_failure_and_empty_journal_can_be_reused(self):
+        stage = self.root / 'stage'
+        self.run_helper('unpack', self.tar, stage)
+        shell = r'''
+set -euo pipefail
+source "$1"
+ROOT="$2"; STAGE="$3"; ARCHIVE="$4"
+AMNEZIAWG_DIR="$ROOT/target"
+AWG_STATE_JOURNAL_DIR="$ROOT/journals"
+INSTALLER_LIFECYCLE_LOCK_DIR="$ROOT/lifecycle"
+DIGEST="$(sha256sum "$STAGE/manifest.json")"; DIGEST="${DIGEST%% *}"
+JOURNAL="$AWG_STATE_JOURNAL_DIR/$DIGEST"
+mkdir -p "$JOURNAL/recovery" "$ROOT/work"
+printf 'awg0\n' >"$JOURNAL/finalized"
+printf synthetic >"$JOURNAL/recovery/snapshot"
+printf 'temporary receipt\n' >"$JOURNAL/receipt"
+isRoot() { return 0; }
+isWebPanelInstalled() { return 1; }
+awgStateTrustedPath() { [[ "$1" == "$ROOT/"* ]]; }
+TEST_UNIT_STATE=disabled
+systemctl() {
+    case "$2" in
+        --property=ActiveState) printf 'inactive\n' ;;
+        --property=UnitFileState) printf '%s\n' "$TEST_UNIT_STATE" ;;
+        *) return 96 ;;
+    esac
+}
+awgStateRecordIdentityTombstone "$STAGE" "$DIGEST" "$ROOT/work"
+IDENTITY=("$AWG_STATE_JOURNAL_DIR"/identities/*)
+[[ ${#IDENTITY[@]} == 1 && -f "${IDENTITY[0]}" ]]
+FAIL_IDENTITY=1; FAIL_FINALIZED=0; FAIL_RMDIR=0
+rm() {
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "${IDENTITY[0]}" && "$FAIL_IDENTITY" == 1 ]]; then return 71; fi
+        if [[ "$arg" == "$JOURNAL/finalized" && "$FAIL_FINALIZED" == 1 ]]; then return 72; fi
+    done
+    command rm "$@"
+}
+rmdir() {
+    if [[ "$*" == "-- $JOURNAL" && "$FAIL_RMDIR" == 1 ]]; then return 73; fi
+    command rmdir "$@"
+}
+
+if awgStatePurgeJournal "$DIGEST" --reset-finalized; then exit 10; fi
+if ! awgStateIsFinalized "$JOURNAL" awg0; then
+    echo 'identity removal failure lost the finalized retry marker' >&2
+    exit 11
+fi
+[[ -f "${IDENTITY[0]}" && ! -e "$JOURNAL/recovery" && ! -e "$JOURNAL/receipt" ]]
+if awgStateCheckIdentityTombstone "$STAGE"; then exit 12; fi
+
+# Preconditions are checked again even though the recovery files were pruned.
+FAIL_IDENTITY=0; TEST_UNIT_STATE=enabled
+if awgStatePurgeJournal "$DIGEST" --reset-finalized; then exit 13; fi
+awgStateIsFinalized "$JOURNAL" awg0
+[[ -f "${IDENTITY[0]}" ]]
+
+TEST_UNIT_STATE=disabled; FAIL_FINALIZED=1
+if awgStatePurgeJournal "$DIGEST" --reset-finalized; then exit 14; fi
+awgStateIsFinalized "$JOURNAL" awg0
+[[ ! -e "${IDENTITY[0]}" ]]
+
+# A cleanup failure after unlinking the final marker leaves an empty,
+# reusable directory, not an uncompleted reset.
+FAIL_FINALIZED=0; FAIL_RMDIR=1
+awgStatePurgeJournal "$DIGEST" --reset-finalized
+[[ -d "$JOURNAL" && -z "$(ls -A -- "$JOURNAL")" ]]
+checkOS() { OS=debian; }
+awgStateDependencies() { return 0; }
+awgStateWorkDir() { mktemp -d "$ROOT/export-work.XXXXXXXX"; }
+age() { [[ "$1" == --decrypt && "$2" == --output && "$4" == "$ARCHIVE" ]] && cp -- "$4" "$3"; }
+awgStateImportPreflight() { [[ "$1" == eth0 && ! -e "$AMNEZIAWG_DIR" ]]; }
+EXPECTED_JOURNAL="$JOURNAL"
+awgStateImportTransaction() {
+    [[ "$2" == "$EXPECTED_JOURNAL" && -z "$(ls -A -- "$2")" ]] || return 74
+    printf 'new import reached same journal\n' >"$ROOT/imported"
+}
+SERVER_PUB_NIC=eth0 awgStateCommand --import-state "$ARCHIVE"
+[[ -f "$ROOT/imported" ]]
+'''
+        result = subprocess.run(
+            ['bash', '-c', shell, 'test', str(SCRIPT), str(self.root), str(stage), str(self.tar)],
+            capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'--reset-state-journal ' + hashlib.sha256(
+            (stage / 'manifest.json').read_bytes()).hexdigest().encode(), result.stderr)
+        self.assertIn(b'disable the VPN before journal reset', result.stderr)
+        self.assertIn(b'Finalized journal reset', result.stdout)
+        self.assertIn(b'Imported in quarantine', result.stdout)
+
     def test_reset_reports_all_blocking_config_paths_without_printing_contents(self):
         target = self.root / 'target'
         target.mkdir()
@@ -2369,18 +2460,26 @@ if awgStateImportTransaction "$ROOT/stage" "$ROOT/journal"; then exit 12; fi
         installer.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >>"$PANEL_ROOT/installer.args"\n'
                              'echo run >>"$PANEL_ROOT/installer.runs"\n[[ -z "${FAIL_INSTALLER:-}" ]] || exit 1\n'
                              'while (($#)); do [[ "$1" == --password-hash-file ]] && { stat -c %a "$2" >"$PANEL_ROOT/hash.mode"; cat "$2" >"$PANEL_ROOT/hash.seen"; }; shift; done\n'
-                             'mkdir -p "$PANEL_ROOT/data"; touch "$PANEL_ROOT/unit"\n')
+                             'mkdir -p "$PANEL_ROOT/data"; touch "$PANEL_ROOT/unit"\n[[ -z "${FAIL_AFTER_UNIT:-}" ]]\n')
         return stage
 
     PANEL_HARNESS = r"""
 set -uo pipefail
 source "$1"
 ROOT="$2"; export PANEL_ROOT="$ROOT"
+awgStateLockCompanionInstallers() { AWG_COMPANION_INSTALL_LOCK_FD=0; }
 AMNEZIAWG_DIR="$ROOT/vpn"; mkdir -p "$ROOT/journal" "$ROOT/work"
 WEB_PANEL_ENV_FILE="$ROOT/etc/env.conf"; WEB_PANEL_SYSTEMD_UNIT="$ROOT/unit"
 awgStatePanelInstaller() { printf '%s\n' "$ROOT/checkout/amneziawg-web/scripts/amneziawg-web-install.sh"; }
 install() { local a=(); while (($#)); do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; command install "${a[@]}"; }
-systemctl() { printf '%s\n' "$*" >>"$ROOT/systemctl.log"; [[ "$1 ${FAIL_START:-}" != 'start 1' ]]; }
+systemctl() {
+    case "$1 ${2:-}" in
+        'show --property=FragmentPath') printf '%s' "${SYSTEMD_FRAGMENT:-}"; return 0 ;;
+        'show --property=ActiveState') printf '%s' "${SYSTEMD_ACTIVE:-inactive}"; return 0 ;;
+    esac
+    printf '%s\n' "$*" >>"$ROOT/systemctl.log"
+    [[ "$1 ${FAIL_START:-}" != 'start 1' && "$1 ${FAIL_STOP:-}" != 'stop 1' ]]
+}
 awgStatePanelHealthy() { [[ -z "${UNHEALTHY:-}" ]]; }
 AWG_STATE_PANEL_DEFAULT_DB="$ROOT/data/awg-web.db"
 """
@@ -2501,6 +2600,37 @@ if awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10
         self.assertEqual(result.returncode, 0, out)
         self.assertIn('unsafe panel path record', out)
 
+    def test_panel_retry_refuses_independent_install_after_prepare_failed(self):
+        root = self.root / 'panel-independent'
+        root.mkdir()
+        self.panel_stage(root, schema=16)
+        result = self.run_panel(root, r"""
+if awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+mkdir -p "$ROOT/etc" "$ROOT/data"
+printf standalone >"$WEB_PANEL_ENV_FILE"
+printf standalone >"$WEB_PANEL_SYSTEMD_UNIT"
+printf standalone >"$AWG_STATE_PANEL_DEFAULT_DB"
+touch "$ROOT/checkout/amneziawg-web/migrations/0016_m.sql"
+: >"$ROOT/systemctl.log"
+if awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 11; fi
+[[ ! -s "$ROOT/systemctl.log" && ! -e "$ROOT/installer.runs" ]] || exit 12
+for file in "$WEB_PANEL_ENV_FILE" "$WEB_PANEL_SYSTEMD_UNIT" "$AWG_STATE_PANEL_DEFAULT_DB"; do
+    [[ "$(<"$file")" == standalone ]] || exit 13
+done
+""")
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+
+    def test_panel_refuses_active_unit_with_missing_fragment_on_disk(self):
+        root = self.root / 'panel-active-missing-fragment'
+        root.mkdir()
+        self.panel_stage(root)
+        result = self.run_panel(root, r"""
+if awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ ! -e "$ROOT/installer.runs" && ! -e "$ROOT/systemctl.log" ]] || exit 11
+""", SYSTEMD_FRAGMENT=str(root / 'unit'), SYSTEMD_ACTIVE='active')
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'cannot establish ownership of the effective panel unit', result.stderr)
+
     def test_panel_restore_refusals(self):
         cases = {
             'existing-panel': ('mkdir -p "$ROOT/etc"; touch "$WEB_PANEL_ENV_FILE"', {}, 'a panel is already installed'),
@@ -2605,13 +2735,14 @@ echo "rc=$? running=$([[ -e $ROOT/running ]] && echo y) enabled=$([[ -e $ROOT/en
         installer.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >>"$PROXY_ROOT/installer.args"\necho run >>"$PROXY_ROOT/installer.runs"\n'
                              '[[ -z "${FAIL_INSTALLER:-}" ]] || exit 1\n'
                              'while (($#)); do [[ "$1" == --config-file ]] && { mkdir -p "${2%/*}"; echo generated >"$2"; }; shift; done\n'
-                             'touch "$PROXY_ROOT/unit"\n')
+                             'touch "$PROXY_ROOT/unit"\n[[ -z "${FAIL_AFTER_UNIT:-}" ]]\n')
         return stage
 
     PROXY_HARNESS = r"""
 set -uo pipefail
 source "$1"
 ROOT="$2"; export PROXY_ROOT="$ROOT"
+awgStateLockCompanionInstallers() { AWG_COMPANION_INSTALL_LOCK_FD=0; }
 AMNEZIAWG_DIR="$ROOT/vpn"; SERVER_AWG_NIC=awg0; SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"
 mkdir -p "$ROOT/journal" "$ROOT/work" "$AMNEZIAWG_DIR"
 cp "$ROOT/stage/vpn/server.conf" "$SERVER_AWG_CONF"
@@ -2620,7 +2751,14 @@ awg() { [[ "$*" == 'show awg0 listen-port' ]] && printf '%s\n' "${MOCK_LIVE_PORT
 AWG_STATE_PROXY_UNIT="$ROOT/unit"
 awgStateProxyInstaller() { printf '%s\n' "$ROOT/checkout/amneziawg-proxy/scripts/amneziawg-proxy-install.sh"; }
 install() { local a=(); while (($#)); do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; command install "${a[@]}"; }
-systemctl() { printf '%s\n' "$*" >>"$ROOT/systemctl.log"; [[ "$1 ${FAIL_START:-}" != 'start 1' ]]; }
+systemctl() {
+    case "$1 ${2:-}" in
+        'show --property=FragmentPath') printf '%s' "${SYSTEMD_FRAGMENT:-}"; return 0 ;;
+        'show --property=ActiveState') printf '%s' "${SYSTEMD_ACTIVE:-inactive}"; return 0 ;;
+    esac
+    printf '%s\n' "$*" >>"$ROOT/systemctl.log"
+    [[ "$1 ${FAIL_START:-}" != 'start 1' && "$1 ${FAIL_STOP:-}" != 'stop 1' ]]
+}
 awgStateProxyHealthy() { [[ -z "${UNHEALTHY:-}" ]]; }
 [[ ! -f "$ROOT/defaults.sh" ]] || source "$ROOT/defaults.sh"
 """
@@ -2696,6 +2834,76 @@ awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 13
         self.assertEqual(result.returncode, 0, out)
         self.assertIn('did not stay active/listen', out)
         self.assertIn('VPN and the panel are unaffected', out)
+
+    def test_proxy_retry_refuses_independent_install_after_install_failed(self):
+        root = self.root / 'proxy-independent'
+        root.mkdir()
+        self.proxy_stage(root, meta=dict(config_path=str(root / 'p/proxy.toml'), data_dir=str(root / 'd'), install_dir=str(root / 'b')))
+        result = self.run_proxy(root, r"""
+if FAIL_INSTALLER=1 awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+mkdir -p "${AWG_STATE_PROXY_CONFIG%/*}"
+printf standalone >"$AWG_STATE_PROXY_CONFIG"
+printf standalone >"$AWG_STATE_PROXY_UNIT"
+: >"$ROOT/systemctl.log"
+if awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 11; fi
+[[ ! -s "$ROOT/systemctl.log" && "$(<"$AWG_STATE_PROXY_CONFIG")" == standalone ]] || exit 12
+[[ "$(<"$AWG_STATE_PROXY_UNIT")" == standalone ]] || exit 13
+""")
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+
+    def test_companion_installer_lock_is_shared_and_inherited(self):
+        lock_dir = str(self.root / 'installer-lock')
+        stub = """stat() { # Only substitute the ownership check for this unprivileged fixture.
+    printf '0:700'
+}
+die() { echo "$*" >&2; exit 1; }
+"""
+        installer_root = SCRIPT.parent
+        main_script = SCRIPT.read_text()
+        main_lock = re.search(r'^function awgStateLockCompanionInstallers\(\) \{.*?^}', main_script,
+                              re.MULTILINE | re.DOTALL).group().replace('/run/awg-companion-install', lock_dir)
+        children = []
+        for companion in ('web', 'proxy'):
+            installer = installer_root / f'amneziawg-{companion}/scripts/amneziawg-{companion}-install.sh'
+            lock = re.search(r'^lock_companion_installers\(\) \{.*?^}', installer.read_text(),
+                             re.MULTILINE | re.DOTALL).group().replace('/run/awg-companion-install', lock_dir)
+            child = self.root / f'{companion}-lock.sh'
+            child.write_text(stub + lock + '\nlock_companion_installers\n')
+            children.append(str(child))
+        shell = stub + main_lock + r"""
+awgStateLockCompanionInstallers || exit 10
+for child; do
+    AWG_COMPANION_INSTALL_LOCK_FD="$AWG_COMPANION_INSTALL_LOCK_FD" bash "$child" || exit 11
+    if env -u AWG_COMPANION_INSTALL_LOCK_FD bash "$child"; then exit 12; fi
+done
+"""
+        result = subprocess.run(['bash', '-c', shell, 'test', *children], capture_output=True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertEqual(result.stderr.count(b'Another panel/proxy installer or migration is running'), 2)
+
+    def test_owned_partial_companions_retry_only_after_successful_stop(self):
+        cases = (
+            ('Panel', self.panel_stage, self.run_panel),
+            ('Proxy', self.proxy_stage, self.run_proxy),
+        )
+        for kind, stage, run in cases:
+            with self.subTest(kind=kind):
+                root = self.root / kind.lower()
+                root.mkdir()
+                if kind == 'Proxy':
+                    stage(root, meta=dict(config_path=str(root / 'p/proxy.toml'),
+                                          data_dir=str(root / 'd'), install_dir=str(root / 'b')))
+                else:
+                    stage(root)
+                body = r"""
+if FAIL_AFTER_UNIT=1 awgStateRestoreKIND "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+if FAIL_STOP=1 awgStateRestoreKIND "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 11; fi
+[[ "$(wc -l <"$ROOT/installer.runs")" == 1 ]] || exit 12
+awgStateRestoreKIND "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 13
+[[ "$(wc -l <"$ROOT/installer.runs")" == 2 ]] || exit 14
+""".replace('KIND', kind)
+                result = run(root, body)
+                self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
 
     def test_proxy_restore_refusals(self):
         cases = {
@@ -4243,6 +4451,43 @@ shift; parse_args "$@"; printf 'hash=%s\n' "$PASSWORD_HASH"
                 self.assertIn(b'hostname refused', denied.stderr)
                 self.assertNotIn(secret, denied.stdout + denied.stderr)
 
+    def test_endpoint_plan_preserves_malformed_duplicate_conflict_and_io_errors(self):
+        left = self.root / 'a' / 'awg0-client-phone.conf'
+        right = self.root / 'b' / left.name
+        for path in (left, right):
+            path.parent.mkdir()
+        healthy = b'[Peer]\nEndpoint = 203.0.113.7:51820\n'
+        malformed = healthy + b'# \xff\n'
+        left.write_bytes(healthy)
+        out = self.root / 'out'
+        out.mkdir()
+        regular = self.root / 'regular'
+        regular.write_bytes(b''.join(str(path).encode() + b'\0' for path in (left, right)))
+        symlinks = self.root / 'symlinks'
+        symlinks.write_bytes(b'')
+
+        def plan(ok=True):
+            return self.run_helper('endpoint-plan', regular, symlinks, out, 'rewrite',
+                                   'vpn.example.test', '203.0.113.9', ok=ok)
+
+        missing = plan(ok=False)
+        self.assertIn(b'client profile is not readable', missing.stderr)
+        self.assertEqual(list(out.iterdir()), [])
+
+        right.write_bytes(malformed)
+        self.assertEqual(json.loads(plan().stdout)['refused'], 'conflict')
+        self.assertEqual(list(out.iterdir()), [])
+
+        left.write_bytes(malformed + b'# different copy\n')
+        self.assertEqual(json.loads(plan().stdout)['refused'], 'conflict')
+        self.assertEqual(list(out.iterdir()), [])
+
+        left.write_bytes(malformed)
+        skipped = json.loads(plan().stdout)
+        self.assertIsNone(skipped['refused'])
+        self.assertEqual([row['status'] for row in skipped['files']], ['skipped', 'skipped'])
+        self.assertEqual(list(out.iterdir()), [])
+
     def test_endpoint_host_switch_command(self):
         # Search roots are mocked. The live /root and /home trees are not used.
         roots_fn = SOURCE.split('function awgStateClientConfigSearchRoots()', 1)[1].split('\nfunction ', 1)[0]
@@ -4291,9 +4536,15 @@ shift; parse_args "$@"; printf 'hash=%s\n' "$PASSWORD_HASH"
             b'\n### Client v6\n[Peer]\nPublicKey = ' + PEER.encode() + b'\n'
             b'\n### Client extra\n[Peer]\nPublicKey = ' + PEER.encode() + b'\n'
             b'\n### Client odd\n[Peer]\nPublicKey = ' + PEER.encode() + b'\n'
+            b'\n### Client nul\n[Peer]\nPublicKey = ' + PEER.encode() + b'\n'
         )
         (home / 'awg0-client-planted.conf').write_bytes(b'[Peer]\nEndpoint = 198.51.100.8:51820\n')
-        (clients / 'awg0-client-odd.conf').write_bytes(b'; Endpoint = 203.0.113.7:51820\n')
+        odd = clients / 'awg0-client-odd.conf'
+        odd_original = b'[Peer]\nEndpoint = 203.0.113.7:51820\n# \xff\n'
+        odd.write_bytes(odd_original)
+        nul = clients / 'awg0-client-nul.conf'
+        nul_original = b'[Peer]\nEndpoint = 203.0.113.7:51820\n# \0\n'
+        nul.write_bytes(nul_original)
         (tree / 'slash').mkdir()
         params = self.files['vpn/params'].replace(
             b"SERVER_PUB_IP='vpn.example.test'", b"SERVER_PUB_IP='203.0.113.9'")
@@ -4471,7 +4722,6 @@ awgStateEndpointCommand set vpn.example.test --dry-run >"$AWG_ENDPOINT_OUT" 2>"$
         self.assertNotIn(KEY.encode(), combined)
         collected = set((self.root / 'collected').read_text().splitlines())
         planted = home / 'awg0-client-planted.conf'
-        odd = clients / 'awg0-client-odd.conf'
         # collectAwgClientConfigCandidates is not filtered to managed names.
         # The audit and the switch are. planted has no marker; odd does not parse.
         self.assertEqual(collected, {
@@ -4480,11 +4730,13 @@ awgStateEndpointCommand set vpn.example.test --dry-run >"$AWG_ENDPOINT_OUT" 2>"$
             str(v6.resolve()),
             str(planted.resolve()),
             str(odd.resolve()),
+            str(nul.resolve()),
         })
         audit = json.loads((self.root / 'audit.json').read_text())
         self.assertEqual(audit['hostname'], 0)
         self.assertEqual(audit['ip_literal'], 3)
         self.assertEqual(audit['symlinks'], [])
+        self.assertEqual(audit['skipped'], sorted([str(odd), str(nul)]))
         by_name = {item['name']: item for item in audit['clients']}
         self.assertEqual(by_name['awg0-client-phone']['kind'], 'ip_literal')
         self.assertEqual(by_name['awg0-client-phone']['host'], '203.0.113.7')
@@ -4532,7 +4784,10 @@ awgStateEndpointCommand set vpn.example.test --dry-run >"$AWG_ENDPOINT_OUT" 2>"$
         self.assertEqual((home / 'awg0-client-planted.conf').read_bytes(), b'[Peer]\nEndpoint = 198.51.100.8:51820\n')
         self.assertNotIn('planted', (self.root / 'audit.json').read_text())
         self.assertNotIn('198.51.100.8', (self.root / 'audit.json').read_text())
-        self.assertEqual(odd.read_bytes(), b'; Endpoint = 203.0.113.7:51820\n')
+        for profile, original in ((odd, odd_original), (nul, nul_original)):
+            self.assertIn('skipped ' + str(profile) + '\n', dry)
+            self.assertIn('skipped ' + str(profile) + '\n', rerun)
+            self.assertEqual(profile.read_bytes(), original)
         self.assertNotIn('//', (self.root / 'symlink.err').read_text())
         self.assertFalse((self.root / 'work').exists())
 

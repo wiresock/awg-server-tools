@@ -4544,10 +4544,7 @@ def endpoint_audit(files):
     for name in sorted(files):
         if not (name.startswith('clients/') and name.endswith('.conf')):
             continue
-        try:
-            found = parse_profile(name, files[name])['parsed']
-        except StatePolicyError:
-            found = None
+        found = parse_profile(name, files[name])['parsed']
         if not found:
             skipped += 1
             continue
@@ -4604,7 +4601,8 @@ def read_nul_paths(path):
 
 
 def read_profile_bytes(path):
-    # O_NOFOLLOW refuses a symlink at the final component. Do not read the target.
+    # Profiles may be in user-writable directories. Check the actual open fd
+    # before reading, and do not let open block while holding the lifecycle lock.
     try:
         info = os.lstat(path)
     except OSError:
@@ -4616,16 +4614,22 @@ def read_profile_bytes(path):
     if info.st_size > 1024 * 1024:
         raise StatePolicyError('client profile is too large')
     try:
-        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         raise StatePolicyError('client profile is not readable') from None
     try:
-        data = os.read(handle, info.st_size + 1)
+        opened = os.fstat(handle)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_dev != info.st_dev or
+                opened.st_ino != info.st_ino):
+            raise StatePolicyError('client profile changed during endpoint planning; rerun')
+        if opened.st_size > 1024 * 1024:
+            raise StatePolicyError('client profile is too large')
+        data = os.read(handle, opened.st_size + 1)
+        if len(data) != opened.st_size:
+            raise StatePolicyError('could not read the complete client profile; rerun')
+        return data
     finally:
         os.close(handle)
-    if len(data) > 1024 * 1024:
-        raise StatePolicyError('client profile is too large')
-    return data
 
 
 def _line_core(line):
@@ -4637,17 +4641,17 @@ def _line_core(line):
 
 
 def parse_profile(path, data):
+    base = Path(path).name
+    record = dict(path=path, name=base[:-5] if base.endswith('.conf') else base, base=base,
+                  parsed=None)
     try:
         text = data.decode('utf-8')
     except UnicodeError:
-        raise StatePolicyError('client profile is not valid text') from None
+        return dict(record, malformed=data)
     if '\x00' in text:
-        raise StatePolicyError('client profile is not valid text')
+        return dict(record, malformed=data)
+    # Keep each original line ending so a rewrite changes only the Endpoint.
     lines = text.splitlines(keepends=True)
-    # splitlines drops a trailing break only when keepends is false. Rejoining
-    # these lines is the original text, so a rewrite can change one line.
-    if ''.join(lines) != text:
-        raise StatePolicyError('client profile is not valid text')
     peer = 0
     in_peer = False
     endpoints = {}
@@ -4676,11 +4680,14 @@ def parse_profile(path, data):
             parsed = endpoint_host(match.group('value').strip())
             if parsed is None:
                 match = None
-    return dict(path=path, name=Path(path).name[:-5] if path.endswith('.conf') else Path(path).name,
-                base=Path(path).name, lines=lines, endpoint_index=endpoint_index, parsed=parsed, match=match)
+    return dict(record, lines=lines, endpoint_index=endpoint_index, parsed=parsed, match=match)
 
 
 def comparable_profile(record):
+    # Malformed files are never rewritten, but copies still have to match. Use
+    # raw bytes so differing malformed copies, or valid vs. malformed, conflict.
+    if 'malformed' in record:
+        return record['malformed']
     # The Endpoint line itself may differ (host or port). Every other line must match.
     lines = record['lines']
     index = record['endpoint_index']
@@ -4807,6 +4814,7 @@ def endpoint_plan(regular_list, symlink_list, out_dir, action, hostname, current
             counts[kind] += 1
             key = (record['name'], host, kind)
             clients.setdefault(key, []).append(record['path'])
+            row['status'] = 'unchanged'
             if action == 'rewrite':
                 rewritten, old_line, new_line = rewrite_endpoint_line(record, hostname)
                 row['old_line'] = old_line
@@ -4817,8 +4825,6 @@ def endpoint_plan(regular_list, symlink_list, out_dir, action, hostname, current
                     write_private_exact(out_dir, str(number) + '.before', original)
                     row['status'] = 'update'
                     row['out'] = str(number)
-                else:
-                    row['status'] = 'unchanged'
         file_rows.append(row)
     client_rows = [dict(name=name, host=host, kind=kind, files=sorted(paths))
                    for (name, host, kind), paths in sorted(clients.items())]
@@ -6185,8 +6191,86 @@ sys.exit(1)
 AWG_PANEL_HEALTH
 }
 
+# Share a stable per-host lock with standalone panel/proxy installers.
+# Hold it from before ownership checks through the last service mutation.
+function awgStateLockCompanionInstallers() {
+	local DIR=/run/awg-companion-install
+	if [[ ! -e "${DIR}" ]]; then
+		mkdir -m 700 -- "${DIR}" 2>/dev/null || [[ -d "${DIR}" ]] || return 1
+	fi
+	[[ -d "${DIR}" && ! -L "${DIR}" && "$(stat -c '%u:%a' -- "${DIR}")" == 0:700 ]] || return 1
+	exec {AWG_COMPANION_INSTALL_LOCK_FD}<"${DIR}" || return 1
+	flock -xn "${AWG_COMPANION_INSTALL_LOCK_FD}" || {
+		echo 'ERROR: another panel/proxy installer or migration is running; rerun when it finishes.' >&2
+		return 1
+	}
+}
+
+# A retry may mutate only artifacts created in a previously locked attempt.
+# Include file identity and bytes for immutable artifacts, but only identity
+# for a published SQLite DB: a started panel may already have accepted writes.
+function awgStateCompanionFingerprint() { # <mutable-db-or-empty> <paths...>
+	local MUTABLE="$1" FILE ID HASH
+	shift
+	for FILE; do
+		if [[ ! -e "${FILE}" && ! -L "${FILE}" ]]; then
+			printf 'absent\n'
+			continue
+		fi
+		[[ -f "${FILE}" && ! -L "${FILE}" ]] || return 1
+		ID="$(stat -c '%d:%i:%u:%g:%a' -- "${FILE}")" || return 1
+		HASH=mutable
+		if [[ "${FILE}" != "${MUTABLE}" ]]; then
+			HASH="$(sha256sum <"${FILE}")" || return 1
+			HASH="${HASH%% *}"
+		fi
+		printf '%s %s\n' "${ID}" "${HASH}"
+	done
+}
+
+function awgStateCheckCompanionOwnership() { # <record> <mutable-db-or-empty> <paths...>
+	local RECORD="$1" CURRENT FILE
+	shift
+	if [[ ! -e "${RECORD}" && ! -L "${RECORD}" ]]; then
+		for FILE in "${@:2}"; do
+			[[ ! -e "${FILE}" && ! -L "${FILE}" ]] || return 1
+		done
+		return 0
+	fi
+	[[ -f "${RECORD}" && ! -L "${RECORD}" ]] || return 1
+	CURRENT="$(awgStateCompanionFingerprint "$@")" || return 1
+	[[ "$(<"${RECORD}")" == "${CURRENT}" ]]
+}
+
+function awgStateSaveCompanionOwnership() { # <record> <mutable-db-or-empty> <paths...>
+	local RECORD="$1" TMP
+	shift
+	TMP="$(mktemp -- "${RECORD%/*}/.ownership.XXXXXXXX")" || return 1
+	if ! awgStateCompanionFingerprint "$@" >"${TMP}" ||
+		! mv -fT -- "${TMP}" "${RECORD}"; then
+		rm -f -- "${TMP}"
+		echo 'ERROR: cannot record companion ownership; the installer will not mutate unverified artifacts on retry.' >&2
+		return 1
+	fi
+}
+
+# The effective unit can come from outside /etc (or be transient). A
+# different loaded fragment or an unexplained active unit is not ours.
+function awgStateCheckCompanionUnit() { # <service> <expected-fragment>
+	local FRAGMENT ACTIVE
+	FRAGMENT="$(systemctl show --property=FragmentPath --value "$1")" || return 1
+	[[ -z "${FRAGMENT}" || "${FRAGMENT}" == "$2" ]] || return 1
+	if [[ ! -e "$2" ]]; then
+		ACTIVE="$(systemctl show --property=ActiveState --value "$1")" || return 1
+		case "${ACTIVE}" in inactive|failed) ;; *) return 1 ;; esac
+	fi
+}
+
 function awgStatePanelFail() { # <journal> <message>
-	systemctl stop "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
+	if [[ "${3:-}" == --stop ]]; then
+		systemctl stop "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
+		systemctl disable "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
+	fi
 	awgStateJournalStep "$1" panel-restore-failed
 	echo "ERROR: panel restore failed: $2" >&2
 	echo 'The finalized VPN is unaffected and keeps running. Fix the cause, then rerun --activate-state <same-archive> --enable-at-boot to retry only the unfinished steps.' >&2
@@ -6194,8 +6278,9 @@ function awgStatePanelFail() { # <journal> <message>
 	return 1
 }
 
-function awgStateRestorePanel() { # <stage> <journal> <work>
-	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER MIGRATIONS DB DATA_DIR SIDECAR APPROVED=""
+function awgStateRestorePanel() ( # <stage> <journal> <work>
+	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER MIGRATIONS DB DATA_DIR SIDECAR APPROVED="" MUTABLE="" AWG_COMPANION_INSTALL_LOCK_FD
+	local RECORD="$2/panel-ownership"
 	local CLIENTS="${AMNEZIAWG_DIR}/clients"
 	local -a FIELDS=() ARGS=()
 	[[ -f "${STAGE}/web/database.sqlite" ]] || return 0
@@ -6207,9 +6292,14 @@ function awgStateRestorePanel() { # <stage> <journal> <work>
 		echo 'ERROR: the archive contains panel data but amneziawg-web/scripts/amneziawg-web-install.sh was not found next to this script. Run from a repository checkout to restore the panel; the VPN is unaffected.' >&2
 		return 1
 	}
-	if [[ ! -e "${JOURNAL}/panel-installing" ]] &&
-		[[ -e "${WEB_PANEL_ENV_FILE}" || -e "${WEB_PANEL_SYSTEMD_UNIT}" ]]; then
+	awgStateLockCompanionInstallers || return 1
+	if ! awgStateCheckCompanionOwnership "${RECORD}" "" "${WEB_PANEL_ENV_FILE}" "${WEB_PANEL_SYSTEMD_UNIT}" &&
+		[[ ! -e "${RECORD}" && ! -L "${RECORD}" ]]; then
 		echo "ERROR: a panel is already installed on this host (${WEB_PANEL_ENV_FILE} or ${WEB_PANEL_SYSTEMD_UNIT} exists); not overwriting it with the archived panel. The VPN is unaffected." >&2
+		return 1
+	fi
+	if ! awgStateCheckCompanionUnit "${AWG_STATE_PANEL_UNIT}" "${WEB_PANEL_SYSTEMD_UNIT}"; then
+		echo 'ERROR: cannot establish ownership of the effective panel unit; not changing it.' >&2
 		return 1
 	fi
 	MIGRATIONS="${INSTALLER%/scripts/*}/migrations"
@@ -6232,6 +6322,12 @@ function awgStateRestorePanel() { # <stage> <journal> <work>
 	[[ ${#FIELDS[@]} -eq 2 ]] || { awgStatePanelFail "${JOURNAL}" 'internal panel prepare error.'; return 1; }
 	DB="${FIELDS[1]}"
 	DATA_DIR="${DB%/*}"
+	local -a ARTIFACTS=("${WEB_PANEL_ENV_FILE}" "${WEB_PANEL_SYSTEMD_UNIT}" "${DB}")
+	[[ ! -f "${JOURNAL}/panel-data-installed" ]] || MUTABLE="${DB}"
+	if ! awgStateCheckCompanionOwnership "${RECORD}" "${MUTABLE}" "${ARTIFACTS[@]}"; then
+		echo 'ERROR: existing panel artifacts do not match this migration; not stopping or overwriting the panel.' >&2
+		return 1
+	fi
 	if [[ -L "${JOURNAL}/panel-approved-dir" ]]; then
 		awgStatePanelFail "${JOURNAL}" 'unsafe panel path record in the journal.'
 		return 1
@@ -6251,7 +6347,10 @@ function awgStateRestorePanel() { # <stage> <journal> <work>
 			{ echo 'ERROR: installed panel files or retry marker are missing or unsafe; not restoring over them.' >&2; return 1; }
 	else
 		# Retry: never run the installer against a running half-restored panel.
-		systemctl stop "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
+		if [[ -e "${WEB_PANEL_SYSTEMD_UNIT}" ]] && ! systemctl stop "${AWG_STATE_PANEL_UNIT}"; then
+			awgStatePanelFail "${JOURNAL}" 'could not stop the migration-owned panel.'
+			return 1
+		fi
 		# The archived env is installed first, so the panel installer keeps it
 		# (it never overwrites an existing env file without --force).
 		if ! install -d -m 700 -o root -g root -- "${WEB_PANEL_ENV_FILE%/*}" ||
@@ -6263,8 +6362,12 @@ function awgStateRestorePanel() { # <stage> <journal> <work>
 			--env-file "${WEB_PANEL_ENV_FILE}" --config-dir "${CLIENTS}" --no-start --no-enable)
 		[[ -z "${AWG_STATE_PANEL_BINARY:-}" ]] || ARGS+=(--binary-src "${AWG_STATE_PANEL_BINARY}")
 		awgStateJournalStep "${JOURNAL}" panel-install
-		bash "${INSTALLER}" "${ARGS[@]}" </dev/null ||
-			{ awgStatePanelFail "${JOURNAL}" "${INSTALLER} --non-interactive failed."; return 1; }
+		if ! AWG_COMPANION_INSTALL_LOCK_FD="${AWG_COMPANION_INSTALL_LOCK_FD}" bash "${INSTALLER}" "${ARGS[@]}" </dev/null; then
+			awgStateSaveCompanionOwnership "${RECORD}" "" "${ARTIFACTS[@]}" || return 1
+			awgStatePanelFail "${JOURNAL}" "${INSTALLER} --non-interactive failed."
+			return 1
+		fi
+		awgStateSaveCompanionOwnership "${RECORD}" "" "${ARTIFACTS[@]}" || return 1
 		for SIDECAR in -wal -shm -journal; do
 			rm -f -- "${DB}${SIDECAR}" || { awgStatePanelFail "${JOURNAL}" "cannot remove stale ${DB}${SIDECAR}."; return 1; }
 		done
@@ -6274,23 +6377,24 @@ function awgStateRestorePanel() { # <stage> <journal> <work>
 			awgStatePanelFail "${JOURNAL}" "cannot install the panel database at ${DB}."
 			return 1
 		fi
+		awgStateSaveCompanionOwnership "${RECORD}" "${DB}" "${ARTIFACTS[@]}" || return 1
 		: >"${JOURNAL}/panel-data-installed" || { echo 'ERROR: cannot record installed panel data; not starting the panel.' >&2; return 1; }
 		awgStateJournalStep "${JOURNAL}" panel-database-installed
 	fi
 	systemctl start "${AWG_STATE_PANEL_UNIT}" ||
-		{ awgStatePanelFail "${JOURNAL}" "${AWG_STATE_PANEL_UNIT} did not start."; return 1; }
+		{ awgStatePanelFail "${JOURNAL}" "${AWG_STATE_PANEL_UNIT} did not start." --stop; return 1; }
 	awgStatePanelHealthy "${WEB_PANEL_ENV_FILE}" ||
-		{ awgStatePanelFail "${JOURNAL}" "${AWG_STATE_PANEL_UNIT} did not become healthy (/api/health); a schema newer than this panel or a migration error is reported in its log."; return 1; }
+		{ awgStatePanelFail "${JOURNAL}" "${AWG_STATE_PANEL_UNIT} did not become healthy (/api/health); a schema newer than this panel or a migration error is reported in its log." --stop; return 1; }
 	systemctl enable "${AWG_STATE_PANEL_UNIT}" ||
-		{ awgStatePanelFail "${JOURNAL}" "cannot enable ${AWG_STATE_PANEL_UNIT} at boot."; return 1; }
+		{ awgStatePanelFail "${JOURNAL}" "cannot enable ${AWG_STATE_PANEL_UNIT} at boot." --stop; return 1; }
 	: >"${JOURNAL}/panel-restored" || {
 		echo 'ERROR: cannot record panel restoration; retained the retry state.' >&2
 		return 1
 	}
-	rm -f -- "${JOURNAL}/panel-installing" "${JOURNAL}/panel-data-installed" || true
+	rm -f -- "${JOURNAL}/panel-installing" "${JOURNAL}/panel-data-installed" "${RECORD}" || true
 	awgStateJournalStep "${JOURNAL}" panel-restored
 	echo "Panel restored and healthy (${AWG_STATE_PANEL_UNIT}, DB ${DB}); it now enforces peer expiries. Queued mail from the old host was cancelled, not replayed."
-}
+)
 
 # ── amneziawg-proxy restore ──────────────────────────────────────────────────
 # After the panel step. Reuses amneziawg-proxy-install.sh --non-interactive with
@@ -6332,7 +6436,10 @@ function awgStateProxyHealthy() { # <udp port>
 }
 
 function awgStateProxyFail() { # <journal> <message>
-	systemctl stop "${AWG_STATE_PROXY_SERVICE}" >/dev/null 2>&1 || true
+	if [[ "${3:-}" == --stop ]]; then
+		systemctl stop "${AWG_STATE_PROXY_SERVICE}" >/dev/null 2>&1 || true
+		systemctl disable "${AWG_STATE_PROXY_SERVICE}" >/dev/null 2>&1 || true
+	fi
 	awgStateJournalStep "$1" proxy-restore-failed
 	echo "ERROR: proxy restore failed: $2" >&2
 	echo 'The finalized VPN and the panel are unaffected, but clients that connect through the proxy port cannot reach the VPN until it runs. Fix the cause, then rerun --activate-state <same-archive> --enable-at-boot to retry only the unfinished steps.' >&2
@@ -6340,8 +6447,9 @@ function awgStateProxyFail() { # <journal> <message>
 	return 1
 }
 
-function awgStateRestoreProxy() { # <stage> <journal> <work>
-	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER CONFIG CONFIG_DIR DATA_DIR INSTALL_DIR PORT APPROVED=""
+function awgStateRestoreProxy() ( # <stage> <journal> <work>
+	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER CONFIG CONFIG_DIR DATA_DIR INSTALL_DIR PORT APPROVED="" AWG_COMPANION_INSTALL_LOCK_FD
+	local RECORD="$2/proxy-ownership"
 	local -a FIELDS=() ARGS=()
 	[[ -f "${STAGE}/proxy/proxy.toml" ]] || return 0
 	if [[ -f "${JOURNAL}/proxy-restored" && ! -L "${JOURNAL}/proxy-restored" ]]; then
@@ -6352,6 +6460,7 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 		echo 'ERROR: the archive contains an amneziawg-proxy config but amneziawg-proxy/scripts/amneziawg-proxy-install.sh was not found next to this script. Run from a repository checkout to restore the proxy.' >&2
 		return 1
 	}
+	awgStateLockCompanionInstallers || return 1
 	rm -rf -- "${WORK}/proxy" "${WORK}/proxy.fields"
 	if [[ -L "${JOURNAL}/proxy-approved-dirs" ]]; then
 		echo 'ERROR: unsafe proxy path record in the journal.' >&2
@@ -6380,9 +6489,13 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 	fi
 	CONFIG="${FIELDS[0]}" DATA_DIR="${FIELDS[1]}" INSTALL_DIR="${FIELDS[2]}" PORT="${FIELDS[3]}"
 	CONFIG_DIR="${CONFIG%/*}"
-	if [[ ! -e "${JOURNAL}/proxy-installing" ]] &&
-		[[ -e "${CONFIG}" || -e "${AWG_STATE_PROXY_UNIT}" ]]; then
-		echo "ERROR: an amneziawg-proxy is already installed on this host (${CONFIG} or ${AWG_STATE_PROXY_UNIT} exists); not overwriting it. The VPN and panel are unaffected." >&2
+	local -a ARTIFACTS=("${CONFIG}" "${AWG_STATE_PROXY_UNIT}")
+	if ! awgStateCheckCompanionOwnership "${RECORD}" "" "${ARTIFACTS[@]}"; then
+		echo "ERROR: an amneziawg-proxy is already installed or its artifacts changed (${CONFIG} or ${AWG_STATE_PROXY_UNIT}); not overwriting it. The VPN and panel are unaffected." >&2
+		return 1
+	fi
+	if ! awgStateCheckCompanionUnit "${AWG_STATE_PROXY_SERVICE}" "${AWG_STATE_PROXY_UNIT}"; then
+		echo 'ERROR: cannot establish ownership of the effective proxy unit; not changing it.' >&2
 		return 1
 	fi
 	: >"${JOURNAL}/proxy-installing" || { echo 'ERROR: cannot write the proxy journal marker.' >&2; return 1; }
@@ -6405,7 +6518,10 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 			-f "${CONFIG}" && ! -L "${CONFIG}" ]] ||
 			{ echo 'ERROR: installed proxy config or retry marker is missing or unsafe; not restoring over it.' >&2; return 1; }
 	else
-		systemctl stop "${AWG_STATE_PROXY_SERVICE}" >/dev/null 2>&1 || true
+		if [[ -e "${AWG_STATE_PROXY_UNIT}" ]] && ! systemctl stop "${AWG_STATE_PROXY_SERVICE}"; then
+			awgStateProxyFail "${JOURNAL}" 'could not stop the migration-owned proxy.'
+			return 1
+		fi
 		# A retry starts from a clean generated config (the installer keeps an
 		# existing one without --force and would then skip unit installation).
 		if [[ -f "${CONFIG}" ]]; then
@@ -6415,29 +6531,34 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 			--install-dir "${INSTALL_DIR}" --awg-dir "${AMNEZIAWG_DIR}" --no-start --no-enable)
 		[[ -z "${AWG_STATE_PROXY_BINARY:-}" ]] || ARGS+=(--binary-src "${AWG_STATE_PROXY_BINARY}")
 		awgStateJournalStep "${JOURNAL}" proxy-install
-		bash "${INSTALLER}" "${ARGS[@]}" </dev/null ||
-			{ awgStateProxyFail "${JOURNAL}" "${INSTALLER} --non-interactive failed."; return 1; }
+		if ! AWG_COMPANION_INSTALL_LOCK_FD="${AWG_COMPANION_INSTALL_LOCK_FD}" bash "${INSTALLER}" "${ARGS[@]}" </dev/null; then
+			awgStateSaveCompanionOwnership "${RECORD}" "" "${ARTIFACTS[@]}" || return 1
+			awgStateProxyFail "${JOURNAL}" "${INSTALLER} --non-interactive failed."
+			return 1
+		fi
+		awgStateSaveCompanionOwnership "${RECORD}" "" "${ARTIFACTS[@]}" || return 1
 		if ! install -m 600 -o root -g root -- "${WORK}/proxy/proxy.toml" "${CONFIG}"; then
 			awgStateProxyFail "${JOURNAL}" "cannot install ${CONFIG}."
 			return 1
 		fi
+		awgStateSaveCompanionOwnership "${RECORD}" "" "${ARTIFACTS[@]}" || return 1
 		: >"${JOURNAL}/proxy-data-installed" || { echo 'ERROR: cannot record installed proxy config; not starting the proxy.' >&2; return 1; }
 		awgStateJournalStep "${JOURNAL}" proxy-config-installed
 	fi
 	systemctl start "${AWG_STATE_PROXY_SERVICE}" ||
-		{ awgStateProxyFail "${JOURNAL}" "${AWG_STATE_PROXY_SERVICE} did not start."; return 1; }
+		{ awgStateProxyFail "${JOURNAL}" "${AWG_STATE_PROXY_SERVICE} did not start." --stop; return 1; }
 	awgStateProxyHealthy "${PORT}" ||
-		{ awgStateProxyFail "${JOURNAL}" "${AWG_STATE_PROXY_SERVICE} did not stay active/listen on UDP ${PORT}."; return 1; }
+		{ awgStateProxyFail "${JOURNAL}" "${AWG_STATE_PROXY_SERVICE} did not stay active/listen on UDP ${PORT}." --stop; return 1; }
 	systemctl enable "${AWG_STATE_PROXY_SERVICE}" ||
-		{ awgStateProxyFail "${JOURNAL}" "cannot enable ${AWG_STATE_PROXY_SERVICE} at boot."; return 1; }
+		{ awgStateProxyFail "${JOURNAL}" "cannot enable ${AWG_STATE_PROXY_SERVICE} at boot." --stop; return 1; }
 	: >"${JOURNAL}/proxy-restored" || {
 		echo 'ERROR: cannot record proxy restoration; retained the retry state.' >&2
 		return 1
 	}
-	rm -f -- "${JOURNAL}/proxy-installing" "${JOURNAL}/proxy-data-installed" || true
+	rm -f -- "${JOURNAL}/proxy-installing" "${JOURNAL}/proxy-data-installed" "${RECORD}" || true
 	awgStateJournalStep "${JOURNAL}" proxy-restored
 	echo "Proxy restored (${AWG_STATE_PROXY_SERVICE}, UDP ${PORT}, config ${CONFIG})."
-}
+)
 
 # Companion steps run after the VPN lifecycle lock is released (the panel
 # installer and the panel itself take that lock). A separate non-blocking
@@ -6554,30 +6675,43 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 	shopt -s nullglob dotglob
 	for ENTRY in "${JOURNAL}/"*; do
 		case "${ENTRY##*/}" in
-			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete|activation-rollback-incomplete|panel-installing|panel-data-installed|panel-restored|panel-approved-dir|proxy-installing|proxy-data-installed|proxy-restored|proxy-approved-dirs|companions.lock) ;;
+			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete|activation-rollback-incomplete|panel-installing|panel-data-installed|panel-restored|panel-approved-dir|panel-ownership|proxy-installing|proxy-data-installed|proxy-restored|proxy-approved-dirs|proxy-ownership|companions.lock|.ownership.????????) ;;
 			*) echo 'ERROR: unexpected journal entry; refusing purge.' >&2; exit 1 ;;
 		esac
 	done
 	local -a PRUNE=(before before.new before.old recovery receipt nic steps rollback-incomplete activation-rollback-incomplete companions.lock)
 	if (( ! FINALIZED )) || [[ "${OPTION}" == --reset-finalized ]]; then
-		PRUNE+=(panel-installing panel-data-installed panel-approved-dir proxy-installing proxy-data-installed proxy-approved-dirs)
+		PRUNE+=(panel-installing panel-data-installed panel-approved-dir panel-ownership proxy-installing proxy-data-installed proxy-approved-dirs proxy-ownership)
 	else
-		[[ ! -f "${JOURNAL}/panel-restored" ]] || PRUNE+=(panel-installing panel-data-installed panel-approved-dir)
-		[[ ! -f "${JOURNAL}/proxy-restored" ]] || PRUNE+=(proxy-installing proxy-data-installed proxy-approved-dirs)
+		[[ ! -f "${JOURNAL}/panel-restored" ]] || PRUNE+=(panel-installing panel-data-installed panel-approved-dir panel-ownership)
+		[[ ! -f "${JOURNAL}/proxy-restored" ]] || PRUNE+=(proxy-installing proxy-data-installed proxy-approved-dirs proxy-ownership)
 	fi
+	for ENTRY in "${JOURNAL}"/.ownership.????????; do
+		rm -f -- "${ENTRY}" || exit 1
+	done
 	for ENTRY in "${PRUNE[@]}"; do
 		rm -rf --one-file-system -- "${JOURNAL:?}/${ENTRY:?}" || exit 1
 	done
 	if (( FINALIZED )) && [[ "${OPTION}" != --reset-finalized ]]; then
 		echo 'Purged rollback/receipt material (and any legacy plaintext recovery copies); retained the non-secret finalization and companion recovery state.'
+	elif [[ "${OPTION}" == --reset-finalized ]]; then
+		# Keep the interface marker until all other fallible removals finish.
+		# It lets the same reset recheck service state after a partial cleanup.
+		rm -f -- "${JOURNAL}/panel-restored" "${JOURNAL}/proxy-restored" || exit 1
+		if ! awgStateDropIdentityTombstones "${DIGEST}"; then
+			echo 'ERROR: could not remove the server-identity tombstone. The finalized marker was retained; fix the removal error and rerun the same reset.' >&2
+			exit 1
+		fi
+		rm -f -- "${JOURNAL}/finalized" || exit 1
+		# The reset is committed. Fresh import reuses an empty journal directory,
+		# so a failed rmdir cannot turn this into a non-retryable failure.
+		if ! rmdir -- "${JOURNAL}"; then
+			echo 'WARNING: journal directory cleanup failed after reset. The finalized marker has been removed.' >&2
+		fi
+		echo 'Finalized journal reset after uninstall. Fresh import may proceed through normal preflight and current-clock policy checks.'
 	else
 		rm -f -- "${JOURNAL}/finalized" "${JOURNAL}/panel-restored" "${JOURNAL}/proxy-restored" && rmdir -- "${JOURNAL}" || exit 1
-		if [[ "${OPTION}" == --reset-finalized ]]; then
-			awgStateDropIdentityTombstones "${DIGEST}" || exit 1
-			echo 'Finalized journal reset after uninstall. Fresh import may proceed through normal preflight and current-clock policy checks.'
-		else
-			echo 'Purged unfinalized journal by explicit force; this archive can no longer reconcile/activate that import.'
-		fi
+		echo 'Purged unfinalized journal by explicit force; this archive can no longer reconcile/activate that import.'
 	fi
 	echo 'Deletion is not secure erasure; old disk/swap/backup copies may remain.'
 )

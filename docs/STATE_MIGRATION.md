@@ -333,7 +333,8 @@ Flow: after `--activate-state <archive> --enable-at-boot` has finalized the VPN
    `cargo`), then install the DB as `awg-web` 0600 (stale `-wal/-shm/-journal`
    removed), start `amneziawg-web`, wait up to 30 s for `/api/health` on
    `AWG_WEB_LISTEN` (+`AWG_WEB_BASE_PATH`), and only then enable it at boot.
-4. Journal: `panel-installing` tracks ownership, `panel-data-installed`
+4. Journal: `panel-installing` logs intent; `panel-ownership` records verified
+   artifact identities from a locked attempt. `panel-data-installed`
    prevents retries from replacing the database after it has been installed,
    and `panel-restored` marks completion. The VPN stays finalized on a
    companion failure. If startup or enablement fails, the panel is stopped
@@ -424,7 +425,8 @@ After the panel step (independently of its outcome), when the archive has
 3. Install the archived `proxy.toml` verbatim (root 0600) except `awg_config`,
    which points to the restored server config; start the service; require it
    to stay active and listen on its UDP port; then enable it at boot.
-4. Journal `proxy-installing` tracks ownership, `proxy-data-installed`
+4. Journal `proxy-installing` logs intent; `proxy-ownership` records verified
+   artifact identities from a locked attempt. `proxy-data-installed`
    avoids replacing the installed config on retry, and `proxy-restored`
    marks completion. If startup or enablement fails, the proxy is stopped
    and disabled. If only the completion marker cannot be written, a healthy
@@ -432,7 +434,18 @@ After the panel step (independently of its outcome), when the archive has
    and panel are unaffected. Ordinary journal purge keeps the ownership and
    retry records of unfinished companion steps.
 
-Companion lock: the panel and proxy steps run after the VPN lifecycle lock is
+An intent marker alone never authorizes stopping or replacing an existing
+installation. A retry refuses if artifacts are not verified as belonging to its
+own attempt. In particular, a hard interruption before recording an installer
+result may require manual inspection and removal of incomplete companion
+artifacts (never remove an independent installation just to retry).
+
+Companion lock: restore and standalone companion installers in this checkout
+share a host lock covering the ownership checks and install/start steps.
+Do not run standalone upgrade/uninstall scripts, older installer versions, or
+manual service edits concurrently with companion restore: they do not take
+this lock. The
+panel and proxy steps run after the VPN lifecycle lock is
 released (the panel installer and the panel take it themselves). Before that
 release, activation takes a separate non-blocking flock on the journal
 directory itself. Purge and reset take the same lock, so deleting a leftover
@@ -715,6 +728,10 @@ Unicode bidi controls cannot disguise the diagnostic.
 Unknown service state, remaining installation files, unsafe paths or unexpected
 journal entries fail closed. It never uninstalls/stops a service or overwrites a
 live installation; normal fresh-import preflight still applies afterward.
+Reset removes the matching server-identity tombstone before the finalized marker.
+If earlier cleanup fails or is interrupted, rerun the same reset; the retained
+marker lets it check every precondition again. Once the marker is removed, an
+empty journal directory left by failed cleanup does not block a fresh import.
 No archive/passphrase or age/python/sqlite dependency is needed for reset.
 
 **Warning:** this is explicit old-snapshot replay, not a continuation of the
@@ -799,9 +816,11 @@ profile whose Endpoint line cannot be parsed. It does not write.
 The apply updates every regular managed profile from that search with an
 unambiguous, usable Endpoint. Section and option names are case-insensitive.
 If the same peer sets Endpoint more than once, only the last assignment
-changes. Profiles with no usable Endpoint or with endpoints in multiple peer
-sections are listed as `skipped` with their paths and left unchanged; review
-them before moving the server. Only the effective host (`host:port` or
+changes. Profiles with no usable Endpoint, including malformed text and
+profiles with endpoints in multiple peer sections, are listed as `skipped`
+with their paths and left unchanged; review them before moving the server.
+If the tool cannot read a discovered profile, it stops instead of skipping it.
+Only the effective host (`host:port` or
 `[ipv6]:port`) changes. The port, the
 line ending and every other byte stay, including keys, preshared keys,
 `AllowedIPs`, MTU and obfuscation fields. `SERVER_PUB_IP` in params is set to

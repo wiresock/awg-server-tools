@@ -2322,8 +2322,30 @@ print_summary() {
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+# Keep in sync with awgStateLockCompanionInstallers in amneziawg-install.sh.
+# A migration passes the inherited descriptor for the same locked directory.
+lock_companion_installers() {
+    local dir=/run/awg-companion-install
+    if [[ ! -e "${dir}" ]]; then
+        mkdir -m 700 -- "${dir}" 2>/dev/null || [[ -d "${dir}" ]] || die "Cannot create companion installer lock."
+    fi
+    [[ -d "${dir}" && ! -L "${dir}" && "$(stat -c '%u:%a' -- "${dir}")" == 0:700 ]] ||
+        die "Unsafe companion installer lock directory."
+    if [[ "${AWG_COMPANION_INSTALL_LOCK_FD:-}" =~ ^[0-9]+$ ]] &&
+        [[ "${dir}" -ef "/proc/self/fd/${AWG_COMPANION_INSTALL_LOCK_FD}" ]]; then
+        flock -xn "${AWG_COMPANION_INSTALL_LOCK_FD}" || die "Cannot use the inherited companion installer lock."
+    else
+        exec {AWG_COMPANION_INSTALL_LOCK_FD}<"${dir}" || die "Cannot open companion installer lock."
+        flock -xn "${AWG_COMPANION_INSTALL_LOCK_FD}" ||
+            die "Another panel/proxy installer or migration is running; retry when it finishes."
+    fi
+}
+
 main() {
     parse_args "$@"
+    if [[ "${EUID}" == 0 ]]; then
+        lock_companion_installers
+    fi
     preflight_checks
     detect_awg_config_dir
 
