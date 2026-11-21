@@ -29,6 +29,8 @@
 //! | [`EVT_LOGOUT`]        | `"logout"`        | POST /logout |
 //! | [`EVT_AWG_PROTOCOL_CHANGED`] | `"awg_protocol_changed"` | a confirmed protocol migration succeeded |
 //! | [`EVT_AWG_PROTOCOL_CHANGE_FAILED`] | `"awg_protocol_change_failed"` | a confirmed protocol migration failed; detail holds the sanitized installer output |
+//! | [`EVT_STATE_EXPORTED`] | `"state.exported"` | an encrypted state archive was streamed to the admin |
+//! | [`EVT_STATE_EXPORT_FAILED`] | `"state.export_failed"` | an export attempt failed; detail is a reason code, never a passphrase |
 //!
 //! # Fire-and-forget logging
 //!
@@ -74,6 +76,11 @@ pub const EVT_AWG_PROTOCOL_CHANGED: &str = "awg_protocol_changed";
 pub const EVT_AWG_PROTOCOL_CHANGE_FAILED: &str = "awg_protocol_change_failed";
 /// Successful application, including an idempotent reapplication of settings.
 pub const EVT_IMITATION_APPLIED: &str = "imitation_applied";
+/// An encrypted state archive was produced and streamed to the administrator.
+pub const EVT_STATE_EXPORTED: &str = "state.exported";
+/// An export attempt failed. `detail` is `{"reason":"<code>"}` and never contains
+/// the archive passphrase or the admin password.
+pub const EVT_STATE_EXPORT_FAILED: &str = "state.export_failed";
 
 /// Maximum number of events that can be returned in a single [`list_events`] call.
 pub const MAX_EVENTS_LIMIT: i64 = 200;

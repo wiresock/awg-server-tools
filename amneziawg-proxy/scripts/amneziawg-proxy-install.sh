@@ -102,6 +102,7 @@ AWG_DIR="${DEFAULT_AWG_DIR}"
 FORCE=false
 ENABLE_SERVICE=true
 START_SERVICE=true
+REQUIRE_EXISTING_AWG_PORT=false
 
 # Proxy network settings
 LISTEN_HOST="${DEFAULT_LISTEN_HOST}"
@@ -173,6 +174,7 @@ Paths:
   --config-file FILE        Path for the generated proxy.toml (default: ${DEFAULT_CONFIG_FILE})
   --data-dir DIR            Working directory for the service (default: ${DEFAULT_DATA_DIR})
   --awg-dir DIR             AmneziaWG config directory (default: ${DEFAULT_AWG_DIR})
+  --require-existing-awg-port  Require matching AWG port; never edit or restart AWG
   --no-enable               Do not enable the systemd service at boot
   --no-start                Do not start the systemd service immediately
   --force                   Overwrite existing config without prompting
@@ -276,6 +278,8 @@ parse_args() {
             --quic-domain)
                 [[ $# -ge 2 ]] || { error "Missing value for option: $1"; usage; exit 1; }
                 QUIC_DOMAIN="$2"; shift 2 ;;
+            --require-existing-awg-port)
+                REQUIRE_EXISTING_AWG_PORT=true; shift ;;
             --no-enable)
                 ENABLE_SERVICE=false; shift ;;
             --no-start)
@@ -1592,6 +1596,19 @@ TOMLEOF
 
 # ── Reconfigure AmneziaWG to listen on loopback ───────────────────────────────
 
+require_existing_awg_listen_port() {
+    local configured
+    [[ -n "${AWG_CONF_FILE}" && -f "${AWG_CONF_FILE}" ]] ||
+        die 'AWG config not found; refusing proxy restore.'
+    configured="$(awk -F= '
+        tolower($1) ~ /^[[:space:]]*listenport[[:space:]]*$/ {
+            v=$2; sub(/^[[:space:]]*/, "", v); sub(/[[:space:]#;].*$/, "", v); print v
+        }
+    ' "${AWG_CONF_FILE}")" || die 'Could not read configured AWG listen port.'
+    [[ "${configured}" == "${BACKEND_PORT}" ]] ||
+        die 'Current AWG port does not match the proxy backend; no AWG changes made.'
+}
+
 reconfigure_awg_listen_port() {
     step "Reconfiguring AmneziaWG listen port"
 
@@ -1921,8 +1938,30 @@ print_summary() {
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+# Keep in sync with awgStateLockCompanionInstallers in amneziawg-install.sh.
+# A migration passes the inherited descriptor for the same locked directory.
+lock_companion_installers() {
+    local dir=/run/awg-companion-install
+    if [[ ! -e "${dir}" ]]; then
+        mkdir -m 700 -- "${dir}" 2>/dev/null || [[ -d "${dir}" ]] || die "Cannot create companion installer lock."
+    fi
+    [[ -d "${dir}" && ! -L "${dir}" && "$(stat -c '%u:%a' -- "${dir}")" == 0:700 ]] ||
+        die "Unsafe companion installer lock directory."
+    if [[ "${AWG_COMPANION_INSTALL_LOCK_FD:-}" =~ ^[0-9]+$ ]] &&
+        [[ "${dir}" -ef "/proc/self/fd/${AWG_COMPANION_INSTALL_LOCK_FD}" ]]; then
+        flock -xn "${AWG_COMPANION_INSTALL_LOCK_FD}" || die "Cannot use the inherited companion installer lock."
+    else
+        exec {AWG_COMPANION_INSTALL_LOCK_FD}<"${dir}" || die "Cannot open companion installer lock."
+        flock -xn "${AWG_COMPANION_INSTALL_LOCK_FD}" ||
+            die "Another panel/proxy installer or migration is running; retry when it finishes."
+    fi
+}
+
 main() {
     parse_args "$@"
+    if [[ "${EUID}" == 0 ]]; then
+        lock_companion_installers
+    fi
 
     # Normalize directory-style flags to strip trailing/duplicate slashes so
     # that path comparisons and the generated unit file are slash-insensitive.
@@ -1968,6 +2007,9 @@ main() {
 
     # Cross-field validation (protocol constraints) applies to both modes.
     validate_config
+    if [[ "${REQUIRE_EXISTING_AWG_PORT}" == true ]]; then
+        require_existing_awg_listen_port
+    fi
 
     setup_filesystem
     install_binary
@@ -2046,7 +2088,9 @@ Re-run with --force to update the unit, or pass matching path flags."
         fi
     fi
 
-    reconfigure_awg_listen_port
+    if [[ "${REQUIRE_EXISTING_AWG_PORT}" != true ]]; then
+        reconfigure_awg_listen_port
+    fi
     install_service_unit
     print_summary
 }

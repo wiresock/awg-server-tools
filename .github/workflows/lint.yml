@@ -42,6 +42,7 @@ jobs:
           bash -n tests/test-web-protocol-options.sh
           bash -n tests/test-web-protocol-diagnostics.sh
           bash -n tests/test-web-protocol-private-output.sh
+          bash -n tests/test-web-state-export.sh
           bash -n tests/test-boringtun-artifact.sh
           bash -n tests/test-boringtun-release.sh
           bash -n tests/test-boringtun-foreground-launcher.sh
@@ -53,6 +54,7 @@ jobs:
           bash -n tests/test-boringtun-lifecycle.sh
           bash -n tests/test-boringtun-install-mock.sh
           bash -n tests/test-boringtun-host-live.sh
+          bash -n tests/test-state-migration-live.sh
           bash -n tests/test-boringtun-sip-wire-live.sh
           bash -n tests/test-boringtun-auto-collision-live.sh
           bash -n tests/test-boringtun-imitation-wire.sh
@@ -100,6 +102,7 @@ jobs:
         run: |
           bash tests/test-web-protocol-diagnostics.sh
           bash tests/test-web-protocol-private-output.sh
+          bash tests/test-web-state-export.sh
 
       - name: BoringTun read-only helper regression
         run: bash tests/test-boringtun-managed-files.sh
@@ -139,6 +142,7 @@ jobs:
           shellcheck --severity=warning tests/test-web-protocol-options.sh
           shellcheck --severity=warning tests/test-web-protocol-diagnostics.sh
           shellcheck --severity=warning tests/test-web-protocol-private-output.sh
+          shellcheck --severity=warning tests/test-web-state-export.sh
           shellcheck --severity=warning tests/test-boringtun-artifact.sh
           shellcheck --severity=warning tests/test-boringtun-release.sh
           shellcheck --severity=warning tests/test-boringtun-foreground-launcher.sh
@@ -150,6 +154,7 @@ jobs:
           shellcheck --severity=warning tests/test-boringtun-lifecycle.sh
           shellcheck --severity=warning tests/test-boringtun-install-mock.sh
           shellcheck --severity=warning tests/test-boringtun-host-live.sh
+          shellcheck --severity=warning tests/test-state-migration-live.sh
           shellcheck --severity=warning tests/test-boringtun-sip-wire-live.sh
           shellcheck --severity=warning tests/test-boringtun-auto-collision-live.sh
           shellcheck --severity=warning tests/test-boringtun-imitation-wire.sh

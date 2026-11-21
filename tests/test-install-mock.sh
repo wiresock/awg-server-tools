@@ -2540,6 +2540,7 @@ if [[ -x "${PRIVILEGED_HELPER}" ]]; then
 	   grep -q '^SERVER_AWG_NIC=' "${PARAMS_ACTUAL}" && \
 	   [[ "$("${PRIVILEGED_HELPER}" protocol-status)" == "2" ]] && \
 	   "${PRIVILEGED_HELPER}" read-server-state "${HELPER_TEST_INTERFACE}" > "${READ_ACTUAL}" && \
+	   grep -Fxq 'ServerInterfaceS3S4 = absent' "${READ_ACTUAL}" && \
 	   grep -Fq '### Client existing' "${READ_ACTUAL}" && \
 	   grep -Fq "PublicKey = ${SECOND_HELPER_KEY}" "${READ_ACTUAL}" && \
 	   grep -Fq 'AllowedIPs = 10.66.66.41/32' "${READ_ACTUAL}"; then
@@ -2548,6 +2549,28 @@ if [[ -x "${PRIVILEGED_HELPER}" ]]; then
 		echo "FAIL: Privileged helper rejected an approved AWG operation"
 		FAILED=$((FAILED + 1))
 	fi
+
+	# Only active [Interface] assignments affect the fixed padding status. Do
+	# not project arbitrary values, and recognize a zero-valued assignment too.
+	helper_check_padding_projection() { # <config> <expected status>
+		local PADDING_TEST_CONFIG="$1" EXPECTED_STATUS="$2" PADDING_STATE
+		local PADDING_TEST_PATH='/etc/amnezia/amneziawg/paddingtest.conf'
+		printf '%s\n' "${PADDING_TEST_CONFIG}" > "${PADDING_TEST_PATH}"
+		chmod 0600 "${PADDING_TEST_PATH}"
+		chown root:root "${PADDING_TEST_PATH}"
+		if PADDING_STATE=$("${PRIVILEGED_HELPER}" read-server-state paddingtest) && \
+		   [[ "$(grep '^ServerInterfaceS3S4 = ' <<< "${PADDING_STATE}")" == "ServerInterfaceS3S4 = ${EXPECTED_STATUS}" ]] && \
+		   ! grep -Fq 'PADDING_TEST_SECRET' <<< "${PADDING_STATE}"; then
+			echo "OK: Privileged helper reports ${EXPECTED_STATUS} S3/S4 without projecting config values"
+		else
+			echo "FAIL: Privileged helper padding projection was not safely ${EXPECTED_STATUS}"
+			FAILED=$((FAILED + 1))
+		fi
+		rm -f "${PADDING_TEST_PATH}"
+	}
+	helper_check_padding_projection $'[INTERFACE] # inline section comment\n# S3 = 20\n; S4 = 20\n[Peer] ; peer section\nS3 = PADDING_TEST_SECRET' absent
+	helper_check_padding_projection $'[inTer Face] # inline section comment\n\ts 3\t= PADDING_TEST_SECRET # ignored comment' present
+	helper_check_padding_projection $'[Interface]\nS4 = 0 ; padding still declared' present
 
 	# reconcile-interface leaves out the [Interface] ListenPort line only when
 	# it would not change the running interface: exactly one, a valid port,

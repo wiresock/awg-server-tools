@@ -1040,7 +1040,7 @@ scenario_add_client() {
 	nonInteractiveAddClient bob
 }
 ADD_CLIENT_CALLS="fn acquireClientLifecycleLock
-fn loadParams[]
+fn loadParams[0 1]
 awg genkey
 awg pubkey
 awg genpsk
@@ -1071,7 +1071,7 @@ scenario_remove_client() {
 	nonInteractiveRemoveClient alice
 }
 REMOVE_CLIENT_CALLS="fn acquireClientLifecycleLock
-fn loadParams[]
+fn loadParams[0 1]
 fn removeFromWebPanelDir[awgt0-client-alice.conf]
 fn ensureAmneziawgKernelModule[]
 ${SYNC_CALLS}"
