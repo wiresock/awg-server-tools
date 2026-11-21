@@ -100,7 +100,7 @@ pub const SUDO_BIN: &str = "/usr/bin/sudo";
 const AWG_BIN: &str = "/usr/bin/awg";
 
 /// Root-owned validator installed by the web-panel installer.
-const PRIVILEGED_HELPER_BIN: &str = "/usr/local/libexec/amneziawg-web-privileged";
+pub(crate) const PRIVILEGED_HELPER_BIN: &str = "/usr/local/libexec/amneziawg-web-privileged";
 
 /// Execute the helper's `show-all` operation and return parsed interfaces.
 ///
@@ -465,8 +465,9 @@ pub fn set_imitation_via_sudo(settings: &crate::imitation::Settings) -> Result<(
 /// Read a sanitized server-config projection used for name/IP allocation.
 ///
 /// The helper emits only section headers, managed client markers, interface
-/// addresses, validated peer public keys, and peer AllowedIPs. Private keys
-/// and pre-shared keys never cross into the unprivileged process.
+/// addresses, validated peer public keys, peer AllowedIPs, and a fixed
+/// S3/S4 presence status. Private and pre-shared keys never cross into the
+/// unprivileged process.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub fn read_server_state_via_sudo(interface: &str) -> Result<String, AwgError> {
     let output = Command::new(SUDO_BIN)

@@ -266,6 +266,21 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
         .is_ok()
 }
 
+/// Confirm the current admin password for an operation that exports secrets.
+///
+/// A disabled panel has no password to check, so the check fails closed.
+/// The reason is a fixed code. The password is not included.
+pub fn reauthenticate(config: &AuthConfig, password: &str) -> Result<(), &'static str> {
+    if !config.enabled || config.password_hash.is_empty() {
+        return Err("reauth_unavailable");
+    }
+    if verify_password(&config.password_hash, password) {
+        Ok(())
+    } else {
+        Err("reauth_failed")
+    }
+}
+
 // ── CSRF helpers ──────────────────────────────────────────────────────────────
 
 /// Constant-time equality check for CSRF tokens.
@@ -366,6 +381,27 @@ mod tests {
     #[test]
     fn verify_password_bad_hash_returns_false() {
         assert!(!verify_password("not-a-valid-hash", "any"));
+    }
+
+    #[test]
+    fn reauthenticate_accepts_the_current_password_only() {
+        let hash = AuthConfig::hash_password_fast("testpassword");
+        let config = AuthConfig {
+            enabled: true,
+            username: "admin".to_string(),
+            password_hash: hash,
+            api_token: None,
+            secure_cookie: false,
+            session_ttl: test_ttl(),
+        };
+        assert_eq!(reauthenticate(&config, "testpassword"), Ok(()));
+        assert_eq!(reauthenticate(&config, "wrong-password"), Err("reauth_failed"));
+        let mut disabled = config.clone();
+        disabled.enabled = false;
+        assert_eq!(
+            reauthenticate(&disabled, "testpassword"),
+            Err("reauth_unavailable")
+        );
     }
 
     // ── session store ──────────────────────────────────────────────────────

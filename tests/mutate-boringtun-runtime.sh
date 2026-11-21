@@ -135,8 +135,10 @@ mutant s4_signal_without_identity $'\t_awgBtProcessIs "$1" "$2" || return 1\n\tk
 mutant s4_zombie_counts_as_alive '[[ -n "${FIELDS[0]:-}" && "${FIELDS[0]}" != [ZXx] && "${FIELDS[19]:-}" == "${START}" ]]' '[[ -n "${FIELDS[0]:-}" && "${FIELDS[19]:-}" == "${START}" ]]'
 # Scratch lifecycle (S3) and the sweep.
 mutant s3_no_scratch_collision_check '_awgBtErr "refusing to start scratch interface ${NAME}: the name is already in use"'$'\n'"${T}${T}return 1" ':'
-mutant s3_no_pdeathsig 'exec setpriv --pdeathsig KILL -- "${_AWG_BT_ARGV[@]}"' 'exec "${_AWG_BT_ARGV[@]}"'
-mutant s3_daemon_keeps_ignored_signals $'\t\ttrap - HUP INT TERM\n\t\t_awgBtCloseInheritedFds\n\t\t_awgBtScratchRegisterSelf CHILD' $'\t\t_awgBtCloseInheritedFds\n\t\t_awgBtScratchRegisterSelf CHILD'
+mutant s3_no_pdeathsig '_awgBtExecRestoringSignals setpriv --pdeathsig KILL -- "${_AWG_BT_ARGV[@]}"' '_awgBtExecRestoringSignals "${_AWG_BT_ARGV[@]}"'
+mutant s3_daemon_keeps_ignored_signals \
+	$'\t\t_awgBtExecRestoringSignals setpriv --pdeathsig KILL -- "${_AWG_BT_ARGV[@]}" </dev/null >/dev/null 2>&1 || exit 1\n' \
+	$'\t\texec setpriv --pdeathsig KILL -- "${_AWG_BT_ARGV[@]}" </dev/null >/dev/null 2>&1\n'
 mutant s3_child_execs_without_guardian $'\t_awgBtProcessIs "${GUARD_RECORD[GUARD_PID]}" "${GUARD_RECORD[GUARD_START]}"\n}' $'\ttrue\n}'
 mutant s3_child_not_registered $'\t\t_awgBtScratchRegisterSelf CHILD || exit 1\n' ''
 # The old ordering: the guardian records the systemd-run client after the
