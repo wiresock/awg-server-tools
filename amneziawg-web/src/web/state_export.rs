@@ -9,7 +9,9 @@
 
 use std::ffi::OsStr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -304,15 +306,61 @@ async fn export_with(
             "Request validation failed. Reload the page and try again.",
         );
     }
+    // Admission is shared by the single admin account, not keyed to a
+    // caller-supplied header or a session that can be replaced. Do not queue
+    // unbounded expensive password hashes or run them on async workers.
     let password = Secret::new(std::mem::take(&mut form.current_password));
-    let password_text = std::str::from_utf8(password.expose()).unwrap_or("");
-    if let Err(reason) = auth::reauthenticate(&state.auth, password_text) {
-        drop(password);
-        audit(state, EVT_STATE_EXPORT_FAILED, Some(reason)).await;
-        tracing::warn!(reason, "state export reauthentication failed");
-        return deny(StatusCode::FORBIDDEN, "The current password was not accepted.");
+    let Some(reauth_permit) = state.export_reauth_gate.try_acquire() else {
+        return deny(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Another password check is running.",
+        );
+    };
+    if !auth::check_and_record_login_attempt(
+        &state.export_reauth_limiter,
+        "state-export",
+        auth::RATE_LIMIT_MAX_ATTEMPTS,
+        auth::RATE_LIMIT_WINDOW,
+    ) {
+        return deny(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many password checks. Try again in a few minutes.",
+        );
     }
-    drop(password);
+
+    let auth_config = state.auth.clone();
+    let limiter = Arc::clone(&state.export_reauth_limiter);
+    // Move the permit into the task so a disconnected request cannot release
+    // it while the blocking password check is still running.
+    let reauth = tokio::task::spawn_blocking(move || {
+        let _permit = reauth_permit;
+        let password_text = std::str::from_utf8(password.expose()).unwrap_or("");
+        let result = auth::reauthenticate(&auth_config, password_text);
+        if result.is_ok() {
+            // Successful authentication resets the consecutive failure budget.
+            limiter
+                .write()
+                .expect("export reauthentication limiter poisoned")
+                .remove("state-export");
+        }
+        result
+    })
+    .await;
+    match reauth {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => {
+            audit(state, EVT_STATE_EXPORT_FAILED, Some(reason)).await;
+            tracing::warn!(reason, "state export reauthentication failed");
+            return deny(StatusCode::FORBIDDEN, "The current password was not accepted.");
+        }
+        Err(_) => {
+            audit(state, EVT_STATE_EXPORT_FAILED, Some("reauth_unavailable")).await;
+            return deny(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The password check was unavailable.",
+            );
+        }
+    }
 
     let passphrase = Secret::new(std::mem::take(&mut form.passphrase));
     let confirm = Secret::new(std::mem::take(&mut form.passphrase_confirm));
@@ -516,10 +564,10 @@ impl ExportSession {
             }
             let mut buf = vec![0u8; 8192];
             match session.stdout.read(&mut buf).await {
-                Ok(0) => {
-                    session.finish().await;
-                    None
-                }
+                Ok(0) => match session.finish().await {
+                    Ok(()) => None,
+                    Err(error) => Some((Err(error), (None, None))),
+                },
                 Ok(n) => {
                     buf.truncate(n);
                     Some((
@@ -549,20 +597,27 @@ impl ExportSession {
         response
     }
 
-    async fn finish(&mut self) {
-        if self.completed.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let ok = match self.child.take() {
-            Some(mut child) => matches!(child.wait().await, Ok(status) if status.success()),
+    async fn finish(&mut self) -> std::io::Result<()> {
+        // Keep the child in the session while waiting. If the response is
+        // cancelled here, Drop can still run graceful privileged cleanup.
+        let ok = match self.child.as_mut() {
+            Some(child) => matches!(child.wait().await, Ok(status) if status.success()),
             None => false,
         };
+        self.child = None;
+        self.completed.store(true, Ordering::SeqCst);
         self.wait_for_stderr().await;
         if ok {
             audit(&self.state, EVT_STATE_EXPORTED, None).await;
+            Ok(())
         } else {
             warn_export_stderr(&self.stderr_tail, "export_failed");
             audit(&self.state, EVT_STATE_EXPORT_FAILED, Some("export_failed")).await;
+            // The response already sent bytes. A clean EOF here would make
+            // the client treat an incomplete transfer as a finished archive.
+            Err(std::io::Error::other(
+                "state export helper did not finish successfully",
+            ))
         }
     }
 
@@ -1295,6 +1350,57 @@ mod tests {
         assert!(body.windows(b"panel log".len()).any(|w| w == b"panel log"));
         assert!(reasons(&state).await.iter().any(|d| d.contains("export_failed")));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn incomplete_helper_transfer_is_a_body_error() {
+        let state = test_state(true).await;
+        let (headers, csrf) = session_headers(&state);
+        let response = export_with(
+            &state,
+            &headers,
+            form(&csrf, "testpassword", passphrase(), passphrase()),
+            Some((
+                OsStr::new("/bin/bash"),
+                vec![
+                    "-c".into(),
+                    "cat >/dev/null; printf ciphertext; exit 1".into(),
+                ],
+                None,
+            )),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        assert_eq!(stream.next().await.unwrap().unwrap().as_ref(), b"ciphertext");
+        assert!(matches!(stream.next().await, Some(Err(_))));
+        assert!(reasons(&state).await.iter().any(|d| d.contains("export_failed")));
+        assert!(last_export_at(&state).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn reauthentication_enforces_an_attempt_budget() {
+        let state = test_state(true).await;
+        let (headers, csrf) = session_headers(&state);
+        for _ in 0..5 {
+            let response = export_with(
+                &state,
+                &headers,
+                form(&csrf, "incorrect", passphrase(), passphrase()),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        let response = export_with(
+            &state,
+            &headers,
+            form(&csrf, "incorrect", passphrase(), passphrase()),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

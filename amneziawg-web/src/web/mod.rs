@@ -91,6 +91,9 @@ pub struct AppState {
     endpoint_summary: std::sync::Arc<state_export::EndpointSummaryCache>,
     /// One state export at a time for this process.
     export_gate: std::sync::Arc<state_export::ExportGate>,
+    /// Admission and attempt budget for export password checks.
+    export_reauth_gate: std::sync::Arc<state_export::ExportGate>,
+    export_reauth_limiter: LoginRateLimiter,
 }
 
 #[derive(Clone)]
@@ -180,6 +183,8 @@ impl AppState {
             protocol_failure: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             endpoint_summary: std::sync::Arc::new(state_export::EndpointSummaryCache::new()),
             export_gate: state_export::ExportGate::new(),
+            export_reauth_gate: state_export::ExportGate::new(),
+            export_reauth_limiter: new_login_rate_limiter(),
         }
     }
 

@@ -459,6 +459,7 @@ writeAwgServerInstallState
         self.assertIn(PEER, conf)
         self.assertIn('new-uplink-ens99', conf)
         self.assertIn("SERVER_PUB_NIC='ens99'", (target / 'params').read_text())
+        self.assertFalse((self.root / 'sysctl/awg.conf').exists(), 'quarantine published boot forwarding')
         self.assertEqual((target / 'clients/awg0-client-phone.conf').read_bytes(),
                          self.files['clients/awg0-client-phone.conf'])
 
@@ -1014,11 +1015,24 @@ validateStagedAwgConfigs() {
     # Expiry passes AFTER the initial activation check, during validation.
     [[ ! -f "$ROOT/clock" ]] || printf '2001-01-01T00:00:30Z' >"$ROOT/clock"
 }
-sysctl() { printf 'sysctl\n' >>"$ROOT/events"; }
+sysctl() {
+    case "$1" in
+        -n) echo 0 ;;
+        -p)
+            [[ "$2" == */forwarding.live.before ]] && printf 'sysctl-restore\n' >>"$ROOT/events" ||
+                printf 'sysctl\n' >>"$ROOT/events" ;;
+    esac
+}
 systemctl() {
     case "$1" in
         is-active) [[ -e "$ROOT/active" ]] ;;
         is-enabled) [[ -e "$ROOT/enabled" ]] ;;
+        show)
+            if [[ "$2" == --property=ActiveState ]]; then
+                [[ ! -e "$ROOT/active" ]] && echo inactive || echo active
+            else
+                [[ ! -e "$ROOT/enabled" ]] && echo disabled || echo enabled
+            fi ;;
         start) touch "$ROOT/active"; cp "$SERVER_AWG_CONF" "$ROOT/at-start.conf"; printf 'start\n' >>"$ROOT/events" ;;
         enable) printf 'enable\n' >>"$ROOT/events"; [[ ! -e "$ROOT/fail-enable" ]] || return 17; touch "$ROOT/enabled" ;;
         disable) printf 'disable\n' >>"$ROOT/events"; rm -f "$ROOT/enabled" ;;
@@ -1145,7 +1159,7 @@ fi
                     self.assertFalse((root / 'enabled').exists())
                     self.assertFalse((root / 'active').exists())
                     self.assertFalse(list((root / 'journals').glob('*/finalized')))
-                    self.assertEqual((root / 'events').read_text(), 'validate\nsysctl\nstart\nenable\ndisable\nstop\n')
+                    self.assertEqual((root / 'events').read_text(), 'validate\nsysctl\nstart\nenable\ndisable\nstop\nsysctl-restore\n')
                     continue
                 if name == 'bad-schema':
                     self.assertNotEqual(result.returncode, 0)
@@ -1303,6 +1317,13 @@ awgStateEndpointSummary > "$ROOT/counts"
         self.assertIn('print-after-1', order)
         self.assertLess(order.index('release'), order.index('print-after-1'))
         self.assertFalse((self.root / 'work').exists())
+        laptop.write_bytes(b'[Peer]\nEndpoint = vpn.example.com:service\n')
+        incomplete = subprocess.run(
+            ['bash', '-c', shell, 'test', str(SCRIPT), str(self.root)],
+            capture_output=True)
+        self.assertNotEqual(incomplete.returncode, 0)
+        self.assertEqual((self.root / 'counts').read_bytes(), b'')
+        self.assertIn(b'incomplete client endpoint count', incomplete.stderr)
 
     def test_invalid_arguments_never_enter_interactive_install(self):
         for args in (['--export-state'], ['--export-state', '-'],
@@ -1643,6 +1664,7 @@ done
 set -uo pipefail
 source "$1"
 ROOT="$2"
+AWG_SYSCTL_FILE="$ROOT/forwarding.conf"
 AMNEZIAWG_DIR="$ROOT/vpn"; SERVER_AWG_NIC=awg0; AWG_STATE_JOURNAL_DIR="$ROOT/journals"
 mkdir -p "$AMNEZIAWG_DIR" "$ROOT/work" "$ROOT/journal"; printf x >"$AMNEZIAWG_DIR/awg0.conf"
 SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"; printf ens3 >"$ROOT/journal/nic"
@@ -1652,12 +1674,13 @@ sha256sum() { return 0; }
 awgStateArchive() { [[ "$1" == identity ]] && return 1; cp -- "$2" "$4"; }
 ensureAwgBackendReady() { return 0; }
 validateStagedAwgConfigs() { return 0; }
-sysctl() { return 0; }
+sysctl() { [[ "$1" != -n ]] || echo 0; }
 awgStateWriteReceipt() { return 0; }
 systemctl() {
     printf '%s\n' "$1" >>"$ROOT/systemctl.log"
     case "$1" in
         is-active|is-enabled) return 1 ;;
+        show) [[ "$2" == --property=ActiveState ]] && echo inactive || echo disabled ;;
         start) touch "$ROOT/running"; rm -f "$ROOT/journal/steps"; ln -s /dev/full "$ROOT/journal/steps" ;;
         stop) rm -f "$ROOT/running" ;;
         enable) [[ "${FAIL_ENABLE:-0}" == 0 ]] || return 1; touch "$ROOT/enabled" ;;
@@ -1745,16 +1768,23 @@ rc=$?
 set -uo pipefail
 source "$1"
 ROOT="$2"
+AWG_SYSCTL_FILE="$ROOT/forwarding.conf"
 AMNEZIAWG_DIR="$ROOT/vpn"; SERVER_AWG_NIC=awg0; SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"
 mkdir -p "$AMNEZIAWG_DIR" "$ROOT/work" "$ROOT/journal" "$ROOT/stage"
 printf x >"$SERVER_AWG_CONF"; printf ens3 >"$ROOT/journal/nic"
 acquireClientLifecycleLock() { return 0; }; awgStateTrustedPath() { return 0; }; sha256sum() { return 0; }
 awgStateArchive() { [[ "$1" == identity ]] && return 1; cp -- "$2" "$4"; }
-ensureAwgBackendReady() { return 0; }; validateStagedAwgConfigs() { return 0; }; sysctl() { return 0; }
+ensureAwgBackendReady() { return 0; }; validateStagedAwgConfigs() { return 0; }; sysctl() { [[ "$1" != -n ]] || echo 0; }
 awgStateWriteReceipt() { return 0; }
 systemctl() {
     case "$1" in
         is-active|is-enabled) return 1 ;;
+        show)
+            if [[ "$2" == --property=ActiveState ]]; then
+                [[ ! -e "$ROOT/running" ]] && echo inactive || echo active
+            else
+                [[ ! -e "$ROOT/enabled" ]] && echo disabled || echo enabled
+            fi ;;
         start) touch "$ROOT/running"; [[ "$SIG_AT" != start ]] || kill -s "$SIG" "$BASHPID" ;;
         enable) touch "$ROOT/enabled"; [[ "$SIG_AT" != enable ]] || kill -s "$SIG" "$BASHPID" ;;
         stop) rm -f "$ROOT/running" ;;
@@ -1881,7 +1911,7 @@ sha256sum "$AMNEZIAWG_DIR/params" "$SERVER_AWG_CONF" >"$ROOT/journal/receipt"
 acquireClientLifecycleLock() { return 0; }; awgStateTrustedPath() { return 0; }
 awgStateArchive() { printf filtered >"$4"; }
 systemctl() { case "$1" in is-active|is-enabled) return 1 ;; start) touch "$ROOT/running" ;; stop) rm -f "$ROOT/running" ;; esac; return 0; }
-ensureAwgBackendReady() { return 0; }; validateStagedAwgConfigs() { return 0; }; sysctl() { return 0; }
+ensureAwgBackendReady() { return 0; }; validateStagedAwgConfigs() { return 0; }; sysctl() { [[ "$1" != -n ]] || echo 0; }
 eval "$(declare -f replaceFileExactly | sed 's/^replaceFileExactly/realReplaceFileExactly/')"
 replaceFileExactly() {
     realReplaceFileExactly "$@" || return
@@ -2418,7 +2448,23 @@ awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 14
         self.assertEqual(result.returncode, 0, out)
         self.assertIn('finalized VPN is unaffected', out)
         self.assertIn('did not become healthy', out)
-        self.assertEqual((root / 'installer.runs').read_text(), 'run\nrun\n')
+        self.assertEqual((root / 'installer.runs').read_text(), 'run\n')
+
+    def test_panel_completion_write_failure_preserves_later_database_changes(self):
+        root = self.root / 'panel-marker'
+        root.mkdir()
+        self.panel_stage(root)
+        result = self.run_panel(root, r"""
+mkdir -p "$ROOT/journal/panel-restored"
+if awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ -f "$ROOT/journal/panel-installing" && -f "$ROOT/journal/panel-data-installed" ]] || exit 11
+python3 -c 'import sqlite3, sys; db = sqlite3.connect(sys.argv[1]); db.execute("CREATE TABLE later (x)"); db.commit()' "$ROOT/data/awg-web.db"
+rmdir "$ROOT/journal/panel-restored"
+awgStateRestorePanel "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 12
+python3 -c 'import sqlite3, sys; db = sqlite3.connect(sys.argv[1]); db.execute("SELECT x FROM later")' "$ROOT/data/awg-web.db"
+""")
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertEqual((root / 'installer.runs').read_text(), 'run\n')
 
     def test_existing_panel_dir_stays_refused_after_installing_marker(self):
         # m1: panel-installing is written before prepare. A refused existing
@@ -2566,7 +2612,11 @@ echo "rc=$? running=$([[ -e $ROOT/running ]] && echo y) enabled=$([[ -e $ROOT/en
 set -uo pipefail
 source "$1"
 ROOT="$2"; export PROXY_ROOT="$ROOT"
-AMNEZIAWG_DIR="$ROOT/vpn"; SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"; mkdir -p "$ROOT/journal" "$ROOT/work"
+AMNEZIAWG_DIR="$ROOT/vpn"; SERVER_AWG_NIC=awg0; SERVER_AWG_CONF="$AMNEZIAWG_DIR/awg0.conf"
+mkdir -p "$ROOT/journal" "$ROOT/work" "$AMNEZIAWG_DIR"
+cp "$ROOT/stage/vpn/server.conf" "$SERVER_AWG_CONF"
+awgStateTrustedPath() { return 0; }
+awg() { [[ "$*" == 'show awg0 listen-port' ]] && printf '%s\n' "${MOCK_LIVE_PORT:-51821}"; }
 AWG_STATE_PROXY_UNIT="$ROOT/unit"
 awgStateProxyInstaller() { printf '%s\n' "$ROOT/checkout/amneziawg-proxy/scripts/amneziawg-proxy-install.sh"; }
 install() { local a=(); while (($#)); do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; command install "${a[@]}"; }
@@ -2595,6 +2645,7 @@ awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 11
         args = (root / 'installer.args').read_text().splitlines()
         def value(flag):
             return args[args.index(flag) + 1]
+        self.assertIn('--require-existing-awg-port', args)
         self.assertEqual((value('--listen-host'), value('--listen-port'), value('--backend-host'), value('--backend-port')),
                          ('0.0.0.0', '51820', '127.0.0.1', '51821'))
         self.assertEqual(value('--protocol'), 'dns')
@@ -2615,6 +2666,19 @@ awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work" || exit 11
         self.assertTrue((root / 'journal/proxy-restored').exists())
         self.assertFalse((root / 'journal/proxy-installing').exists())
         self.assertIn('proxy-restored', (root / 'journal/steps').read_text())
+
+    def test_proxy_restore_leaves_companions_unmodified_when_live_port_differs(self):
+        root = self.root / 'proxy-local-port'
+        root.mkdir()
+        meta = dict(config_path=str(root / 'proxy/proxy.toml'), data_dir=str(root / 'pdata'),
+                    install_dir=str(root / 'bin'))
+        self.proxy_stage(root, meta=meta)
+        result = self.run_proxy(root, r"""
+if awgStateRestoreProxy "$ROOT/stage" "$ROOT/journal" "$ROOT/work"; then exit 10; fi
+[[ ! -e "$ROOT/installer.runs" && ! -e "$ROOT/systemctl.log" ]]
+""", MOCK_LIVE_PORT='51831')
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertIn(b'current VPN listen port does not match', result.stderr)
 
     def test_proxy_restore_failure_is_retryable(self):
         root = self.root / 'proxy-retry'
@@ -3974,6 +4038,60 @@ awgStatePurgeJournal "$3" --force
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(jdir.exists(), result.stdout)
 
+    def test_finalized_purge_preserves_incomplete_companion_provenance(self):
+        journals = self.root / 'journals'
+        digest = 'cd' * 32
+        jdir = journals / digest
+        jdir.mkdir(parents=True)
+        for name in ('finalized', 'panel-installing', 'panel-approved-dir',
+                     'proxy-installing', 'proxy-approved-dirs', 'receipt'):
+            (jdir / name).write_text('sentinel')
+        result = subprocess.run(['bash', '-c', r"""
+source "$1"
+AWG_STATE_JOURNAL_DIR="$2"
+isRoot() { return 0; }
+acquireClientLifecycleLock() { :; }; releaseClientLifecycleLock() { :; }
+awgStateTrustedPath() { return 0; }
+awgStatePurgeJournal "$3"
+""", 'test', str(SCRIPT), str(journals), digest], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((jdir / 'receipt').exists())
+        for name in ('panel-installing', 'panel-approved-dir', 'proxy-installing', 'proxy-approved-dirs'):
+            self.assertEqual((jdir / name).read_text(), 'sentinel')
+
+    def test_failed_activation_cleanup_records_incomplete_rollback(self):
+        result = subprocess.run(['bash', '-c', r"""
+source "$1"
+_AWG_STATE_ACTIVATION_UNIT=awg-quick@awg0
+_AWG_STATE_ACTIVATION_JOURNAL="$2"
+systemctl() {
+    case "$1" in
+        stop|disable) return 1 ;;
+        show) [[ "$2" == --property=ActiveState ]] && printf 'active
+' || printf 'enabled
+' ;;
+    esac
+}
+if awgStateActivationAbort; then exit 2; fi
+test -f "$2/activation-rollback-incomplete"
+""", 'test', str(SCRIPT), str(self.root)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('INCOMPLETE', result.stderr)
+
+    def test_proxy_migration_requires_existing_backend_port_without_edit(self):
+        installer = ROOT / 'amneziawg-proxy/scripts/amneziawg-proxy-install.sh'
+        conf = self.root / 'awg0.conf'
+        text = '[Interface]\nListenPort = 51821\n'
+        conf.write_text(text)
+        result = subprocess.run(['bash', '-c', r"""
+source "$1"
+AWG_CONF_FILE="$2"
+BACKEND_PORT=51821
+require_existing_awg_listen_port
+""", 'test', str(installer), str(conf)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(conf.read_text(), text)
+
     def test_activation_takes_companion_lock_before_releasing_lifecycle_lock(self):
         text = SCRIPT.read_text()
         self.assertEqual(text.count('awgStateAcquireCompanionLock "${JOURNAL}" || return 1\n\t\t\treleaseClientLifecycleLock\n'
@@ -4464,7 +4582,6 @@ awgStateEndpointCommand set vpn.example.test --dry-run >"$AWG_ENDPOINT_OUT" 2>"$
         bodies = {
             'semi': b'; Endpoint = 203.0.113.7:51820\n',
             'bom': b'\xef\xbb\xbf[Peer]\nEndpoint = 203.0.113.7:51820\n',
-            'lower': b'[Peer]\nendpoint = 203.0.113.7:51820\n',
         }
         paths = []
         for name, body in bodies.items():
@@ -4481,6 +4598,99 @@ awgStateEndpointCommand set vpn.example.test --dry-run >"$AWG_ENDPOINT_OUT" 2>"$
             'vpn.example.test', '203.0.113.9').stdout)
         self.assertTrue(all(row['status'] == 'skipped' for row in skipped_plan['files']))
         self.assertEqual(list(skipped_out.iterdir()), [])
+
+    def test_endpoint_plan_uses_last_assignment_case_insensitively(self):
+        stage = self.root / 'endpoint-case'
+        clients = stage / 'clients'
+        clients.mkdir(parents=True)
+        profile = clients / 'awg0-client-phone.conf'
+        body = (b'[pEeR]\r\nEndpoint = old.example.test:1000\r\n'
+                b'\teNdPoInT\t=\t192.0.2.10:51820  # retained\r\n')
+        profile.write_bytes(body)
+        unsupported = clients / 'awg0-client-custom.conf'
+        unsupported.write_bytes(b'[Peer]\nEndpoint = remote.example.test:service\n')
+        rooted = clients / 'awg0-client-rooted.conf'
+        rooted.write_bytes(b'[Peer]\nEndpoint = root.example.test.:51820\n')
+        multi = clients / 'awg0-client-multi.conf'
+        multi.write_bytes(b'[Peer]\nEndpoint = first.example.test:51820\n'
+                          b'[Peer]\nEndpoint = other.example.test:51821\n')
+        regular = stage / 'regular'
+        regular.write_bytes(b''.join(os.fsencode(path) + b'\0' for path in (profile, unsupported, rooted, multi)))
+        symlinks = stage / 'symlinks'
+        symlinks.touch()
+        out = stage / 'out'
+        out.mkdir()
+        summary = self.run_helper('endpoint-summary', stage)
+        self.assertEqual(summary.stdout.splitlines()[:2], [b'1', b'1'])
+        self.assertIn(b'2 client profile(s) could not be classified', summary.stdout)
+        plan = json.loads(self.run_helper('endpoint-plan', regular, symlinks, out, 'rewrite',
+                                         'new.example.test', 'old.example.test').stdout)
+        self.assertEqual(plan['ip_literal'], 1)
+        rows = {row['path']: row for row in plan['files']}
+        self.assertEqual(rows[str(unsupported)]['status'], 'skipped')
+        self.assertEqual(rows[str(multi)]['status'], 'skipped')
+        self.assertEqual(rows[str(rooted)]['status'], 'update')
+        rewritten = out / rows[str(profile)]['out']
+        self.assertEqual(rewritten.read_bytes(), body.replace(b'192.0.2.10', b'new.example.test'))
+
+    def test_endpoint_install_keeps_profile_access_acl(self):
+        import struct
+
+        original, updated = b'[Peer]\nEndpoint = old.example.test:51820\n', b'[Peer]\nEndpoint = new.example.test:51820\n'
+        dest, before, rewrite = (self.root / name for name in ('profile.conf', 'before', 'rewrite'))
+        dest.write_bytes(original)
+        before.write_bytes(original)
+        rewrite.write_bytes(updated)
+        # POSIX ACL xattr v2: owner, named user, group, mask, other.
+        acl = struct.pack('<I', 2) + b''.join(
+            struct.pack('<HHI', tag, mode, ident)
+            for tag, mode, ident in ((1, 6, 0xffffffff), (2, 4, os.getuid()),
+                                     (4, 0, 0xffffffff), (16, 4, 0xffffffff), (32, 0, 0xffffffff)))
+        try:
+            os.setxattr(dest, 'system.posix_acl_access', acl)
+        except OSError as error:
+            if error.errno in (errno.ENOTSUP, errno.EPERM):
+                self.skipTest('filesystem does not support testing POSIX ACLs')
+            raise
+        script = 'source "$1"; awgStateInstallRewrittenProfile "$2" "$3" "$4"'
+        result = subprocess.run(['bash', '-c', script, 'test', str(SCRIPT),
+                                 str(rewrite), str(dest), str(before)], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(dest.read_bytes(), updated)
+        self.assertIn('system.posix_acl_access', os.listxattr(dest))
+        self.assertEqual(os.getxattr(dest, 'system.posix_acl_access'), acl)
+
+    def test_endpoint_install_copies_acl_before_applying_mode(self):
+        # Exercise the write ordering on filesystems that do not support ACLs.
+        root = self.root
+        dest, before, rewrite = (root / name for name in ('profile.conf', 'before', 'rewrite'))
+        dest.write_bytes(b'[Peer]\nEndpoint = old.example.test:51820\n')
+        before.write_bytes(dest.read_bytes())
+        rewrite.write_bytes(dest.read_bytes().replace(b'old.example.test', b'new.example.test'))
+        py = SOURCE.split("<<'AWG_ENDPOINT_INSTALL_PY'\n", 1)[1].split('\nAWG_ENDPOINT_INSTALL_PY', 1)[0]
+        acl_calls = r'''
+import errno, os, sys
+original_inode = os.lstat(sys.argv[2]).st_ino
+chmod = os.fchmod
+copied = set()
+def getxattr(fd, name):
+    assert name == 'system.posix_acl_access'
+    if os.fstat(fd).st_ino == original_inode:
+        return b'test-acl-value'
+    raise OSError(errno.ENODATA, 'no ACL')
+def setxattr(fd, name, value):
+    assert name == 'system.posix_acl_access'
+    assert value == b'test-acl-value'
+    copied.add(os.fstat(fd).st_ino)
+def fchmod(fd, mode):
+    assert os.fstat(fd).st_ino in copied
+    chmod(fd, mode)
+os.getxattr, os.setxattr, os.fchmod = getxattr, setxattr, fchmod
+'''
+        result = subprocess.run(['python3', '-I', '-c', acl_calls + py,
+                                 str(rewrite), str(dest), str(before)], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(dest.read_bytes(), rewrite.read_bytes())
 
     def test_endpoint_switch_stops_when_the_profile_changes_after_the_plan(self):
         tree = self.root / 'changed-tree'

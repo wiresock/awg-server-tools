@@ -139,7 +139,10 @@ wait for that result or use the cached one.
 `--endpoint-summary` is the read-only count behind that warning. It copies
 installer-managed client profiles into tmpfs, counts them with the archive's
 endpoint audit, and prints two integers: hostname endpoints, then literal-IP
-endpoints. It does not print keys, hostnames, or the profile list. The
+endpoints. If any copied profile has an unclassifiable endpoint, the count
+is unavailable rather than reporting an incomplete total; use
+`--audit-endpoints` to identify those files. It does not print keys,
+hostnames, or the profile list. The
 lifecycle lock is held only for the copy and is released before the counts are
 printed. It does not install packages and does not change the VPN. It needs
 `python3` only. The panel turns a non-zero literal-IP count into "N profiles
@@ -168,8 +171,8 @@ fallback.
 `panel_plan`, a `proxy_plan` (proxy listen/backend, AWG port match,
 install paths; panel DB present, env/hash present — never the hash
 itself —, archive vs. panel-source migration versions, mail jobs that would be
-cancelled) and an `endpoint_audit` (`hostname`, `ip_literal`, and per-client
-name/host/kind). A profile is `ip_literal` when its Endpoint host is an IPv6
+cancelled) and an `endpoint_audit` (`hostname`, `ip_literal`, `skipped`, and
+per-client name/host/kind). A profile is `ip_literal` when its Endpoint host is an IPv6
 address or any value `socket.inet_aton` accepts without asking DNS. That
 includes dotted quads and the short, hexadecimal and octal forms `123`,
 `1.2.3`, `0x7f.1` and `0177.0.0.1`. Other names that match the hostname label
@@ -330,11 +333,13 @@ Flow: after `--activate-state <archive> --enable-at-boot` has finalized the VPN
    `cargo`), then install the DB as `awg-web` 0600 (stale `-wal/-shm/-journal`
    removed), start `amneziawg-web`, wait up to 30 s for `/api/health` on
    `AWG_WEB_LISTEN` (+`AWG_WEB_BASE_PATH`), and only then enable it at boot.
-4. Journal: `panel-installing` while in progress, `panel-restored` when done,
-   and audit steps in `steps`. On failure the panel is stopped (never enabled),
-   the VPN keeps running finalized, the command exits non-zero with the cause,
-   and rerunning `--activate-state <archive> --enable-at-boot` retries only the
-   panel; a completed restore is a no-op.
+4. Journal: `panel-installing` tracks ownership, `panel-data-installed`
+   prevents retries from replacing the database after it has been installed,
+   and `panel-restored` marks completion. The VPN stays finalized on a
+   companion failure. If startup or enablement fails, the panel is stopped
+   and disabled. If only the completion marker cannot be written, a healthy
+   panel may keep running; retrying `--activate-state <archive> --enable-at-boot`
+   checks the existing installation without replacing its database.
 
 `AWG_STATE_PANEL_BINARY=/path/to/amneziawg-web` is the only new input (an
 environment variable, like `SERVER_PUB_IP`). The Argon2 hash reaches the panel
@@ -407,9 +412,10 @@ After the panel step (independently of its outcome), when the archive has
 1. Refuse if `amneziawg-proxy/scripts/amneziawg-proxy-install.sh` is not in
    this checkout, if a proxy config/unit exists that this migration did not
    install, if the config is not the flat `key = value` subset the installer
-   writes, or if the archived server `ListenPort` is not the proxy backend port
-   (the installer would then rewrite the finalized VPN config).
-2. Run the proxy installer with `--non-interactive --listen-host --listen-port
+   writes, or if the archived, installed or active VPN listen port differs from
+   the proxy backend port. Migration never edits or restarts the finalized VPN.
+2. Run the proxy installer with `--non-interactive --require-existing-awg-port
+   --listen-host --listen-port
    --backend-host --backend-port --protocol [--session-ttl --rate-limit
    --probe-reply-bytes --dns-forward --dns-upstream --quic-handshake
    --quic-domain] --config-file --data-dir --install-dir --awg-dir --no-start
@@ -418,12 +424,13 @@ After the panel step (independently of its outcome), when the archive has
 3. Install the archived `proxy.toml` verbatim (root 0600) except `awg_config`,
    which points to the restored server config; start the service; require it
    to stay active and listen on its UDP port; then enable it at boot.
-4. Journal `proxy-installing` / `proxy-restored` and steps
-   (`proxy-restore-started`, `proxy-install`, `proxy-config-installed`,
-   `proxy-restored` / `proxy-restore-failed`). A failure stops the proxy, never
-   enables it, leaves the VPN and panel untouched, exits non-zero, and a rerun
-   of `--activate-state <archive> --enable-at-boot` retries only the unfinished
-   companion steps.
+4. Journal `proxy-installing` tracks ownership, `proxy-data-installed`
+   avoids replacing the installed config on retry, and `proxy-restored`
+   marks completion. If startup or enablement fails, the proxy is stopped
+   and disabled. If only the completion marker cannot be written, a healthy
+   proxy may keep running; a retry checks its existing installation. The VPN
+   and panel are unaffected. Ordinary journal purge keeps the ownership and
+   retry records of unfinished companion steps.
 
 Companion lock: the panel and proxy steps run after the VPN lifecycle lock is
 released (the panel installer and the panel take it themselves). Before that
@@ -442,8 +449,8 @@ existing `/var/lib/amneziawg-proxy` `root:awg-web 2750`, and the proxy installer
 makes its data dir `root:awg-web 2750` when the `awg-web` group exists
 (otherwise `root:root 0750`). The proxy unit's `UMask=0027` plus the setgid
 directory give `sessions.json` mode 0640, group `awg-web`. Because the proxy
-step runs after the panel step and always runs the proxy installer (also on a
-retry), the result is the same as a normal install where the proxy was installed
+step runs after the panel step and applies the proxy installer's filesystem
+setup before first startup, the result is the same as a normal install where the proxy was installed
 first. If the panel step failed, the proxy dir stays `root:root 0750` until
 the panel retry, which applies the web installer's own step. A custom proxy
 `--data-dir` is not read by the panel in any install order (the panel's
@@ -503,8 +510,13 @@ restored env.conf.
    to the preserved server identity.
 5. Discard **all** archived PreUp/PostUp/PreDown/PostDown commands. Regenerate
    firewall hooks for the target NIC/firewall stack. Keep the other server
-   configuration fields and retained peers, and regenerate units/sysctl files.
-   Forwarding sysctls are written but not applied during import.
+   configuration fields and retained peers, and regenerate the VPN unit.
+   Import does not publish or apply forwarding sysctls. Activation applies
+   forwarding at runtime; only an activation with `--enable-at-boot` publishes
+   the boot-time settings. If the uplink relies on IPv6 Router Advertisements
+   for an address or default route, establish the target's RA policy before
+   activating (for example, `accept_ra=2` on that uplink where appropriate).
+   Verify IPv6 reachability again after activation and reboot.
 6. Probe backend readiness and validate imported protocol fields with the
    installed tools using the existing scratch-interface validator (no peers).
    This is **not** a real client handshake test.
@@ -515,8 +527,8 @@ restored env.conf.
    `systemctl start/enable` before finalization.
    Activation decrypts/verifies the archive again, holds the lifecycle lock,
    verifies unchanged local receipts and **re-runs peer-policy reconciliation
-   at activation and again after backend validation/sysctl application,
-   immediately before startup**. Peers whose expiry passed during quarantine
+   at activation and again after backend validation, immediately before
+   applying forwarding and starting the VPN**. Peers whose expiry passed during quarantine
    or validation are dropped then. It filters the current local config
    (removals only), never rebuilds peers from the old snapshot, and preserves
    receipt-verified generated host hooks. Import also refreshes expiry after
@@ -547,10 +559,14 @@ Each import attempt takes a fresh `before/` image (a missing file is recorded as
 absent) and swaps it in atomically, so a retry never restores a stale backup.
 The `steps` file is an audit log only: after the VPN starts, a failed append
 warns instead of aborting; real post-start failures (enable, finalized marker)
-stop and disable the unit and leave the migration unfinalized.
+attempt to stop and disable the unit and leave the migration unfinalized.
 INT/TERM/HUP during activation (from `systemctl start` until finalization, or
-until a test activation completes) likewise stops and disables the unit and
-leaves the import quarantined; rerun `--activate-state` to retry. Rollback
+until a test activation completes) takes the same rollback path. If systemd
+cannot confirm a stopped, disabled unit or the boot settings cannot be restored,
+an `activation-rollback-incomplete` marker blocks retries. Verify and repair
+both states before removing the marker. Failed activation restores the prior
+runtime forwarding settings as well; a successful temporary activation keeps
+forwarding active for the test. Rollback
 cleanup runs without errexit or re-entrant signals, attempts every step even if
 logging fails, and reports an incomplete rollback explicitly. An INCOMPLETE
 rollback also leaves a `rollback-incomplete` marker in the journal; while it
@@ -767,7 +783,8 @@ switch and is listed with its path. Names in the JSON are the profile
 basename without `.conf`. `hostname` and `ip_literal` count files, so two
 copies of one client count twice. Copies that share a name, host and kind
 are one client with several files. Profiles with no usable `[Peer] Endpoint`
-are omitted from the counts. Private keys are not printed.
+are listed in `skipped`, not counted as a hostname or literal IP. Private keys
+are not printed.
 
 `--set-endpoint-host` accepts a DNS hostname and refuses an IP literal,
 including a dotted quad, a bare IPv6 address and a bracketed IPv6 address.
@@ -779,11 +796,13 @@ that was typed, and a trailing root dot is refused.
 `Endpoint` lines that would change, and `skipped` plus the path of each
 profile whose Endpoint line cannot be parsed. It does not write.
 
-The apply updates every regular managed profile from that search whose
-Endpoint line can be parsed. A profile whose Endpoint cannot be parsed, for
-example because of a `;` comment, a UTF-8 BOM, or a lowercase `endpoint` key,
-is listed as `skipped` with its path and left unchanged. Only the host in the
-first `[Peer] Endpoint` (`host:port` or `[ipv6]:port`) changes. The port, the
+The apply updates every regular managed profile from that search with an
+unambiguous, usable Endpoint. Section and option names are case-insensitive.
+If the same peer sets Endpoint more than once, only the last assignment
+changes. Profiles with no usable Endpoint or with endpoints in multiple peer
+sections are listed as `skipped` with their paths and left unchanged; review
+them before moving the server. Only the effective host (`host:port` or
+`[ipv6]:port`) changes. The port, the
 line ending and every other byte stay, including keys, preshared keys,
 `AllowedIPs`, MTU and obfuscation fields. `SERVER_PUB_IP` in params is set to
 the same hostname, so a profile created afterwards uses it. The installer and
@@ -803,15 +822,17 @@ does not follow symlinks. A symlink profile refuses the whole switch, including
 `--dry-run`, and nothing is written. Copies of the same filename that differ
 in any line other than that `Endpoint` line also refuse the whole switch,
 including `--dry-run`. A different port on that line is allowed, and each file
-keeps its own port. Each written file is renamed into place and keeps its mode
-and, when run as root, its owner. A profile that already uses the hostname is
+keeps its own port. Each written file is renamed into place and keeps its mode,
+POSIX access ACL and, when run as root, its owner. A profile that already uses the hostname is
 left untouched. After a partial write, run the same command again: finished
 profiles stay as they are and the rest are updated. When every profile and
 `SERVER_PUB_IP` already use the hostname, a rerun changes nothing.
 
-Clients import the updated profile once. After that, moving the hostname's DNS
-record is enough. A further profile update is not required for that move.
-Profiles that already used the hostname follow DNS without this command.
+Clients import the updated profile once. A later DNS move does not require
+redistributing the profile, but a running tunnel may keep using the address
+it resolved at startup. Depending on the client, reconnect or reload the
+tunnel, or use its DNS re-resolution mechanism. Profiles already using that
+hostname do not need this command.
 
 `ListenAddr` in the server config is refused with an explicit error, not
 carried. Current `amneziawg-tools` (`src/config.c`, `process_line`) accepts
@@ -920,9 +941,10 @@ of this checklist. Do not record it as passed until each step has been run.
    AmneziaWG client and WireSock). While the old server still answers,
    `--audit-endpoints` lists literal-IP profiles and `--set-endpoint-host
    <hostname>` (after `--dry-run`) rewrites only that host. Each of those
-   clients imports the updated profile once. Moving the hostname's DNS record
-   then works without another profile. Profiles that already used the hostname
-   keep working after the DNS record moves.
+   clients imports the updated profile once. Move the hostname's DNS record
+   and verify clients reconnect to the new address after their next DNS
+   resolution, without another profile. Reconnect or reload clients that
+   do not re-resolve automatically.
 8. Power loss during import: kill the host after quarantine has started and
    before finalization. After boot the VPN must still be the old one or be
    stopped, and a rerun must refuse an incomplete rollback or finish the

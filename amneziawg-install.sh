@@ -4501,8 +4501,8 @@ def endpoint_host(value):
         try:
             socket.inet_aton(host)
         except OSError:
-            if (len(host) <= 253 and re.fullmatch(
-                    r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*', host)):
+            labels = host[:-1] if host.endswith('.') else host
+            if len(labels) <= 253 and _ENDPOINT_HOSTNAME.fullmatch(labels):
                 return host, 'hostname'
             return None
     return host, 'ip_literal'
@@ -4511,39 +4511,29 @@ def endpoint_host(value):
 def endpoint_audit(files):
     counts = {'hostname': 0, 'ip_literal': 0}
     clients = []
+    skipped = 0
     for name in sorted(files):
         if not (name.startswith('clients/') and name.endswith('.conf')):
             continue
         try:
-            text = files[name].decode('utf-8')
-        except UnicodeError:
-            continue
-        in_peer = False
-        found = None
-        for line in text.splitlines():
-            stripped = line.split('#', 1)[0].strip()
-            if stripped.startswith('['):
-                in_peer = stripped == '[Peer]'
-                continue
-            if not in_peer:
-                continue
-            match = re.fullmatch(r'Endpoint\s*=\s*(.+)', stripped)
-            if match is None:
-                continue
-            found = endpoint_host(match.group(1).strip())
-            break
+            found = parse_profile(name, files[name])['parsed']
+        except StatePolicyError:
+            found = None
         if not found:
+            skipped += 1
             continue
         host, kind = found
         counts[kind] += 1
         clients.append(dict(name=name[len('clients/'):-len('.conf')], host=host, kind=kind))
-    audit = dict(hostname=counts['hostname'], ip_literal=counts['ip_literal'], clients=clients)
+    audit = dict(hostname=counts['hostname'], ip_literal=counts['ip_literal'], clients=clients, skipped=skipped)
+    warnings = []
     if audit['ip_literal']:
         listed = ', '.join('%s (%s)' % (item['name'], item['host']) for item in clients if item['kind'] == 'ip_literal')
-        audit['warning'] = ('%d client profile(s) use a literal IP in Endpoint and will need a new profile after an IP ban: %s'
-                            % (audit['ip_literal'], listed))
-    else:
-        audit['warning'] = None
+        warnings.append('%d client profile(s) use a literal IP in Endpoint and will need a new profile after an IP ban: %s'
+                        % (audit['ip_literal'], listed))
+    if skipped:
+        warnings.append('%d client profile(s) could not be classified; run --audit-endpoints to check them.' % skipped)
+    audit['warning'] = ' '.join(warnings) or None
     return audit
 
 
@@ -4557,12 +4547,12 @@ def endpoint_audit_dir(root):
     return endpoint_audit(files)
 
 
-# The first Peer Endpoint line. The value is [ipv6]:port or host:port. The
+# The effective Peer Endpoint line. The value is [ipv6]:port or host:port. The
 # suffix keeps a trailing comment. This is the only line a host switch rewrites.
 _ENDPOINT_LINE = re.compile(
     r'(?P<prefix>[ \t]*Endpoint[ \t]*=[ \t]*)'
     r'(?P<value>\[[0-9A-Fa-f:.]+\]:[0-9]{1,5}|[^[\]\s:#]+:[0-9]{1,5})'
-    r'(?P<suffix>[ \t]*(?:#.*)?)')
+    r'(?P<suffix>[ \t]*(?:#.*)?)', re.IGNORECASE | re.ASCII)
 _ENDPOINT_HOSTNAME = re.compile(
     r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*')
 
@@ -4629,20 +4619,25 @@ def parse_profile(path, data):
     # these lines is the original text, so a rewrite can change one line.
     if ''.join(lines) != text:
         raise StatePolicyError('client profile is not valid text')
+    peer = 0
     in_peer = False
-    endpoint_index = None
+    endpoints = {}
     for index, line in enumerate(lines):
         core, _ending = _line_core(line)
         stripped = core.split('#', 1)[0].strip()
         if stripped.startswith('['):
-            in_peer = stripped == '[Peer]'
+            in_peer = stripped.lower() == '[peer]'
+            if in_peer:
+                peer += 1
             continue
         if not in_peer:
             continue
-        if re.fullmatch(r'Endpoint\s*=\s*(.+)', stripped) is None:
+        if re.match(r'Endpoint\s*=', stripped, re.IGNORECASE | re.ASCII) is None:
             continue
-        endpoint_index = index
-        break
+        # A later assignment in the same peer overrides an earlier one.
+        endpoints[peer] = index
+    # We have no reliable way to choose the server peer in a multi-endpoint profile.
+    endpoint_index = next(iter(endpoints.values())) if len(endpoints) == 1 else None
     parsed = None
     match = None
     if endpoint_index is not None:
@@ -4948,7 +4943,7 @@ def main():
                         print('WARNING: ' + audit['warning'], file=sys.stderr)
                     print(json.dumps(dict(manifest, peer_plan=report, panel_plan=panel, proxy_plan=proxy,
                                           endpoint_audit=dict(hostname=audit['hostname'], ip_literal=audit['ip_literal'],
-                                                              clients=audit['clients'])), sort_keys=True, indent=2))
+                                                              clients=audit['clients'], skipped=audit['skipped'])), sort_keys=True, indent=2))
     elif mode == 'panel-plan':
         plan = panel_plan(Path(path), args[0] if args else None)
         companion_warnings(plan, {})
@@ -4958,6 +4953,7 @@ def main():
         print(audit['hostname'])
         print(audit['ip_literal'])
         print(audit['warning'] or '')
+        print(audit['skipped'])
     elif mode == 'endpoint-hostname':
         # path is the candidate name. Prints ok, ipv4, or no. No other text.
         print(endpoint_hostname_status(path))
@@ -4969,6 +4965,8 @@ def main():
         endpoint_plan(path, args[0], args[1], args[2], args[3], args[4])
     elif mode == 'awg-port':
         print(awg_listen_port((Path(path) / 'vpn/server.conf').read_bytes()) or '')
+    elif mode == 'config-port':
+        print(awg_listen_port(Path(path).read_bytes()) or '')
     elif mode == 'proxy-plan':
         plan = proxy_plan(Path(path))
         companion_warnings({}, plan)
@@ -5091,13 +5089,26 @@ function awgStateWriteInstallState() {
 	done
 	chmod 600 "${AMNEZIAWG_DIR}/params" "${SERVER_AWG_CONF}" || return 1
 	umask "${OLD_UMASK}"
-	mkdir -p "$(dirname "${AWG_SYSCTL_FILE}")" || return 1
-	printf 'net.ipv4.ip_forward = 1\n' >"${AWG_SYSCTL_FILE}" || return 1
-	if [[ "${ENABLE_IPV6}" == y ]]; then
-		printf 'net.ipv6.conf.all.forwarding = 1\n' >>"${AWG_SYSCTL_FILE}" || return 1
+	# Quarantine never writes a boot-time sysctl file, including across reboot.
+}
+
+function awgStateWriteForwardingSettings() { # <private candidate>
+	printf 'net.ipv4.ip_forward = 1\n' >"$1" || return 1
+	if [[ "${ENABLE_IPV6:-n}" == y ]]; then
+		printf 'net.ipv6.conf.all.forwarding = 1\n' >>"$1" || return 1
 	fi
-	chmod 644 "${AWG_SYSCTL_FILE}"
-	# Do not apply forwarding or firewall rules until the operator verifies/fences.
+}
+
+function awgStateSaveLiveForwarding() { # <private rollback file>
+	local KEY VALUE
+	local -a KEYS=(net.ipv4.ip_forward)
+	[[ "${ENABLE_IPV6:-n}" != y ]] || KEYS+=(net.ipv6.conf.all.forwarding)
+	: >"$1" || return 1
+	for KEY in "${KEYS[@]}"; do
+		VALUE="$(sysctl -n "${KEY}")" || return 1
+		[[ "${VALUE}" == 0 || "${VALUE}" == 1 ]] || return 1
+		printf '%s = %s\n' "${KEY}" "${VALUE}" >>"$1" || return 1
+	done
 }
 
 # Export expects the normal service locations. A custom DB/env is resolved from
@@ -5208,6 +5219,10 @@ function awgStateEndpointSummary() (
 		echo 'ERROR: could not count client endpoints.' >&2
 		exit 1
 	}
+	if [[ "${LINES[3]:-}" != 0 ]]; then
+		echo 'ERROR: incomplete client endpoint count; run --audit-endpoints for details.' >&2
+		exit 1
+	fi
 	# A blocked stdout must not keep the lifecycle lock.
 	releaseClientLifecycleLock
 	printf '%s\n%s\n' "${HOST_COUNT}" "${IP_COUNT}"
@@ -5929,19 +5944,45 @@ _AWG_STATE_ACTIVATION_JOURNAL=""
 # stop. A published finalized marker means the terminal state was reached.
 function awgStateActivationAbort() {
 	local UNIT="${_AWG_STATE_ACTIVATION_UNIT}" JOURNAL="${_AWG_STATE_ACTIVATION_JOURNAL}"
+	local ACTIVE="" UNIT_STATE="" INCOMPLETE=0
 	[[ -n "${UNIT}" ]] || return 0
 	if [[ -n "${JOURNAL}" && -f "${JOURNAL}/finalized" && ! -L "${JOURNAL}/finalized" ]]; then
 		awgStateActivationDisarm
 		return 0
 	fi
+	trap '' INT TERM HUP
 	systemctl disable "${UNIT}" >/dev/null 2>&1 || true
 	systemctl stop "${UNIT}" || true
+	ACTIVE="$(systemctl show --property=ActiveState --value "${UNIT}")" || INCOMPLETE=1
+	UNIT_STATE="$(systemctl show --property=UnitFileState --value "${UNIT}")" || INCOMPLETE=1
+	case "${ACTIVE}" in inactive|failed) ;; *) INCOMPLETE=1 ;; esac
+	case "${UNIT_STATE}" in disabled|masked|masked-runtime) ;; *) INCOMPLETE=1 ;; esac
+	if [[ -n "${_AWG_STATE_ACTIVATION_SYSCTL_BEFORE:-}" ]]; then
+		if [[ -f "${_AWG_STATE_ACTIVATION_SYSCTL_BEFORE}" ]]; then
+			replaceFileExactly "${_AWG_STATE_ACTIVATION_SYSCTL_BEFORE}" "${AWG_SYSCTL_FILE}" "$(stat -c %a -- "${_AWG_STATE_ACTIVATION_SYSCTL_BEFORE}")" || INCOMPLETE=1
+		else
+			rm -f -- "${AWG_SYSCTL_FILE}" || INCOMPLETE=1
+		fi
+	fi
+	if [[ -n "${_AWG_STATE_ACTIVATION_LIVE_SYSCTL_BEFORE:-}" ]]; then
+		sysctl -p "${_AWG_STATE_ACTIVATION_LIVE_SYSCTL_BEFORE}" || INCOMPLETE=1
+	fi
+	if ((INCOMPLETE)); then
+		echo "ERROR: activation rollback INCOMPLETE; verify that ${UNIT} is stopped and disabled and inspect forwarding settings before retrying." >&2
+		if ! : >"${JOURNAL}/activation-rollback-incomplete"; then
+			echo 'WARNING: unable to record incomplete activation rollback; retries are not automatically blocked.' >&2
+		fi
+		awgStateActivationDisarm
+		return 1
+	fi
 	awgStateActivationDisarm
 }
 
 function awgStateActivationDisarm() {
 	_AWG_STATE_ACTIVATION_UNIT=""
 	_AWG_STATE_ACTIVATION_JOURNAL=""
+	_AWG_STATE_ACTIVATION_SYSCTL_BEFORE=""
+	_AWG_STATE_ACTIVATION_LIVE_SYSCTL_BEFORE=""
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
 	trap 'exit 129' HUP
@@ -5950,8 +5991,9 @@ function awgStateActivationDisarm() {
 function awgStateActivationInterrupted() { # <exit status>
 	trap '' INT TERM HUP
 	local JOURNAL="${_AWG_STATE_ACTIVATION_JOURNAL}"
-	echo 'ERROR: activation interrupted before finalization; stopping and disabling the VPN. The import stays quarantined; rerun --activate-state to retry.' >&2
-	awgStateActivationAbort
+	if awgStateActivationAbort; then
+		echo 'ERROR: activation interrupted before finalization; rollback completed. Rerun --activate-state to retry.' >&2
+	fi
 	[[ -z "${JOURNAL}" ]] || awgStateJournalStep "${JOURNAL}" activation-interrupted
 	exit "$1"
 }
@@ -6043,6 +6085,10 @@ if any(x is not None and (x.is_loopback or x.is_multicast) for x in (a, m)):
 # on it. Refuse until the operator has inspected and purged the journal.
 function awgStateRefuseIncompleteRollback() { # <journal>
 	local JOURNAL="$1"
+	if [[ -e "${JOURNAL}/activation-rollback-incomplete" || -L "${JOURNAL}/activation-rollback-incomplete" ]]; then
+		echo "ERROR: previous activation rollback was INCOMPLETE. Verify that the VPN is stopped and disabled and restore the intended forwarding settings, then remove ${JOURNAL}/activation-rollback-incomplete and retry." >&2
+		return 1
+	fi
 	[[ -e "${JOURNAL}/rollback-incomplete" || -L "${JOURNAL}/rollback-incomplete" ]] || return 0
 	echo "ERROR: a previous import rollback was INCOMPLETE; refusing (including --dry-run and --activate-state). Inspect ${AMNEZIAWG_DIR}, the unit directory and ${JOURNAL}/before, restore manually, then run --purge-state-journal ${JOURNAL##*/} --force before retrying." >&2
 	return 1
@@ -6124,7 +6170,7 @@ function awgStateRestorePanel() { # <stage> <journal> <work>
 	local CLIENTS="${AMNEZIAWG_DIR}/clients"
 	local -a FIELDS=() ARGS=()
 	[[ -f "${STAGE}/web/database.sqlite" ]] || return 0
-	if [[ -e "${JOURNAL}/panel-restored" ]]; then
+	if [[ -f "${JOURNAL}/panel-restored" && ! -L "${JOURNAL}/panel-restored" ]]; then
 		echo 'Panel already restored by this migration; nothing to do.'
 		return 0
 	fi
@@ -6168,39 +6214,51 @@ function awgStateRestorePanel() { # <stage> <journal> <work>
 			return 1
 		}
 	fi
-	# Retry: never run the installer against a running half-restored panel.
-	systemctl stop "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
-	# The archived env is installed first, so the panel installer keeps it
-	# (it never overwrites an existing env file without --force).
-	if ! install -d -m 700 -o root -g root -- "${WEB_PANEL_ENV_FILE%/*}" ||
-		! install -m 600 -o root -g root -- "${WORK}/panel/env.conf" "${WEB_PANEL_ENV_FILE}"; then
-		awgStatePanelFail "${JOURNAL}" "cannot install ${WEB_PANEL_ENV_FILE}."
-		return 1
+	# Once installed, retry startup/health only. A panel may already have
+	# accepted writes before a completion-marker failure.
+	if [[ -e "${JOURNAL}/panel-data-installed" || -L "${JOURNAL}/panel-data-installed" ]]; then
+		[[ -f "${JOURNAL}/panel-data-installed" && ! -L "${JOURNAL}/panel-data-installed" &&
+			-f "${DB}" && ! -L "${DB}" && -f "${WEB_PANEL_ENV_FILE}" && ! -L "${WEB_PANEL_ENV_FILE}" ]] ||
+			{ echo 'ERROR: installed panel files or retry marker are missing or unsafe; not restoring over them.' >&2; return 1; }
+	else
+		# Retry: never run the installer against a running half-restored panel.
+		systemctl stop "${AWG_STATE_PANEL_UNIT}" >/dev/null 2>&1 || true
+		# The archived env is installed first, so the panel installer keeps it
+		# (it never overwrites an existing env file without --force).
+		if ! install -d -m 700 -o root -g root -- "${WEB_PANEL_ENV_FILE%/*}" ||
+			! install -m 600 -o root -g root -- "${WORK}/panel/env.conf" "${WEB_PANEL_ENV_FILE}"; then
+			awgStatePanelFail "${JOURNAL}" "cannot install ${WEB_PANEL_ENV_FILE}."
+			return 1
+		fi
+		ARGS=(--non-interactive --username "${FIELDS[0]}" --password-hash-file "${WORK}/panel/password-hash" --data-dir "${DATA_DIR}"
+			--env-file "${WEB_PANEL_ENV_FILE}" --config-dir "${CLIENTS}" --no-start --no-enable)
+		[[ -z "${AWG_STATE_PANEL_BINARY:-}" ]] || ARGS+=(--binary-src "${AWG_STATE_PANEL_BINARY}")
+		awgStateJournalStep "${JOURNAL}" panel-install
+		bash "${INSTALLER}" "${ARGS[@]}" </dev/null ||
+			{ awgStatePanelFail "${JOURNAL}" "${INSTALLER} --non-interactive failed."; return 1; }
+		for SIDECAR in -wal -shm -journal; do
+			rm -f -- "${DB}${SIDECAR}" || { awgStatePanelFail "${JOURNAL}" "cannot remove stale ${DB}${SIDECAR}."; return 1; }
+		done
+		if ! install -m 600 -o awg-web -g awg-web -- "${WORK}/panel/database.sqlite" "${DB}.awg-state-new" ||
+			! mv -f -- "${DB}.awg-state-new" "${DB}"; then
+			rm -f -- "${DB}.awg-state-new"
+			awgStatePanelFail "${JOURNAL}" "cannot install the panel database at ${DB}."
+			return 1
+		fi
+		: >"${JOURNAL}/panel-data-installed" || { echo 'ERROR: cannot record installed panel data; not starting the panel.' >&2; return 1; }
+		awgStateJournalStep "${JOURNAL}" panel-database-installed
 	fi
-	ARGS=(--non-interactive --username "${FIELDS[0]}" --password-hash-file "${WORK}/panel/password-hash" --data-dir "${DATA_DIR}"
-		--env-file "${WEB_PANEL_ENV_FILE}" --config-dir "${CLIENTS}" --no-start --no-enable)
-	[[ -z "${AWG_STATE_PANEL_BINARY:-}" ]] || ARGS+=(--binary-src "${AWG_STATE_PANEL_BINARY}")
-	awgStateJournalStep "${JOURNAL}" panel-install
-	bash "${INSTALLER}" "${ARGS[@]}" </dev/null ||
-		{ awgStatePanelFail "${JOURNAL}" "${INSTALLER} --non-interactive failed."; return 1; }
-	for SIDECAR in -wal -shm -journal; do
-		rm -f -- "${DB}${SIDECAR}" || { awgStatePanelFail "${JOURNAL}" "cannot remove stale ${DB}${SIDECAR}."; return 1; }
-	done
-	if ! install -m 600 -o awg-web -g awg-web -- "${WORK}/panel/database.sqlite" "${DB}.awg-state-new" ||
-		! mv -f -- "${DB}.awg-state-new" "${DB}"; then
-		rm -f -- "${DB}.awg-state-new"
-		awgStatePanelFail "${JOURNAL}" "cannot install the panel database at ${DB}."
-		return 1
-	fi
-	awgStateJournalStep "${JOURNAL}" panel-database-installed
 	systemctl start "${AWG_STATE_PANEL_UNIT}" ||
 		{ awgStatePanelFail "${JOURNAL}" "${AWG_STATE_PANEL_UNIT} did not start."; return 1; }
 	awgStatePanelHealthy "${WEB_PANEL_ENV_FILE}" ||
 		{ awgStatePanelFail "${JOURNAL}" "${AWG_STATE_PANEL_UNIT} did not become healthy (/api/health); a schema newer than this panel or a migration error is reported in its log."; return 1; }
 	systemctl enable "${AWG_STATE_PANEL_UNIT}" ||
 		{ awgStatePanelFail "${JOURNAL}" "cannot enable ${AWG_STATE_PANEL_UNIT} at boot."; return 1; }
-	: >"${JOURNAL}/panel-restored" || echo 'WARNING: cannot write the panel-restored journal marker; a rerun will repeat the panel restore.' >&2
-	rm -f -- "${JOURNAL}/panel-installing" || true
+	: >"${JOURNAL}/panel-restored" || {
+		echo 'ERROR: cannot record panel restoration; retained the retry state.' >&2
+		return 1
+	}
+	rm -f -- "${JOURNAL}/panel-installing" "${JOURNAL}/panel-data-installed" || true
 	awgStateJournalStep "${JOURNAL}" panel-restored
 	echo "Panel restored and healthy (${AWG_STATE_PANEL_UNIT}, DB ${DB}); it now enforces peer expiries. Queued mail from the old host was cancelled, not replayed."
 }
@@ -6257,7 +6315,7 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 	local STAGE="$1" JOURNAL="$2" WORK="$3" INSTALLER CONFIG CONFIG_DIR DATA_DIR INSTALL_DIR PORT APPROVED=""
 	local -a FIELDS=() ARGS=()
 	[[ -f "${STAGE}/proxy/proxy.toml" ]] || return 0
-	if [[ -e "${JOURNAL}/proxy-restored" ]]; then
+	if [[ -f "${JOURNAL}/proxy-restored" && ! -L "${JOURNAL}/proxy-restored" ]]; then
 		echo 'Proxy already restored by this migration; nothing to do.'
 		return 0
 	fi
@@ -6280,6 +6338,17 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 	}
 	mapfile -d '' FIELDS <"${WORK}/proxy.fields"
 	[[ ${#FIELDS[@]} -gt 4 ]] || { echo 'ERROR: internal proxy prepare error.' >&2; return 1; }
+	# Protect ordinary finalized edits before stopping or rewriting the proxy.
+	# The installer also validates and never edits AWG, even if the port changes
+	# after this gate. Verify both on-disk and active interface listen ports.
+	local BACKEND_PORT
+	BACKEND_PORT="$(awgStateArchive awg-port "${STAGE}")" || return 1
+	if [[ -z "${BACKEND_PORT}" ]] || ! awgStateTrustedPath "${SERVER_AWG_CONF}" ||
+		[[ "$(awgStateArchive config-port "${SERVER_AWG_CONF}")" != "${BACKEND_PORT}" ]] ||
+		[[ "$(awg show "${SERVER_AWG_NIC}" listen-port)" != "${BACKEND_PORT}" ]]; then
+		echo 'ERROR: current VPN listen port does not match the archived proxy backend; no VPN or proxy changes made.' >&2
+		return 1
+	fi
 	CONFIG="${FIELDS[0]}" DATA_DIR="${FIELDS[1]}" INSTALL_DIR="${FIELDS[2]}" PORT="${FIELDS[3]}"
 	CONFIG_DIR="${CONFIG%/*}"
 	if [[ ! -e "${JOURNAL}/proxy-installing" ]] &&
@@ -6302,31 +6371,41 @@ function awgStateRestoreProxy() { # <stage> <journal> <work>
 			return 1
 		}
 	fi
-	systemctl stop "${AWG_STATE_PROXY_SERVICE}" >/dev/null 2>&1 || true
-	# A retry starts from a clean generated config (the installer keeps an
-	# existing one without --force and would then skip unit installation).
-	if [[ -f "${CONFIG}" ]]; then
-		rm -f -- "${CONFIG}" || { awgStateProxyFail "${JOURNAL}" "cannot reset ${CONFIG} for retry."; return 1; }
+	if [[ -e "${JOURNAL}/proxy-data-installed" || -L "${JOURNAL}/proxy-data-installed" ]]; then
+		[[ -f "${JOURNAL}/proxy-data-installed" && ! -L "${JOURNAL}/proxy-data-installed" &&
+			-f "${CONFIG}" && ! -L "${CONFIG}" ]] ||
+			{ echo 'ERROR: installed proxy config or retry marker is missing or unsafe; not restoring over it.' >&2; return 1; }
+	else
+		systemctl stop "${AWG_STATE_PROXY_SERVICE}" >/dev/null 2>&1 || true
+		# A retry starts from a clean generated config (the installer keeps an
+		# existing one without --force and would then skip unit installation).
+		if [[ -f "${CONFIG}" ]]; then
+			rm -f -- "${CONFIG}" || { awgStateProxyFail "${JOURNAL}" "cannot reset ${CONFIG} for retry."; return 1; }
+		fi
+		ARGS=(--non-interactive --require-existing-awg-port "${FIELDS[@]:4}" --config-file "${CONFIG}" --data-dir "${DATA_DIR}"
+			--install-dir "${INSTALL_DIR}" --awg-dir "${AMNEZIAWG_DIR}" --no-start --no-enable)
+		[[ -z "${AWG_STATE_PROXY_BINARY:-}" ]] || ARGS+=(--binary-src "${AWG_STATE_PROXY_BINARY}")
+		awgStateJournalStep "${JOURNAL}" proxy-install
+		bash "${INSTALLER}" "${ARGS[@]}" </dev/null ||
+			{ awgStateProxyFail "${JOURNAL}" "${INSTALLER} --non-interactive failed."; return 1; }
+		if ! install -m 600 -o root -g root -- "${WORK}/proxy/proxy.toml" "${CONFIG}"; then
+			awgStateProxyFail "${JOURNAL}" "cannot install ${CONFIG}."
+			return 1
+		fi
+		: >"${JOURNAL}/proxy-data-installed" || { echo 'ERROR: cannot record installed proxy config; not starting the proxy.' >&2; return 1; }
+		awgStateJournalStep "${JOURNAL}" proxy-config-installed
 	fi
-	ARGS=(--non-interactive "${FIELDS[@]:4}" --config-file "${CONFIG}" --data-dir "${DATA_DIR}"
-		--install-dir "${INSTALL_DIR}" --awg-dir "${AMNEZIAWG_DIR}" --no-start --no-enable)
-	[[ -z "${AWG_STATE_PROXY_BINARY:-}" ]] || ARGS+=(--binary-src "${AWG_STATE_PROXY_BINARY}")
-	awgStateJournalStep "${JOURNAL}" proxy-install
-	bash "${INSTALLER}" "${ARGS[@]}" </dev/null ||
-		{ awgStateProxyFail "${JOURNAL}" "${INSTALLER} --non-interactive failed."; return 1; }
-	if ! install -m 600 -o root -g root -- "${WORK}/proxy/proxy.toml" "${CONFIG}"; then
-		awgStateProxyFail "${JOURNAL}" "cannot install ${CONFIG}."
-		return 1
-	fi
-	awgStateJournalStep "${JOURNAL}" proxy-config-installed
 	systemctl start "${AWG_STATE_PROXY_SERVICE}" ||
 		{ awgStateProxyFail "${JOURNAL}" "${AWG_STATE_PROXY_SERVICE} did not start."; return 1; }
 	awgStateProxyHealthy "${PORT}" ||
 		{ awgStateProxyFail "${JOURNAL}" "${AWG_STATE_PROXY_SERVICE} did not stay active/listen on UDP ${PORT}."; return 1; }
 	systemctl enable "${AWG_STATE_PROXY_SERVICE}" ||
 		{ awgStateProxyFail "${JOURNAL}" "cannot enable ${AWG_STATE_PROXY_SERVICE} at boot."; return 1; }
-	: >"${JOURNAL}/proxy-restored" || echo 'WARNING: cannot write the proxy-restored journal marker; a rerun will repeat the proxy restore.' >&2
-	rm -f -- "${JOURNAL}/proxy-installing" || true
+	: >"${JOURNAL}/proxy-restored" || {
+		echo 'ERROR: cannot record proxy restoration; retained the retry state.' >&2
+		return 1
+	}
+	rm -f -- "${JOURNAL}/proxy-installing" "${JOURNAL}/proxy-data-installed" || true
 	awgStateJournalStep "${JOURNAL}" proxy-restored
 	echo "Proxy restored (${AWG_STATE_PROXY_SERVICE}, UDP ${PORT}, config ${CONFIG})."
 }
@@ -6446,15 +6525,22 @@ function awgStatePurgeJournal() ( # <manifest-sha256> [--force|--reset-finalized
 	shopt -s nullglob dotglob
 	for ENTRY in "${JOURNAL}/"*; do
 		case "${ENTRY##*/}" in
-			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete|panel-installing|panel-restored|panel-approved-dir|proxy-installing|proxy-restored|proxy-approved-dirs|companions.lock) ;;
+			before|before.new|before.old|recovery|receipt|nic|steps|finalized|rollback-incomplete|activation-rollback-incomplete|panel-installing|panel-data-installed|panel-restored|panel-approved-dir|proxy-installing|proxy-data-installed|proxy-restored|proxy-approved-dirs|companions.lock) ;;
 			*) echo 'ERROR: unexpected journal entry; refusing purge.' >&2; exit 1 ;;
 		esac
 	done
-	for ENTRY in before before.new before.old recovery receipt nic steps rollback-incomplete panel-installing panel-approved-dir proxy-installing proxy-approved-dirs companions.lock; do
+	local -a PRUNE=(before before.new before.old recovery receipt nic steps rollback-incomplete activation-rollback-incomplete companions.lock)
+	if (( ! FINALIZED )) || [[ "${OPTION}" == --reset-finalized ]]; then
+		PRUNE+=(panel-installing panel-data-installed panel-approved-dir proxy-installing proxy-data-installed proxy-approved-dirs)
+	else
+		[[ ! -f "${JOURNAL}/panel-restored" ]] || PRUNE+=(panel-installing panel-data-installed panel-approved-dir)
+		[[ ! -f "${JOURNAL}/proxy-restored" ]] || PRUNE+=(proxy-installing proxy-data-installed proxy-approved-dirs)
+	fi
+	for ENTRY in "${PRUNE[@]}"; do
 		rm -rf --one-file-system -- "${JOURNAL:?}/${ENTRY:?}" || exit 1
 	done
 	if (( FINALIZED )) && [[ "${OPTION}" != --reset-finalized ]]; then
-		echo 'Purged rollback/receipt material (and any legacy plaintext recovery copies); retained only the non-secret finalized (and panel-/proxy-restored) markers.'
+		echo 'Purged rollback/receipt material (and any legacy plaintext recovery copies); retained the non-secret finalization and companion recovery state.'
 	else
 		rm -f -- "${JOURNAL}/finalized" "${JOURNAL}/panel-restored" "${JOURNAL}/proxy-restored" && rmdir -- "${JOURNAL}" || exit 1
 		if [[ "${OPTION}" == --reset-finalized ]]; then
@@ -6526,7 +6612,7 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 		mkdir -p "${WORK}/validate" || return 1
 		validateStagedAwgConfigs "${WORK}/validate" --label activation-server "${WORK}/reconciled.conf" || return 1
 		awgStateTrustedPath "${AWG_SYSCTL_FILE}" || return 1
-		sysctl -p "${AWG_SYSCTL_FILE}" || return 1
+		awgStateWriteForwardingSettings "${WORK}/forwarding.conf" || return 1
 		# Backend validation may take time: evaluate expiry again immediately
 		# before publishing the final candidate and starting the interface.
 		awgStateArchive reconcile "${SERVER_AWG_CONF}" "${STAGE}" "${WORK}/at-start.conf" || return 1
@@ -6596,8 +6682,20 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 		trap 'awgStateActivationInterrupted 130' INT
 		trap 'awgStateActivationInterrupted 143' TERM
 		trap 'awgStateActivationInterrupted 129' HUP
+		# Arm rollback before changing even the live kernel settings. A failed
+		# sysctl -p can have already applied a prefix of the candidate.
+		if ! awgStateSaveLiveForwarding "${WORK}/forwarding.live.before"; then
+			echo 'ERROR: could not read current forwarding settings; nothing was applied.' >&2
+			awgStateActivationDisarm
+			return 1
+		fi
+		_AWG_STATE_ACTIVATION_LIVE_SYSCTL_BEFORE="${WORK}/forwarding.live.before"
+		if ! sysctl -p "${WORK}/forwarding.conf"; then
+			awgStateActivationAbort || true
+			return 1
+		fi
 		if ! systemctl start "awg-quick@${SERVER_AWG_NIC}"; then
-			awgStateActivationAbort
+			awgStateActivationAbort || true
 			awgStateJournalStep "${JOURNAL}" activation-failed
 			return 1
 		fi
@@ -6607,17 +6705,30 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 		awgStateJournalStep "${JOURNAL}" activated
 		if [[ "${OPTION}" == --enable-at-boot ]]; then
 			if ! printf '%s\n' "${SERVER_AWG_NIC}" >"${WORK}/finalized"; then
-				awgStateActivationAbort
+				awgStateActivationAbort || true
+				return 1
+			fi
+			# Only a finalized activation publishes persistent forwarding. Keep a
+			# before-image until the enable and final marker have both succeeded.
+			if [[ -e "${AWG_SYSCTL_FILE}" ]] &&
+				! cp -p -- "${AWG_SYSCTL_FILE}" "${WORK}/forwarding.before"; then
+				awgStateActivationAbort || true
+				return 1
+			fi
+			_AWG_STATE_ACTIVATION_SYSCTL_BEFORE="${WORK}/forwarding.before"
+			if ! mkdir -p -- "$(dirname -- "${AWG_SYSCTL_FILE}")" ||
+				! replaceFileExactly "${WORK}/forwarding.conf" "${AWG_SYSCTL_FILE}" 644; then
+				awgStateActivationAbort || true
 				return 1
 			fi
 			if ! systemctl enable "awg-quick@${SERVER_AWG_NIC}"; then
-				awgStateActivationAbort
+				awgStateActivationAbort || true
 				return 1
 			fi
 			if ! replaceFileExactly "${WORK}/finalized" "${JOURNAL}/finalized" 600 ||
 				! awgStateIsFinalized "${JOURNAL}" "${SERVER_AWG_NIC}"; then
 				rm -f -- "${JOURNAL}/finalized" || true
-				awgStateActivationAbort
+				awgStateActivationAbort || true
 				return 1
 			fi
 			awgStateActivationDisarm
@@ -6625,11 +6736,12 @@ function awgStateReconcileImport() { # <stage> <journal> <work> <mode> <option> 
 			echo 'Finalized: VPN enabled at boot. Normal systemctl management no longer requires the archive/passphrase.'
 			awgStateRecordIdentityTombstone "${STAGE}" "${JOURNAL##*/}" "${WORK}" ||
 				awgStateWarnIdentityTombstone
-			echo "Journal ${JOURNAL} holds no keys (the encrypted archive is the recovery copy). Optional cleanup: --purge-state-journal ${JOURNAL##*/}."
+			echo "Journal ${JOURNAL} holds no keys (the encrypted archive is the recovery copy)."
 			# The VPN is final; the panel never runs under the VPN lifecycle lock.
 			awgStateAcquireCompanionLock "${JOURNAL}" || return 1
 			releaseClientLifecycleLock
 			awgStateRestoreCompanions "${STAGE}" "${JOURNAL}" "${WORK}" || return 1
+			echo "Optional cleanup: --purge-state-journal ${JOURNAL##*/}."
 		else
 			awgStateActivationDisarm
 			echo 'Activated for testing only; still disabled at boot. Stop/disable it, then activate with --enable-at-boot to finalize.'
@@ -6733,6 +6845,26 @@ parent, name = os.path.split(dest_path)
 if not parent or not name or name in ('.', '..') or '/' in name or name.startswith('.awg-endpoint.'):
     fail('could not install rewritten profile')
 
+def access_acl(fd):
+    try:
+        return os.getxattr(fd, 'system.posix_acl_access')
+    except OSError as exc:
+        if exc.errno in (errno.ENODATA, errno.EOPNOTSUPP):
+            return None
+        raise
+
+def copy_access(fd, info, acl):
+    if os.geteuid() == 0:
+        os.fchown(fd, info.st_uid, info.st_gid)
+    # An inherited directory ACL may be present even if the original had
+    # none. Set the exact ACL before widening mode bits on the temporary file.
+    if acl is not None:
+        os.setxattr(fd, 'system.posix_acl_access', acl)
+    elif access_acl(fd) is not None:
+        os.removexattr(fd, 'system.posix_acl_access')
+    os.fchmod(fd, stat.S_IMODE(info.st_mode))
+    os.fsync(fd)
+
 def read_regular(path):
     try:
         info = os.lstat(path)
@@ -6763,9 +6895,15 @@ try:
         fail('could not install rewritten profile')
     if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
         fail('could not install rewritten profile')
-    current_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    current_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     try:
+        opened = os.fstat(current_fd)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_ino != info.st_ino or
+                opened.st_dev != info.st_dev or opened.st_size > 1024 * 1024):
+            fail('profile changed since the plan; rerun')
+        info = opened
         current = os.read(current_fd, info.st_size + 1)
+        acl = access_acl(current_fd)
     finally:
         os.close(current_fd)
     if current != expected:
@@ -6791,10 +6929,7 @@ try:
                 if wrote <= 0:
                     fail('could not install rewritten profile')
                 view = view[wrote:]
-            if os.geteuid() == 0:
-                os.fchown(temp_fd, info.st_uid, info.st_gid)
-            os.fchmod(temp_fd, stat.S_IMODE(info.st_mode))
-            os.fsync(temp_fd)
+            copy_access(temp_fd, info, acl)
             ours = os.fstat(temp_fd)
             try:
                 listed = os.lstat(temp_name, dir_fd=dir_fd)
@@ -6826,10 +6961,7 @@ try:
                             if wrote <= 0:
                                 fail('could not install rewritten profile')
                             pending = pending[wrote:]
-                        if os.geteuid() == 0:
-                            os.fchown(restore, info.st_uid, info.st_gid)
-                        os.fchmod(restore, stat.S_IMODE(info.st_mode))
-                        os.fsync(restore)
+                        copy_access(restore, info, acl)
                     finally:
                         os.close(restore)
                     swapped = True
@@ -6888,7 +7020,8 @@ plan = json.load(open(sys.argv[1], encoding='utf-8'))
 kind = sys.argv[2]
 if kind == 'audit':
     public = dict(hostname=plan['hostname'], ip_literal=plan['ip_literal'],
-                  clients=plan['clients'], symlinks=plan.get('symlinks') or [])
+                  clients=plan['clients'], symlinks=plan.get('symlinks') or [],
+                  skipped=[item['path'] for item in plan['files'] if item.get('status') == 'skipped'])
     print(json.dumps(public, indent=2, sort_keys=True))
 elif kind == 'diff':
     updates = [item for item in plan['files'] if item.get('status') == 'update']
@@ -18080,8 +18213,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	#   amneziawg-install.sh --audit-endpoints
 	#   amneziawg-install.sh --set-endpoint-host <hostname> [--dry-run]
 	#     Rewrites only the host in client Endpoint lines (and SERVER_PUB_IP).
-	#     Keys are not regenerated. Clients import the updated profile once;
-	#     after that, changing the hostname's DNS record is enough.
+	#     Keys are not regenerated. Clients import the updated profile once.
+	#     Later DNS changes may require reconnecting or refreshing DNS.
 	#
 	# Requires AmneziaWG to be already installed (params file must exist).
 	case "${1:-}" in
