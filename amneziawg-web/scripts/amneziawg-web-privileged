@@ -998,10 +998,22 @@ run_boringtun_imitation() {
 emit_safe_server_state() {
     local interface="$1"
     local path="${AWG_CONFIG_ROOT}/${interface}.conf"
-    local line trimmed value
+    local line clean trimmed value in_interface="false" padding_status="absent"
 
     validate_server_config_path "${path}"
     while IFS= read -r line || [[ -n "${line}" ]]; do
+        # Report presence only for creation admission. Never emit values
+        # from padding assignments, comments, or unrelated config keys.
+        clean="${line%%#*}"
+        clean="${clean%%;*}"
+        clean="${clean//[[:space:]]/}"
+        if [[ "${clean}" == \[*\] ]]; then
+            in_interface="false"
+            [[ "${clean,,}" != "[interface]" ]] || in_interface="true"
+        elif [[ "${in_interface}" == "true" && "${clean,,}" == s[34]=* ]]; then
+            padding_status="present"
+        fi
+
         trimmed="${line#"${line%%[![:space:]]*}"}"
         trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
 
@@ -1029,6 +1041,7 @@ emit_safe_server_state() {
             printf 'AllowedIPs = %s\n' "${value}"
         fi
     done < "${path}"
+    printf 'ServerInterfaceS3S4 = %s\n' "${padding_status}"
 }
 
 # Print the index of the [Interface] ListenPort line when syncing it would not

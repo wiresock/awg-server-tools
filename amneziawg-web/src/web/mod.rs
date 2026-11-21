@@ -406,7 +406,9 @@ fn create_user_diagnostic_message(
             format!("Failed to create user: IP address already in use: {ip}")
         }
         CreateClientError::UnsafeTransportBudget { .. }
-        | CreateClientError::ExcessiveTransportBudget { .. } => error.to_string(),
+        | CreateClientError::ExcessiveTransportBudget { .. }
+        | CreateClientError::LegacyServerPadding
+        | CreateClientError::LegacyServerPaddingStatusUnavailable => error.to_string(),
         // The following variants may contain raw stderr/paths from sudo
         // commands or OS errors; use fixed messages and log details server-side.
         CreateClientError::ParamsRead(_) => {

@@ -74,6 +74,12 @@ pub enum CreateClientError {
     #[error("failed to parse config: {0}")]
     ConfigParse(String),
 
+    #[error("AWG 1.0 does not allow active S3/S4 in the server [Interface] configuration. Repair the server configuration before creating clients.")]
+    LegacyServerPadding,
+
+    #[error("Could not verify server S3/S4 status for AWG 1.0. Update the web panel and its privileged helper together before creating clients.")]
+    LegacyServerPaddingStatusUnavailable,
+
     #[error("the assumed 1420 pre-S4 baseline leaves {effective_mtu} bytes, below the required 1280. S4 must not exceed 140, and smaller outer budgets require a lower limit; coordinate S4 and MTU before creating profiles")]
     UnsafeTransportBudget { effective_mtu: i32 },
 
@@ -163,6 +169,8 @@ pub fn sanitized_create_error_category(error: &CreateClientError) -> &'static st
         CreateClientError::KeyGen(_) => "key_generation_failed",
         CreateClientError::FileWrite(_) => "file_write_failed",
         CreateClientError::ConfigParse(_) => "config_parse_failed",
+        CreateClientError::LegacyServerPadding => "legacy_server_padding",
+        CreateClientError::LegacyServerPaddingStatusUnavailable => "legacy_server_padding_status_unavailable",
         CreateClientError::UnsafeTransportBudget { .. }
         | CreateClientError::ExcessiveTransportBudget { .. } => "unsafe_transport_budget",
         CreateClientError::Awg(_) => "awg_command_failed",
@@ -793,6 +801,27 @@ fn parse_kv<'a>(line: &'a str, key: &str) -> Option<&'a str> {
         Some(parts.next()?.trim())
     } else {
         None
+    }
+}
+
+#[cfg(any(unix, test))]
+fn validate_server_framing_for_creation(
+    protocol: AwgProtocolVersion,
+    server_state: &str,
+) -> Result<(), CreateClientError> {
+    if protocol != AwgProtocolVersion::V1 {
+        return Ok(());
+    }
+
+    // This status is produced by the privileged helper; no raw padding
+    // value or other config data is needed for legacy creation admission.
+    let mut statuses = server_state
+        .lines()
+        .filter_map(|line| line.strip_prefix("ServerInterfaceS3S4 = "));
+    match (statuses.next(), statuses.next()) {
+        (Some("absent"), None) => Ok(()),
+        (Some("present"), None) => Err(CreateClientError::LegacyServerPadding),
+        _ => Err(CreateClientError::LegacyServerPaddingStatusUnavailable),
     }
 }
 
@@ -1536,6 +1565,7 @@ pub(crate) fn create_client_with_lifecycle_lock(
     // Step 4: Read server config to check for duplicates and find used IPs.
     let server_config = awg::read_server_state_via_sudo(&params.server_awg_nic)
         .map_err(|e| CreateClientError::ParamsRead(format!("failed to read server config: {e}")))?;
+    validate_server_framing_for_creation(params.protocol_version, &server_config)?;
 
     // Check for duplicate name (look for ### Client <name> marker).
     let marker = format!("### Client {name}");
@@ -2259,6 +2289,29 @@ SERVER_AWG_H4='1837068650'
         // An incomplete newer installation must not silently become AWG 1.0.
         assert!(parse_params(&format!("{legacy}AWG_PROTOCOL_VERSION='2'\n")).is_err());
         assert!(parse_params(&format!("{legacy}SERVER_AWG_S3='45'\n")).is_err());
+    }
+
+    #[test]
+    fn awg1_client_creation_requires_known_absence_of_active_server_padding() {
+        let legacy = "[Interface]\nAddress = 10.66.66.1/24\n";
+        let clean = format!("{legacy}ServerInterfaceS3S4 = absent\n");
+        let padded = format!("{legacy}ServerInterfaceS3S4 = present\n");
+        assert!(validate_server_framing_for_creation(AwgProtocolVersion::V1, &clean).is_ok());
+        let error =
+            validate_server_framing_for_creation(AwgProtocolVersion::V1, &padded).unwrap_err();
+        assert!(error.to_string().contains("does not allow active S3/S4"));
+
+        for state in [
+            legacy.to_owned(),
+            format!("{legacy}ServerInterfaceS3S4 = unknown\n"),
+            format!("{clean}ServerInterfaceS3S4 = present\n"),
+        ] {
+            let error =
+                validate_server_framing_for_creation(AwgProtocolVersion::V1, &state).unwrap_err();
+            assert!(error.to_string().contains("Update the web panel"));
+        }
+        assert!(validate_server_framing_for_creation(AwgProtocolVersion::V2, &padded).is_ok());
+        assert!(validate_server_framing_for_creation(AwgProtocolVersion::V2, legacy).is_ok());
     }
 
     #[test]

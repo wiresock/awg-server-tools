@@ -2040,6 +2040,35 @@ function validateAwg1Params() {
 	done
 }
 
+# Legacy params alone cannot tell AWG 1.0 apart from a newer server with
+# incomplete params. Even an explicit zero is an active S3/S4 assignment.
+function validateAwg1ServerFraming() {
+	[[ "${AWG_PROTOCOL_VERSION:-}" == "${AWG_PROTOCOL_VERSION_1}" ]] || return 0
+	local CONFIG_PATH="$1" FIELD
+	if ! FIELD=$(awk '
+		{
+			sub(/[#;].*$/, "")
+			# amneziawg-tools strips whitespace from ordinary fields.
+			gsub(/[[:space:]]/, "")
+			if ($0 ~ /^\[.*\]$/) {
+				in_interface = (tolower($0) == "[interface]")
+				next
+			}
+			if (in_interface && tolower($0) ~ /^s[34]=/) {
+				print toupper(substr($0, 1, 2))
+				exit
+			}
+		}
+	' "${CONFIG_PATH}"); then
+		echo 'ERROR: Cannot read the server config to check AmneziaWG 1.0 framing.' >&2
+		return 1
+	fi
+	if [[ -n "${FIELD}" ]]; then
+		echo "ERROR: AmneziaWG 1.0 params conflict with ${FIELD} in the server [Interface]. Reconcile params and the server config before creating profiles or migrating." >&2
+		return 1
+	fi
+}
+
 # Invalid AWG 3.x-only state normally fails closed. The sole exception is the
 # explicit AWG 2.0 downgrade command, which must remain able to remove damaged
 # 3.0/3.1 fields and restore an otherwise valid installation to AWG 2.0.
@@ -15828,6 +15857,7 @@ function loadParams() {
 	if [[ "${SKIP_LEGACY_MIGRATIONS}" == "1" ]]; then
 		return 0
 	fi
+	validateAwg1ServerFraming "${SERVER_AWG_CONF}" || return 1
 
 	local NEEDS_UPDATE=0
 	# Track IPv6 normalization separately from protocol migration;
@@ -17658,7 +17688,7 @@ function changeAwgProtocolInteractively() {
 function runLockedManagementOperation() (
 	local OPERATION="$1"
 	acquireClientLifecycleLock || return 1
-	loadParams
+	loadParams || return 1
 	"${OPERATION}"
 )
 
@@ -17945,13 +17975,13 @@ function nonInteractiveAddClient() (
 	# this CLI process started but before it acquired the lifecycle lock.
 	# Non-interactive client management must never prompt for or auto-apply a
 	# breaking AWG 1.0 -> 2.0 migration.
-	loadParams 0 1
+	loadParams 0 1 || exit 1
+	# Use the interface from the params reloaded under the lifecycle lock.
+	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	validateAwg1ServerFraming "${SERVER_AWG_CONF}" || exit 1
 	local CLIENT_MTU_LINE AWG_S3_S4_LINES=""
 	CLIENT_MTU_LINE="$(renderClientMtu)" || exit 1
 	AWG_S3_S4_LINES="$(renderAwgS3S4Lines)" || exit 1
-
-	# Ensure the config path follows the freshly loaded interface name.
-	SERVER_AWG_CONF="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
 
 	# Check for duplicate name
 	if [[ $(grep -c -xF "### Client ${CLIENT_NAME}" "${SERVER_AWG_CONF}") != 0 ]]; then

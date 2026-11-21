@@ -5231,7 +5231,8 @@ awgStateEndpointSummary >"$ROOT/summary.txt"
                 if variant == 'migrated':
                     params_bytes += b"AWG_PROTOCOL_VERSION='1'\nSERVER_AWG_S3=''\nSERVER_AWG_S4=''\n"
                 (target / 'params').write_bytes(params_bytes)
-                (target / 'awg0.conf').write_bytes(files['vpn/server.conf'])
+                (target / 'awg0.conf').write_bytes(files['vpn/server.conf'].replace(
+                    b'S2 = 150\n', b'S2 = 150\n# S3 = 15 (not active)\n# S4 = 0 (not active)\n'))
                 (target / 'clients/awg0-client-phone.conf').write_bytes(files['clients/awg0-client-phone.conf'])
                 shell = r'''
 set -euo pipefail
@@ -5370,6 +5371,60 @@ grep -q "^S4 = " "$SERVER_AWG_CONF"
                     ['bash', '-c', shell, 'awg1-guard', str(SCRIPT), str(target), PEER, PUB],
                     capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_awg1_cli_refuses_active_server_padding_before_profile_or_migration(self):
+        files = self.legacy_fixture(proxy=False)
+        shell = r'''
+set -uo pipefail
+source "$1"
+AMNEZIAWG_DIR="$2"
+SERVER_AWG_CONF="$AMNEZIAWG_DIR/stale.conf"
+TEST_KEY="$4"
+acquireClientLifecycleLock() { return 0; }
+releaseClientLifecycleLock() { return 0; }
+ensureAwgBackendReady() { return 0; }
+awgSyncInterfaceConfig() { return 0; }
+copyToWebPanelDir() { return 0; }
+awg() {
+    : >"$AMNEZIAWG_DIR/keygen-called"
+    printf '%s\n' "$TEST_KEY"
+}
+stat() {
+    if [[ "$2" == %u ]]; then printf '0\n'; else command stat "$@"; fi
+}
+AUTO_INSTALL=n
+case "$3" in
+    add) nonInteractiveAddClient laptop ;;
+    menu) loadParamsForManagementMenu ;;
+    action)
+        create_client() { : >"$AMNEZIAWG_DIR/creation-called"; }
+        if runLockedManagementOperation create_client; then exit 0; else exit 1; fi
+        ;;
+esac
+'''
+        for protocol, extra_params in (('inferred', b''), ('explicit', b"AWG_PROTOCOL_VERSION='1'\n")):
+            for field, line in (('s3', b'S3 = 15\n'), ('s4', b'  s\t4 = 0 # active zero\n')):
+                for entrypoint in ('add', 'menu', 'action'):
+                    with self.subTest(protocol=protocol, field=field, entrypoint=entrypoint):
+                        target = self.root / f'{protocol}-{field}-{entrypoint}'
+                        target.mkdir()
+                        params = target / 'params'
+                        config = target / 'awg0.conf'
+                        before_params = files['vpn/params'] + extra_params
+                        before_config = files['vpn/server.conf'].replace(b'S2 = 150\n', b'S2 = 150\n' + line)
+                        params.write_bytes(before_params)
+                        params.chmod(0o600)
+                        config.write_bytes(before_config)
+                        result = subprocess.run(
+                            ['bash', '-c', shell, 'awg1-conflict', str(SCRIPT), str(target), entrypoint, PUB],
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+                        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn('AmneziaWG 1.0', result.stderr)
+                        self.assertIn(field.upper(), result.stderr)
+                        self.assertNotIn(KEY, result.stderr)
+                        self.assertEqual(params.read_bytes(), before_params)
+                        self.assertEqual(config.read_bytes(), before_config)
+                        self.assertEqual(sorted(p.name for p in target.iterdir()), ['awg0.conf', 'params'])
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
