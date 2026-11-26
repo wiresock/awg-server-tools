@@ -1,0 +1,76 @@
+name: AI PR review
+'on':
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+        type: string
+
+permissions:
+  pull-requests: read
+
+jobs:
+  review:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      CONFIG__FALLBACK_MODELS: '[]'
+    steps:
+      - name: Fetch PR diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+        run: |
+          if [[ ! "$PR" =~ ^[1-9][0-9]*$ ]]; then
+            echo 'Enter a numeric pull request number.' >&2
+            exit 1
+          fi
+          endpoint="repos/$GITHUB_REPOSITORY/pulls/$PR"
+          before=$(gh api "$endpoint" --jq '{base: .base.sha, head: .head.sha}')
+          gh api -H 'Accept: application/vnd.github.diff' "$endpoint" > pr.diff
+          test -s pr.diff
+          after=$(gh api "$endpoint" --jq '{base: .base.sha, head: .head.sha}')
+          if [[ "$before" != "$after" ]]; then
+            echo 'PR changed while fetching its diff. Run again.' >&2
+            exit 1
+          fi
+          printf '%s\n' "$before" > revisions.json
+          sha256sum pr.diff > diff.sha256
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install PR-Agent
+        id: install
+        run: python -m pip install 'pr-agent==0.50.0'
+      - name: Review with OpenAI
+        env:
+          OPENAI__KEY: ${{ secrets.OPENAI_API_KEY }}
+          CONFIG__MODEL: ${{ vars.OPENAI_REVIEW_MODEL }}
+        run: |
+          : "${OPENAI__KEY:?Missing OpenAI key}" "${CONFIG__MODEL:?Missing OpenAI model}"
+          pr-agent --diff-file pr.diff --json-output openai.json review
+          test -s openai.json
+      - name: Review with Anthropic
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          ANTHROPIC__KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CONFIG__MODEL: ${{ vars.ANTHROPIC_REVIEW_MODEL }}
+        run: |
+          : "${ANTHROPIC__KEY:?Missing Anthropic key}" "${CONFIG__MODEL:?Missing Anthropic model}"
+          pr-agent --diff-file pr.diff --json-output anthropic.json review
+          test -s anthropic.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        with:
+          name: ai-pr-review
+          path: |
+            revisions.json
+            diff.sha256
+            openai.json
+            anthropic.json
+          retention-days: 7
