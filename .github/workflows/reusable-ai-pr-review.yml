@@ -1,0 +1,141 @@
+name: Reusable AI PR review
+'on':
+  workflow_call:
+    inputs:
+      pr:
+        description: PR number for manual workflow_dispatch runs
+        required: false
+        type: string
+        default: ''
+    secrets:
+      OPENAI_API_KEY:
+        required: false
+      ANTHROPIC_API_KEY:
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: ai-pr-review-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      (github.event_name == 'pull_request' &&
+       vars.AI_PR_REVIEW_ENABLED == 'true' &&
+       github.event.pull_request.base.ref == github.event.repository.default_branch &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.draft == false &&
+       github.event.pull_request.user.type == 'User' &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))
+      ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref_name == github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      CONFIG__FALLBACK_MODELS: '[]'
+      CONFIG__USE_REPO_SETTINGS_FILE: 'false'
+      CONFIG__ENABLE_AUTO_APPROVAL: 'false'
+      CONFIG__NUM_RETRIES: '0'
+      PR_REVIEWER__NUM_MAX_FINDINGS: '5'
+      PR_REVIEWER__ENABLE_REVIEW_LABELS_SECURITY: 'false'
+      PR_REVIEWER__ENABLE_REVIEW_LABELS_EFFORT: 'false'
+    steps:
+      - name: Validate PR and bound the review input
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [[ ! "$PR" =~ ^[1-9][0-9]*$ ]]; then
+            echo 'Enter a numeric pull request number.' >&2
+            exit 1
+          fi
+          endpoint="repos/$GITHUB_REPOSITORY/pulls/$PR"
+          before=$(gh api "$endpoint")
+          if ! jq -e --arg repo "$GITHUB_REPOSITORY" --arg base "$DEFAULT_BRANCH" '
+            .state == "open" and .draft == false and .base.ref == $base and
+            .head.repo.full_name == $repo and .user.type == "User" and
+            (.author_association | IN("OWNER", "MEMBER", "COLLABORATOR"))
+          ' <<<"$before" >/dev/null; then
+            echo 'Skipping: PR is not an eligible same-repository PR.'
+            exit 0
+          fi
+          revision=$(jq -ce '[.base.sha, .head.sha]' <<<"$before")
+          head=$(jq -er '.head.sha | select(test("^[a-f0-9]{40}$"))' <<<"$before")
+          if [[ -n "$EVENT_HEAD" && "$EVENT_HEAD" != "$head" ]]; then
+            echo 'Skipping: a newer commit is already available.'
+            exit 0
+          fi
+          gh api -H 'Accept: application/vnd.github.diff' "$endpoint" > pr.diff
+          bytes=$(wc -c < pr.diff)
+          if (( bytes == 0 || bytes > 200000 )); then
+            echo "Skipping: PR diff is empty or exceeds 200000 bytes ($bytes bytes)."
+            exit 0
+          fi
+          current=$(gh api "$endpoint" --jq '[.base.sha, .head.sha]' | jq -c .)
+          if [[ "$revision" != "$current" ]]; then
+            echo 'Skipping: the PR changed while fetching the diff.'
+            exit 0
+          fi
+          printf 'eligible=true\npr=%s\nrevision=%s\n' "$PR" "$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        if: steps.preflight.outputs.eligible == 'true'
+        with:
+          python-version: '3.12'
+      - name: Install PR-Agent
+        if: steps.preflight.outputs.eligible == 'true'
+        run: python -m pip install 'pr-agent[github]==0.50.0'
+      - name: Post OpenAI review and inline findings
+        if: github.event_name == 'pull_request' && steps.preflight.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENAI__KEY: ${{ secrets.OPENAI_API_KEY }}
+          CONFIG__MODEL: ${{ vars.OPENAI_REVIEW_MODEL }}
+          CONFIG__PUBLISH_OUTPUT_PROGRESS: 'false'
+          PR_REVIEWER__PUBLISH_REVIEW_FAILURE_COMMENT: 'false'
+          PR_REVIEWER__INLINE_KEY_ISSUES: 'true'
+          PR_REVIEWER__PERSISTENT_COMMENT: 'true'
+          PR_REVIEWER__FINAL_UPDATE_MESSAGE: 'false'
+          PR: ${{ steps.preflight.outputs.pr }}
+          REVISION: ${{ steps.preflight.outputs.revision }}
+        run: |
+          if [[ -z "$OPENAI__KEY" || -z "$CONFIG__MODEL" ]]; then
+            echo 'Set OPENAI_API_KEY and OPENAI_REVIEW_MODEL before enabling automatic reviews.' >&2
+            exit 1
+          fi
+          current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '
+            select(.state == "open" and .draft == false) | [.base.sha, .head.sha]
+          ' | jq -c .)
+          if [[ "$REVISION" != "$current" ]]; then
+            echo 'Skipping: the PR is no longer at the reviewed revision.'
+            exit 0
+          fi
+          export GITHUB__USER_TOKEN="$GH_TOKEN"
+          pr-agent --pr_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$PR" review
+      - name: Run manual Anthropic second opinion
+        if: github.event_name == 'workflow_dispatch' && steps.preflight.outputs.eligible == 'true'
+        env:
+          ANTHROPIC__KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CONFIG__MODEL: ${{ vars.ANTHROPIC_REVIEW_MODEL }}
+        run: |
+          : "${ANTHROPIC__KEY:?Missing Anthropic key}" "${CONFIG__MODEL:?Missing Anthropic model}"
+          pr-agent --diff-file pr.diff --output anthropic-review.md review
+          test -s anthropic-review.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'workflow_dispatch' && steps.preflight.outputs.eligible == 'true'
+        with:
+          name: anthropic-second-opinion
+          path: anthropic-review.md
+          if-no-files-found: error
+          retention-days: 7
